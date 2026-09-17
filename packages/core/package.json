@@ -1,0 +1,11 @@
+{
+  "name": "@walq/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SQLite-backed queue core.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

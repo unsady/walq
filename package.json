@@ -1,0 +1,22 @@
+{
+  "name": "walq-workspace",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --config oxlint.config.ts",
+    "format": "oxfmt --config oxfmt.config.ts --write .",
+    "format:check": "oxfmt --config oxfmt.config.ts --check .",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest --passWithNoTests"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "packageManager": "pnpm@12.3.4"
+}
