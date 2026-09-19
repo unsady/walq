@@ -59,6 +59,7 @@ class TestStorage implements Storage {
   readonly failures: FailInput[] = []
   readonly heartbeats: HeartbeatInput[] = []
   readonly jobs: ClaimedJob[] = []
+  heartbeatResult: LeaseMutationResult = 'applied'
 
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
     this.enqueues.push(input)
@@ -93,7 +94,7 @@ class TestStorage implements Storage {
 
   async heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult> {
     this.heartbeats.push(input)
-    return 'applied'
+    return this.heartbeatResult
   }
 }
 
@@ -202,19 +203,25 @@ describe('Queue', () => {
     await worker.close()
   })
 
-  it('heartbeats long-running jobs and waits for them during close', async () => {
+  it('passes job context and heartbeats during graceful close', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)
     const storage = new TestStorage()
     storage.jobs.push(claimedJob('1'))
     const gate = deferred()
+    let receivedContext: { signal: AbortSignal; jobId: string; attempt: number } | undefined
     const queue = new Queue('email', { storage })
-    const worker = queue.process(async () => gate.promise)
+    const worker = queue.process(async (_payload, context) => {
+      receivedContext = context
+      await gate.promise
+    })
 
     await vi.advanceTimersByTimeAsync(0)
+    expect(receivedContext).toMatchObject({ jobId: '1', attempt: 1 })
     const closing = worker.close()
     await vi.advanceTimersByTimeAsync(10_000)
     expect(storage.heartbeats).toHaveLength(1)
+    expect(receivedContext!.signal.aborted).toBe(false)
     let closed = false
     void closing.then(() => {
       closed = true
@@ -225,6 +232,30 @@ describe('Queue', () => {
     gate.resolve()
     await closing
     expect(storage.completions).toHaveLength(1)
+  })
+
+  it('aborts the job signal and ignores its result after lease loss', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    storage.heartbeatResult = 'lease_lost'
+    storage.jobs.push(claimedJob('1'))
+    const gate = deferred()
+    let signal: AbortSignal | undefined
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async (_payload, context) => {
+      signal = context.signal
+      await gate.promise
+    })
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(signal!.aborted).toBe(true)
+    gate.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.close()
+
+    expect(storage.completions).toEqual([])
+    expect(storage.failures).toEqual([])
   })
 
   it('allows processing again after close but rejects concurrent processors', async () => {

@@ -117,6 +117,7 @@ export class QueueWorker<Payload> implements WorkerHandle {
   }
 
   async #process(job: ClaimedJob): Promise<void> {
+    const controller = new AbortController()
     let stopped = false
     let leaseLost = false
     let heartbeatDelay: Delay | undefined
@@ -136,6 +137,7 @@ export class QueueWorker<Payload> implements WorkerHandle {
           })
           if (result === 'lease_lost') {
             leaseLost = true
+            controller.abort()
             return
           }
         } catch {
@@ -149,7 +151,11 @@ export class QueueWorker<Payload> implements WorkerHandle {
     let failure: unknown
     try {
       const payload = JSON.parse(job.payload) as Payload
-      await this.#processor(payload)
+      await this.#processor(payload, {
+        signal: controller.signal,
+        jobId: job.id,
+        attempt: job.attemptsMade,
+      })
       succeeded = true
     } catch (error) {
       failure = error
