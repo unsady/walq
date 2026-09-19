@@ -112,6 +112,9 @@ importers:
       '@types/node':
         specifier: ^22.20.3
         version: 22.20.3
+      '@walq/core':
+        specifier: workspace:*
+        version: link:packages/core
       oxfmt:
         specifier: ^0.68.0
         version: 0.68.0

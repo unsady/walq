@@ -1,0 +1,463 @@
+import { Buffer } from 'node:buffer'
+
+import type {
+  ClaimedJob,
+  ClaimInput,
+  EnqueueInput,
+  LeaseMutationResult,
+  Storage,
+} from '@walq/core/storage'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+export type StorageFactory = () => Storage | Promise<Storage>
+export type StorageCleanup = () => void | Promise<void>
+
+const queue = 'email'
+const otherQueue = 'other'
+const jobName = 'send'
+const payload = '{"to":"a"}'
+const now = 10
+const leaseDuration = 20
+const expiresAt = 30
+
+type LeaseMethod = 'complete' | 'fail' | 'heartbeat'
+
+function enqueueInput(overrides: Partial<EnqueueInput> = {}): EnqueueInput {
+  return {
+    queue,
+    name: jobName,
+    payload,
+    now,
+    availableAt: now,
+    maxAttempts: 2,
+    ...overrides,
+  }
+}
+
+function claimInput(overrides: Partial<ClaimInput> = {}): ClaimInput {
+  return { queue, now, limit: 10, leaseDuration, ...overrides }
+}
+
+function mutate(
+  storage: Storage,
+  method: LeaseMethod,
+  job: Pick<ClaimedJob, 'id' | 'leaseToken'>,
+  targetNow: number,
+): Promise<LeaseMutationResult> {
+  switch (method) {
+    case 'complete':
+      return storage.complete({ id: job.id, leaseToken: job.leaseToken, now: targetNow })
+    case 'fail':
+      return storage.fail({
+        id: job.id,
+        leaseToken: job.leaseToken,
+        now: targetNow,
+        error: 'boom',
+        retryAt: 11,
+      })
+    case 'heartbeat':
+      return storage.heartbeat({
+        id: job.id,
+        leaseToken: job.leaseToken,
+        now: targetNow,
+        leaseDuration,
+      })
+  }
+}
+
+export function runStorageConformance(
+  createStorage: StorageFactory,
+  cleanup: StorageCleanup,
+): void {
+  describe('storage conformance', () => {
+    let storage: Storage
+
+    beforeEach(async () => {
+      storage = await createStorage()
+    })
+
+    afterEach(async () => {
+      await cleanup()
+    })
+
+    it('enqueues independent jobs with default state', async () => {
+      const first = await storage.enqueue(enqueueInput())
+      const second = await storage.enqueue(enqueueInput())
+
+      expect(first.id).not.toBe(second.id)
+      expect(first).toMatchObject({
+        queue,
+        name: jobName,
+        payload,
+        status: 'pending',
+        attempts: 0,
+        createdAt: now,
+        availableAt: now,
+        maxAttempts: 2,
+        error: null,
+      })
+      expect(second).toMatchObject({ status: 'pending', attempts: 0, error: null })
+      expect(first.attempts).toBe(0)
+
+      const early = await storage.enqueue(enqueueInput({ availableAt: 0 }))
+      expect(early.availableAt).toBe(0)
+
+      const jobs = await storage.claim(claimInput())
+      expect(jobs).toHaveLength(3)
+    })
+
+    it('claims due jobs ordered by availableAt then id', async () => {
+      const first = await storage.enqueue(enqueueInput())
+      const second = await storage.enqueue(enqueueInput())
+      const future = await storage.enqueue(enqueueInput({ availableAt: 11 }))
+      const early = await storage.enqueue(enqueueInput({ availableAt: 0 }))
+
+      const jobs = await storage.claim(claimInput())
+      const orderedIds = [first.id, second.id].sort((left, right) =>
+        Buffer.compare(Buffer.from(left), Buffer.from(right)),
+      )
+      expect(jobs.map((job) => job.id)).toEqual([early.id, ...orderedIds])
+      expect(jobs.every((job) => job.attempts === 1 && job.expiresAt === expiresAt)).toBe(true)
+      expect(first.attempts).toBe(0)
+
+      expect(await storage.claim(claimInput())).toEqual([])
+      const dueFuture = await storage.claim(claimInput({ now: 11 }))
+      expect(dueFuture.map((job) => job.id)).toEqual([future.id])
+    })
+
+    it('isolates queues by exact name and bounds claims by limit', async () => {
+      await storage.enqueue(enqueueInput())
+      await storage.enqueue(enqueueInput({ queue: 'Email' }))
+      await storage.enqueue(enqueueInput({ queue: otherQueue }))
+
+      const jobs = await storage.claim(claimInput())
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0]).toMatchObject({ queue })
+
+      expect(await storage.claim(claimInput({ queue: 'email ' }))).toEqual([])
+      const exactCase = await storage.claim(claimInput({ queue: 'Email' }))
+      expect(exactCase).toHaveLength(1)
+      const other = await storage.claim(claimInput({ queue: otherQueue }))
+      expect(other).toHaveLength(1)
+
+      await storage.enqueue(enqueueInput({ queue: 'limited' }))
+      await storage.enqueue(enqueueInput({ queue: 'limited' }))
+      await storage.enqueue(enqueueInput({ queue: 'limited' }))
+      const firstBatch = await storage.claim(claimInput({ queue: 'limited', limit: 2 }))
+      expect(firstBatch).toHaveLength(2)
+      const secondBatch = await storage.claim(claimInput({ queue: 'limited', limit: 2 }))
+      expect(secondBatch).toHaveLength(1)
+      expect(await storage.claim(claimInput({ queue: 'limited' }))).toEqual([])
+    })
+
+    it('completes a retried lease exactly once and keeps terminal jobs unclaimable', async () => {
+      await storage.enqueue(enqueueInput())
+      const [first] = await storage.claim(claimInput())
+      expect(
+        await storage.fail({
+          id: first!.id,
+          leaseToken: first!.leaseToken,
+          now: 11,
+          error: 'previous',
+          retryAt: 11,
+        }),
+      ).toBe('applied')
+
+      const [second] = await storage.claim(claimInput({ now: 11 }))
+      expect(second).toMatchObject({ attempts: 2, error: 'previous' })
+      const credentials = { id: second!.id, leaseToken: second!.leaseToken, now: 12 }
+      expect(await storage.complete(credentials)).toBe('applied')
+      expect(await storage.complete(credentials)).toBe('lease_lost')
+      expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+    })
+
+    it('schedules retries, preserves errors, and enforces maxAttempts', async () => {
+      await storage.enqueue(enqueueInput({ maxAttempts: 2 }))
+      const [first] = await storage.claim(claimInput())
+
+      expect(
+        await storage.fail({
+          id: first!.id,
+          leaseToken: first!.leaseToken,
+          now: 11,
+          error: 'retry',
+          retryAt: 15,
+        }),
+      ).toBe('applied')
+      expect(await storage.claim(claimInput({ now: 14 }))).toEqual([])
+
+      const [second] = await storage.claim(claimInput({ now: 15 }))
+      expect(second).toMatchObject({
+        id: first!.id,
+        attempts: 2,
+        error: 'retry',
+        availableAt: 15,
+      })
+      expect(second!.leaseToken).not.toBe(first!.leaseToken)
+      expect(
+        await storage.fail({
+          id: second!.id,
+          leaseToken: second!.leaseToken,
+          now: 16,
+          error: 'final',
+          retryAt: 16,
+        }),
+      ).toBe('applied')
+      expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+    })
+
+    it('reclaims an expired retry with the preserved error and expiry-based availability', async () => {
+      await storage.enqueue(enqueueInput({ maxAttempts: 3 }))
+      const [first] = await storage.claim(claimInput())
+      expect(
+        await storage.fail({
+          id: first!.id,
+          leaseToken: first!.leaseToken,
+          now: 11,
+          error: 'retry',
+          retryAt: 15,
+        }),
+      ).toBe('applied')
+
+      const [second] = await storage.claim(claimInput({ now: 15 }))
+      expect(second).toMatchObject({ id: first!.id, attempts: 2, error: 'retry' })
+      const retryExpiresAt = 15 + leaseDuration
+
+      expect(await storage.claim(claimInput({ now: retryExpiresAt - 1 }))).toEqual([])
+      const [third] = await storage.claim(claimInput({ now: retryExpiresAt }))
+      expect(third).toMatchObject({
+        id: first!.id,
+        attempts: 3,
+        availableAt: retryExpiresAt,
+        error: 'retry',
+      })
+      expect(third!.leaseToken).not.toBe(second!.leaseToken)
+      expect(third!.expiresAt).toBe(retryExpiresAt + leaseDuration)
+    })
+
+    it('extends live leases with heartbeat but never shortens them', async () => {
+      await storage.enqueue(enqueueInput())
+      const [job] = await storage.claim(claimInput())
+
+      expect(
+        await storage.heartbeat({
+          id: job!.id,
+          leaseToken: job!.leaseToken,
+          now: 11,
+          leaseDuration: 1,
+        }),
+      ).toBe('applied')
+      // The proposed expiry 12 is shorter than the current 30: the lease must not shrink.
+      expect(await storage.claim(claimInput({ now: 20 }))).toEqual([])
+
+      expect(
+        await storage.heartbeat({
+          id: job!.id,
+          leaseToken: job!.leaseToken,
+          now: 20,
+          leaseDuration: 30,
+        }),
+      ).toBe('applied')
+      // Extended to 50, so nothing is claimable at 30 and the original token still completes.
+      expect(await storage.claim(claimInput({ now: 30 }))).toEqual([])
+      expect(await storage.complete({ id: job!.id, leaseToken: job!.leaseToken, now: 49 })).toBe(
+        'applied',
+      )
+      expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+
+      await storage.enqueue(enqueueInput({ queue: otherQueue, maxAttempts: 3 }))
+      const [other] = await storage.claim(claimInput({ queue: otherQueue }))
+      expect(
+        await storage.heartbeat({
+          id: other!.id,
+          leaseToken: other!.leaseToken,
+          now: 11,
+          leaseDuration: 1,
+        }),
+      ).toBe('applied')
+      expect(
+        await storage.heartbeat({
+          id: other!.id,
+          leaseToken: other!.leaseToken,
+          now: 12,
+          leaseDuration: 1,
+        }),
+      ).toBe('applied')
+      // Heartbeats preserve attempts: the next claim is only the second attempt.
+      const [reclaimed] = await storage.claim(claimInput({ queue: otherQueue, now: 30 }))
+      expect(reclaimed).toMatchObject({ id: other!.id, attempts: 2 })
+    })
+
+    it.each(['complete', 'fail', 'heartbeat'] as const)(
+      '%s rejects missing, superseded, and exactly-expired leases without touching the live lease',
+      async (method) => {
+        await storage.enqueue(enqueueInput({ maxAttempts: 3 }))
+        const [first] = await storage.claim(claimInput())
+
+        expect(
+          await mutate(storage, method, { id: 'missing', leaseToken: first!.leaseToken }, 11),
+        ).toBe('lease_lost')
+        expect(await mutate(storage, method, { id: first!.id, leaseToken: 'wrong' }, 11)).toBe(
+          'lease_lost',
+        )
+        expect(
+          await storage.heartbeat({
+            id: first!.id,
+            leaseToken: first!.leaseToken,
+            now: 11,
+            leaseDuration,
+          }),
+        ).toBe('applied')
+
+        expect(
+          await storage.fail({
+            id: first!.id,
+            leaseToken: first!.leaseToken,
+            now: 11,
+            error: 'retry',
+            retryAt: 11,
+          }),
+        ).toBe('applied')
+        const [second] = await storage.claim(claimInput({ now: 11 }))
+        expect(second!.leaseToken).not.toBe(first!.leaseToken)
+        expect(await mutate(storage, method, first!, 11)).toBe('lease_lost')
+        expect(
+          await storage.heartbeat({
+            id: second!.id,
+            leaseToken: second!.leaseToken,
+            now: 11,
+            leaseDuration,
+          }),
+        ).toBe('applied')
+
+        // The second lease expires at 31, so a mutation exactly at 31 is expired.
+        expect(await mutate(storage, method, second!, 31)).toBe('lease_lost')
+        const [third] = await storage.claim(claimInput({ now: 31 }))
+        expect(third!.id).toBe(second!.id)
+        expect(third!.leaseToken).not.toBe(second!.leaseToken)
+        expect(await mutate(storage, method, second!, 31)).toBe('lease_lost')
+      },
+    )
+
+    it.each(['complete', 'fail', 'heartbeat'] as const)(
+      '%s reports lease_lost on completed and failed jobs',
+      async (method) => {
+        await storage.enqueue(enqueueInput())
+        const [completed] = await storage.claim(claimInput())
+        expect(
+          await storage.complete({
+            id: completed!.id,
+            leaseToken: completed!.leaseToken,
+            now: 11,
+          }),
+        ).toBe('applied')
+
+        await storage.enqueue(enqueueInput({ queue: otherQueue }))
+        const [failed] = await storage.claim(claimInput({ queue: otherQueue }))
+        expect(
+          await storage.fail({
+            id: failed!.id,
+            leaseToken: failed!.leaseToken,
+            now: 11,
+            error: '',
+            retryAt: null,
+          }),
+        ).toBe('applied')
+
+        expect(await mutate(storage, method, completed!, 12)).toBe('lease_lost')
+        expect(await mutate(storage, method, failed!, 12)).toBe('lease_lost')
+        expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+        expect(await storage.claim(claimInput({ queue: otherQueue, now: 100 }))).toEqual([])
+      },
+    )
+
+    it('recovers all expired leases per queue even when the limit yields nothing', async () => {
+      for (let index = 0; index < 3; index += 1) {
+        await storage.enqueue(enqueueInput({ maxAttempts: 1 }))
+      }
+      await storage.enqueue(enqueueInput({ queue: otherQueue, maxAttempts: 1 }))
+
+      expect(await storage.claim(claimInput())).toHaveLength(3)
+      const [other] = await storage.claim(claimInput({ queue: otherQueue }))
+
+      expect(await storage.claim(claimInput({ now: 30, limit: 1 }))).toEqual([])
+      expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+
+      // Recovery of the email queue left the other queue's live lease alone.
+      expect(
+        await storage.heartbeat({
+          id: other!.id,
+          leaseToken: other!.leaseToken,
+          now: 29,
+          leaseDuration,
+        }),
+      ).toBe('applied')
+      expect(await storage.claim(claimInput({ queue: otherQueue, now: 50 }))).toEqual([])
+      expect(await storage.claim(claimInput({ queue: otherQueue, now: 100 }))).toEqual([])
+    })
+
+    it('rejects invalid inputs without mutation', async () => {
+      // Messages are not standardized; only rejection without mutation is asserted.
+      const base = enqueueInput()
+      for (const patch of [
+        { now: -1 },
+        { name: '' },
+        { maxAttempts: 0 },
+        { payload: 'undefined' },
+        { queue: '' },
+        { availableAt: Number.POSITIVE_INFINITY },
+        { now: 1.5 },
+      ]) {
+        await expect(storage.enqueue({ ...base, ...patch })).rejects.toThrow(/.+/)
+      }
+
+      const stored = await storage.enqueue(base)
+      const jobs = await storage.claim(claimInput())
+      expect(jobs).toHaveLength(1)
+      const [claimed] = jobs
+      expect(claimed!.id).toBe(stored.id)
+
+      for (const patch of [
+        { limit: 0 },
+        { leaseDuration: 0 },
+        { now: Number.MAX_SAFE_INTEGER },
+        { now: 1.5 },
+      ]) {
+        await expect(storage.claim({ ...claimInput({ now: 30 }), ...patch })).rejects.toThrow(/.+/)
+      }
+      await expect(
+        storage.fail({
+          id: claimed!.id,
+          leaseToken: claimed!.leaseToken,
+          now: 11,
+          error: 'bad',
+          retryAt: -1,
+        }),
+      ).rejects.toThrow(/.+/)
+      await expect(
+        storage.heartbeat({
+          id: claimed!.id,
+          leaseToken: claimed!.leaseToken,
+          now: 11,
+          leaseDuration: Number.MAX_SAFE_INTEGER,
+        }),
+      ).rejects.toThrow(/.+/)
+      await expect(
+        storage.complete({ id: claimed!.id, leaseToken: claimed!.leaseToken, now: Number.NaN }),
+      ).rejects.toThrow(/.+/)
+
+      expect(
+        await storage.heartbeat({
+          id: claimed!.id,
+          leaseToken: claimed!.leaseToken,
+          now: 11,
+          leaseDuration,
+        }),
+      ).toBe('applied')
+      expect(
+        await storage.complete({ id: claimed!.id, leaseToken: claimed!.leaseToken, now: 11 }),
+      ).toBe('applied')
+      expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
+    })
+  })
+}
