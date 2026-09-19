@@ -20,7 +20,7 @@ await storage.enqueue({
   payload: JSON.stringify({ to: 'user@example.com' }),
   now: Date.now(),
   availableAt: Date.now(),
-  maxAttempts: 3,
+  attempts: 3,
 })
 
 // Close only after all users of this connection have stopped.

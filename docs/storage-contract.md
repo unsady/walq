@@ -29,7 +29,7 @@ retention, cancellation, events, or a public Queue API.
 - Callers provide `now`. Each operation uses that value consistently. Distributed
   callers must use sufficiently synchronized clocks; storage does not establish
   a shared clock or substitute its own time.
-- `limit` and `maxAttempts` are positive safe integers.
+- `limit` and `attempts` are positive safe integers.
 - Queue and job names are nonempty strings. Queue names are matched exactly.
 - Payload is a serialized JSON value. Serialization belongs above storage.
 - IDs and lease tokens are opaque strings. Storage generates unique job IDs and
@@ -45,8 +45,8 @@ lease credentials. No method is provided for querying arbitrary jobs yet.
 `enqueue` creates and returns a job with:
 
 - a generated ID;
-- the supplied queue, name, payload, availableAt, and maxAttempts;
-- `createdAt = now`, `status = pending`, `attempts = 0`, and `error = null`.
+- the supplied queue, name, payload, availableAt, and attempts;
+- `createdAt = now`, `status = pending`, `attemptsMade = 0`, and `error = null`.
 
 An availableAt in the past is valid. Every call creates an independent job;
 matching names or payloads do not cause deduplication.
@@ -60,12 +60,12 @@ matching names or payloads do not cause deduplication.
    the expired lease's expiry. With no attempts remaining, mark them failed.
    Invalidate the old lease in either case. Preserve the last handler error.
 2. Select pending jobs with `availableAt <= now` and
-   `attempts < maxAttempts`, ordered by availableAt ascending, then ID ascending
+   `attemptsMade < attempts`, ordered by availableAt ascending, then ID ascending
    using binary string order as a stable tie-breaker.
-3. For each selected job, atomically change status to active, increment attempts
+3. For each selected job, atomically change status to active, increment attemptsMade
    by one, and issue a fresh token with `expiresAt = now + leaseDuration`.
 4. Return the claimed snapshots in selection order, containing the incremented
-   attempts and lease credentials.
+   attemptsMade and lease credentials.
 
 Return at most limit jobs; an empty result is valid. Concurrent callers may
 receive smaller batches. Strict global FIFO across workers is not guaranteed.
@@ -81,14 +81,14 @@ happen on a subsequent claim for that queue, not automatically as time passes.
 An attempt counts assignment, not handler invocation:
 
 ```text
-enqueue         attempts = 0
-claim           attempts = 1
-lease expires   attempts = 1
-claim again     attempts = 2
-fail + retry    attempts = 2
+enqueue         attemptsMade = 0
+claim           attemptsMade = 1
+lease expires   attemptsMade = 1
+claim again     attemptsMade = 2
+fail + retry    attemptsMade = 2
 ```
 
-A crash before the handler starts still consumes an attempt. `maxAttempts = 1`
+A crash before the handler starts still consumes an attempt. `attempts = 1`
 permits no retry, including recovery after a worker crash.
 
 ## Lease mutations
@@ -105,14 +105,14 @@ completion call. Otherwise apply the mutation and return `applied`.
 
 ### Complete
 
-Set status to completed and invalidate the lease. Preserve attempts and the last
+Set status to completed and invalidate the lease. Preserve attemptsMade and the last
 handler error, if any. Results returned by handlers are not stored in this version.
 
 ### Fail
 
-Record the supplied error without incrementing attempts:
+Record the supplied error without incrementing attemptsMade:
 
-- If retryAt is non-null and attempts is less than maxAttempts, set status to
+- If retryAt is non-null and attemptsMade is less than attempts, set status to
   pending and availableAt to retryAt.
 - Otherwise set status to failed. The attempt limit overrides a retry request.
 
@@ -124,7 +124,7 @@ necessarily that a retry was scheduled.
 ### Heartbeat
 
 Set expiry to `max(current expiresAt, now + leaseDuration)`. Keep the same token,
-status, attempts, and other job metadata. Heartbeat never shortens a lease and
+status, attemptsMade, and other job metadata. Heartbeat never shortens a lease and
 cannot revive an expired one.
 
 ## State transitions

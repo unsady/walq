@@ -15,9 +15,9 @@ export interface StoredJob {
   createdAt: number
   availableAt: number
   /** Number of successful claims, including claims whose workers crashed. */
-  attempts: number
+  attemptsMade: number
   /** Total allowed attempts, including the first one. */
-  maxAttempts: number
+  attempts: number
   /** Most recent handler error; lease expiration does not overwrite it. */
   error: string | null
 }
@@ -35,7 +35,7 @@ export interface EnqueueInput {
   payload: string
   now: number
   availableAt: number
-  maxAttempts: number
+  attempts: number
 }
 
 export interface ClaimInput {
@@ -57,7 +57,7 @@ export interface FailInput {
   leaseToken: LeaseToken
   now: number
   error: string
-  /** Null means terminal failure. Retry cannot exceed maxAttempts. */
+  /** Null means terminal failure. Retry cannot exceed attempts. */
   retryAt: number | null
 }
 

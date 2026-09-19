@@ -16,7 +16,7 @@ export type * from './types.js'
  * Behavioral guarantees and input requirements: docs/storage-contract.md.
  */
 export interface Storage {
-  /** Insert a pending job with a generated ID and zero attempts. */
+  /** Insert a pending job with a generated ID and zero attempts made. */
   enqueue(input: EnqueueInput): Promise<StoredJob>
 
   /** Recover expired leases and atomically claim up to limit eligible jobs. */

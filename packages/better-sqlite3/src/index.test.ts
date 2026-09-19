@@ -17,7 +17,7 @@ const input = {
   payload: '{"to":"a"}',
   now: 10,
   availableAt: 10,
-  maxAttempts: 2,
+  attempts: 2,
 }
 const claimInput = { queue: 'email', now: 10, limit: 10, leaseDuration: 20 }
 
@@ -119,8 +119,8 @@ describe('SQLite job columns', () => {
 
   it('recovers expired leases with expiry availability and per-queue failed counts', async () => {
     const { db, storage } = open()
-    for (let index = 0; index < 3; index += 1) await storage.enqueue({ ...input, maxAttempts: 1 })
-    await storage.enqueue({ ...input, queue: 'other', maxAttempts: 1 })
+    for (let index = 0; index < 3; index += 1) await storage.enqueue({ ...input, attempts: 1 })
+    await storage.enqueue({ ...input, queue: 'other', attempts: 1 })
     await storage.claim(claimInput)
     await storage.claim({ ...claimInput, queue: 'other' })
     expect(await storage.claim({ ...claimInput, now: 30, limit: 1 })).toEqual([])
@@ -143,9 +143,9 @@ describe('SQLite job columns', () => {
       storage.heartbeat({ ...job!, now: 11, leaseDuration: Number.MAX_SAFE_INTEGER }),
     ).rejects.toThrow('expiresAt')
     await expect(storage.complete({ ...job!, now: Number.NaN })).rejects.toThrow('now')
-    expect(db.prepare('SELECT status, attempts, expiresAt FROM walq_jobs').get()).toEqual({
+    expect(db.prepare('SELECT status, attemptsMade, expiresAt FROM walq_jobs').get()).toEqual({
       status: 'active',
-      attempts: 1,
+      attemptsMade: 1,
       expiresAt: 30,
     })
   })
@@ -193,9 +193,9 @@ describe('SQLite integration', () => {
     db.exec(`CREATE TRIGGER reject_claim BEFORE UPDATE ON walq_jobs
       WHEN NEW.status = 'active' BEGIN SELECT RAISE(ABORT, 'claim failed'); END`)
     await expect(storage.claim({ ...claimInput, now: 30 })).rejects.toThrow('claim failed')
-    expect(db.prepare('SELECT status, attempts, expiresAt FROM walq_jobs').get()).toEqual({
+    expect(db.prepare('SELECT status, attemptsMade, expiresAt FROM walq_jobs').get()).toEqual({
       status: 'active',
-      attempts: 1,
+      attemptsMade: 1,
       expiresAt: 30,
     })
   })
@@ -232,15 +232,15 @@ describe('SQLite integration', () => {
       const outcome = {
         mutation,
         ids: jobs.map((item) => item.id),
-        state: db.prepare('SELECT status, attempts FROM walq_jobs').get(),
+        state: db.prepare('SELECT status, attemptsMade FROM walq_jobs').get(),
       }
       expect([
         {
           mutation: 'applied',
           ids: [],
-          state: { status: method === 'complete' ? 'completed' : 'active', attempts: 1 },
+          state: { status: method === 'complete' ? 'completed' : 'active', attemptsMade: 1 },
         },
-        { mutation: 'lease_lost', ids: [job!.id], state: { status: 'active', attempts: 2 } },
+        { mutation: 'lease_lost', ids: [job!.id], state: { status: 'active', attemptsMade: 2 } },
       ]).toContainEqual(outcome)
       expect(jobs.every((item) => item.leaseToken !== job!.leaseToken)).toBe(true)
     },

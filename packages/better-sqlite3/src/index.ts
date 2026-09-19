@@ -17,7 +17,7 @@ import { initialize } from './schema.js'
 import { expiry, integer, lease, text } from './validation.js'
 
 const metadata =
-  'id, queue, name, payload, status, createdAt, availableAt, attempts, maxAttempts, error'
+  'id, queue, name, payload, status, createdAt, availableAt, attemptsMade, attempts, error'
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
@@ -44,8 +44,8 @@ class BetterSqlite3Storage implements Storage {
     this.insert = prepare(
       db,
       `
-        INSERT INTO walq_jobs (id, queue, name, payload, status, createdAt, availableAt, attempts, maxAttempts)
-        VALUES (@id, @queue, @name, @payload, 'pending', @now, @availableAt, 0, @maxAttempts)
+        INSERT INTO walq_jobs (id, queue, name, payload, status, createdAt, availableAt, attemptsMade, attempts)
+        VALUES (@id, @queue, @name, @payload, 'pending', @now, @availableAt, 0, @attempts)
         RETURNING ${metadata}
       `,
     )
@@ -53,8 +53,8 @@ class BetterSqlite3Storage implements Storage {
       db,
       `
         UPDATE walq_jobs SET
-          status = CASE WHEN attempts < maxAttempts THEN 'pending' ELSE 'failed' END,
-          availableAt = CASE WHEN attempts < maxAttempts THEN expiresAt ELSE availableAt END,
+          status = CASE WHEN attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
+          availableAt = CASE WHEN attemptsMade < attempts THEN expiresAt ELSE availableAt END,
           leaseToken = NULL, expiresAt = NULL
         WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
       `,
@@ -63,14 +63,14 @@ class BetterSqlite3Storage implements Storage {
       db,
       `
         SELECT id FROM walq_jobs
-        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now AND attempts < maxAttempts
+        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now AND attemptsMade < attempts
         ORDER BY availableAt, id COLLATE BINARY LIMIT @limit
       `,
     )
     this.acquire = prepare(
       db,
       `
-        UPDATE walq_jobs SET status = 'active', attempts = attempts + 1,
+        UPDATE walq_jobs SET status = 'active', attemptsMade = attemptsMade + 1,
           leaseToken = @leaseToken, expiresAt = @expiresAt
         WHERE id = @id
         RETURNING ${metadata}, leaseToken, expiresAt
@@ -87,8 +87,8 @@ class BetterSqlite3Storage implements Storage {
       db,
       `
         UPDATE walq_jobs SET
-          status = CASE WHEN @retryAt IS NOT NULL AND attempts < maxAttempts THEN 'pending' ELSE 'failed' END,
-          availableAt = CASE WHEN @retryAt IS NOT NULL AND attempts < maxAttempts THEN @retryAt ELSE availableAt END,
+          status = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
+          availableAt = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN @retryAt ELSE availableAt END,
           error = @error, leaseToken = NULL, expiresAt = NULL
         WHERE ${liveLease}
       `,
@@ -121,7 +121,7 @@ class BetterSqlite3Storage implements Storage {
     JSON.parse(input.payload)
     integer(input.now, 'now')
     integer(input.availableAt, 'availableAt')
-    integer(input.maxAttempts, 'maxAttempts', 1)
+    integer(input.attempts, 'attempts', 1)
     return this.insert.get({ ...input, id: randomUUID() }) as StoredJob
   }
 

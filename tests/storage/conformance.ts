@@ -29,7 +29,7 @@ function enqueueInput(overrides: Partial<EnqueueInput> = {}): EnqueueInput {
     payload,
     now,
     availableAt: now,
-    maxAttempts: 2,
+    attempts: 2,
     ...overrides,
   }
 }
@@ -90,14 +90,14 @@ export function runStorageConformance(
         name: jobName,
         payload,
         status: 'pending',
-        attempts: 0,
+        attemptsMade: 0,
         createdAt: now,
         availableAt: now,
-        maxAttempts: 2,
+        attempts: 2,
         error: null,
       })
-      expect(second).toMatchObject({ status: 'pending', attempts: 0, error: null })
-      expect(first.attempts).toBe(0)
+      expect(second).toMatchObject({ status: 'pending', attemptsMade: 0, error: null })
+      expect(first.attemptsMade).toBe(0)
 
       const early = await storage.enqueue(enqueueInput({ availableAt: 0 }))
       expect(early.availableAt).toBe(0)
@@ -117,8 +117,8 @@ export function runStorageConformance(
         Buffer.compare(Buffer.from(left), Buffer.from(right)),
       )
       expect(jobs.map((job) => job.id)).toEqual([early.id, ...orderedIds])
-      expect(jobs.every((job) => job.attempts === 1 && job.expiresAt === expiresAt)).toBe(true)
-      expect(first.attempts).toBe(0)
+      expect(jobs.every((job) => job.attemptsMade === 1 && job.expiresAt === expiresAt)).toBe(true)
+      expect(first.attemptsMade).toBe(0)
 
       expect(await storage.claim(claimInput())).toEqual([])
       const dueFuture = await storage.claim(claimInput({ now: 11 }))
@@ -164,15 +164,15 @@ export function runStorageConformance(
       ).toBe('applied')
 
       const [second] = await storage.claim(claimInput({ now: 11 }))
-      expect(second).toMatchObject({ attempts: 2, error: 'previous' })
+      expect(second).toMatchObject({ attemptsMade: 2, error: 'previous' })
       const credentials = { id: second!.id, leaseToken: second!.leaseToken, now: 12 }
       expect(await storage.complete(credentials)).toBe('applied')
       expect(await storage.complete(credentials)).toBe('lease_lost')
       expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
     })
 
-    it('schedules retries, preserves errors, and enforces maxAttempts', async () => {
-      await storage.enqueue(enqueueInput({ maxAttempts: 2 }))
+    it('schedules retries, preserves errors, and enforces attempts', async () => {
+      await storage.enqueue(enqueueInput({ attempts: 2 }))
       const [first] = await storage.claim(claimInput())
 
       expect(
@@ -189,7 +189,7 @@ export function runStorageConformance(
       const [second] = await storage.claim(claimInput({ now: 15 }))
       expect(second).toMatchObject({
         id: first!.id,
-        attempts: 2,
+        attemptsMade: 2,
         error: 'retry',
         availableAt: 15,
       })
@@ -207,7 +207,7 @@ export function runStorageConformance(
     })
 
     it('reclaims an expired retry with the preserved error and expiry-based availability', async () => {
-      await storage.enqueue(enqueueInput({ maxAttempts: 3 }))
+      await storage.enqueue(enqueueInput({ attempts: 3 }))
       const [first] = await storage.claim(claimInput())
       expect(
         await storage.fail({
@@ -220,14 +220,14 @@ export function runStorageConformance(
       ).toBe('applied')
 
       const [second] = await storage.claim(claimInput({ now: 15 }))
-      expect(second).toMatchObject({ id: first!.id, attempts: 2, error: 'retry' })
+      expect(second).toMatchObject({ id: first!.id, attemptsMade: 2, error: 'retry' })
       const retryExpiresAt = 15 + leaseDuration
 
       expect(await storage.claim(claimInput({ now: retryExpiresAt - 1 }))).toEqual([])
       const [third] = await storage.claim(claimInput({ now: retryExpiresAt }))
       expect(third).toMatchObject({
         id: first!.id,
-        attempts: 3,
+        attemptsMade: 3,
         availableAt: retryExpiresAt,
         error: 'retry',
       })
@@ -265,7 +265,7 @@ export function runStorageConformance(
       )
       expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
 
-      await storage.enqueue(enqueueInput({ queue: otherQueue, maxAttempts: 3 }))
+      await storage.enqueue(enqueueInput({ queue: otherQueue, attempts: 3 }))
       const [other] = await storage.claim(claimInput({ queue: otherQueue }))
       expect(
         await storage.heartbeat({
@@ -283,15 +283,15 @@ export function runStorageConformance(
           leaseDuration: 1,
         }),
       ).toBe('applied')
-      // Heartbeats preserve attempts: the next claim is only the second attempt.
+      // Heartbeats preserve attemptsMade: the next claim is only the second attempt.
       const [reclaimed] = await storage.claim(claimInput({ queue: otherQueue, now: 30 }))
-      expect(reclaimed).toMatchObject({ id: other!.id, attempts: 2 })
+      expect(reclaimed).toMatchObject({ id: other!.id, attemptsMade: 2 })
     })
 
     it.each(['complete', 'fail', 'heartbeat'] as const)(
       '%s rejects missing, superseded, and exactly-expired leases without touching the live lease',
       async (method) => {
-        await storage.enqueue(enqueueInput({ maxAttempts: 3 }))
+        await storage.enqueue(enqueueInput({ attempts: 3 }))
         const [first] = await storage.claim(claimInput())
 
         expect(
@@ -373,9 +373,9 @@ export function runStorageConformance(
 
     it('recovers all expired leases per queue even when the limit yields nothing', async () => {
       for (let index = 0; index < 3; index += 1) {
-        await storage.enqueue(enqueueInput({ maxAttempts: 1 }))
+        await storage.enqueue(enqueueInput({ attempts: 1 }))
       }
-      await storage.enqueue(enqueueInput({ queue: otherQueue, maxAttempts: 1 }))
+      await storage.enqueue(enqueueInput({ queue: otherQueue, attempts: 1 }))
 
       expect(await storage.claim(claimInput())).toHaveLength(3)
       const [other] = await storage.claim(claimInput({ queue: otherQueue }))
@@ -402,7 +402,7 @@ export function runStorageConformance(
       for (const patch of [
         { now: -1 },
         { name: '' },
-        { maxAttempts: 0 },
+        { attempts: 0 },
         { payload: 'undefined' },
         { queue: '' },
         { availableAt: Number.POSITIVE_INFINITY },
