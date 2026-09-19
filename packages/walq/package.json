@@ -1,0 +1,19 @@
+{
+  "name": "walq",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A small typed job queue.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@walq/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@walq/better-sqlite3": "workspace:*",
+    "better-sqlite3": "^13.0.3"
+  }
+}
