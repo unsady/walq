@@ -125,6 +125,21 @@ importers:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.3)(vite@8.3.0(@types/node@22.20.3))
 
+  packages/better-sqlite3:
+    dependencies:
+      '@walq/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
+
+  packages/core: {}
+
 packages:
 
   '@jridgewell/resolve-uri@3.1.2':
@@ -483,6 +498,9 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
+  '@types/better-sqlite3@9.6.0':
+    resolution: {integrity: sha512-ZEEwBSgMu7GYJOynoagg5X9JbxfL6dTJDsgViJIqh67jV44kyOr9RXfmFjLK5rzC4MWssP06t9hu/JwGDnUbCg==}
+
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
 
@@ -633,6 +651,10 @@ packages:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
 
+  better-sqlite3@13.0.3:
+    resolution: {integrity: sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==}
+    engines: {node: '>=22'}
+
   chai@6.2.2:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
     engines: {node: '>=18'}
@@ -746,6 +768,10 @@ packages:
     resolution: {integrity: sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
+
+  node-addon-api@8.9.2:
+    resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
+    engines: {node: ^18 || ^20 || >= 21}
 
   obug@2.2.1:
     resolution: {integrity: sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q==}
@@ -1093,6 +1119,10 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
+  '@types/better-sqlite3@9.6.0':
+    dependencies:
+      '@types/node': 22.20.3
+
   '@types/chai@5.2.3':
     dependencies:
       '@types/deep-eql': 4.0.2
@@ -1179,6 +1209,10 @@ snapshots:
 
   assertion-error@2.0.1: {}
 
+  better-sqlite3@13.0.3:
+    dependencies:
+      node-addon-api: 8.9.2
+
   chai@6.2.2: {}
 
   detect-libc@2.1.2: {}
@@ -1252,6 +1286,8 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.6.0
 
   nanoid@3.3.19: {}
+
+  node-addon-api@8.9.2: {}
 
   obug@2.2.1: {}
 

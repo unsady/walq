@@ -1,8 +1,9 @@
 # Storage contract
 
-`packages/core/src/storage.ts` defines the internal adapter boundary. It is not
-exported from the package entry point. All operations are asynchronous so local
-SQLite and remote adapters can implement the same contract.
+`packages/core/src/storage.ts` defines the adapter boundary. Its interface and
+related types are exported from `@walq/core/storage`, separately from the main
+package entry point. All operations are asynchronous so local SQLite and remote
+adapters can implement the same contract.
 
 ## Scope and guarantees
 

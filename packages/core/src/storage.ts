@@ -9,8 +9,10 @@ import type {
   StoredJob,
 } from './types.js'
 
+export type * from './types.js'
+
 /**
- * Internal, asynchronous adapter contract. Not part of the public package API.
+ * Asynchronous adapter contract exposed through @walq/core/storage.
  * Behavioral guarantees and input requirements: docs/storage-contract.md.
  */
 export interface Storage {
