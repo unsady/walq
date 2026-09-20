@@ -1,0 +1,56 @@
+# walq
+
+**A small, lease-based job queue for SQLite.**
+
+Walq provides reliable at-least-once processing without Redis or a separate queue service. It is written in TypeScript and designed to support different SQLite runtimes through storage adapters.
+
+> **Early stage:** Walq is under active development and is not ready for production use. The API and storage schema may change before the first release.
+
+## Features
+
+- atomic claims with expiring leases
+- retries, attempt limits, and heartbeats
+- stale-worker protection through unique lease tokens
+- multiple logical queues on one database
+- grouped claims across queues
+- shared, queue-aware polling
+
+## Example
+
+```ts
+import Database from 'better-sqlite3'
+import { betterSqlite3 } from '@walq/better-sqlite3'
+import { Queue } from 'walq'
+
+const db = new Database('queue.sqlite')
+db.pragma('journal_mode = WAL')
+
+const queue = new Queue<{ name: string }>('greetings', {
+  storage: betterSqlite3(db),
+})
+
+const worker = queue.process(async ({ name }) => {
+  console.log(`Hello, ${name}!`)
+})
+
+await queue.add({ name: 'Ada' })
+```
+
+When shutting down, call `await worker.close()` to wait for active handlers, then `db.close()`.
+
+Jobs move from `pending` to `active` when claimed. Completing a live lease makes the job `completed`; failures retry while attempts remain, and expired leases are recovered automatically. Delivery is at least once, so handlers should be idempotent when side effects cannot safely be repeated.
+
+Queues using the same `Storage` instance share one coordinator. Supported adapters can group claims from several queues into one database transaction.
+
+## Status
+
+The Queue runtime and `better-sqlite3` adapter are implemented. Additional SQLite adapters, terminal-job retention, and adapter configuration helpers are planned.
+
+- [Storage semantics](docs/storage-contract.md)
+- [`better-sqlite3` adapter](packages/better-sqlite3/README.md)
+- [Benchmarks](benchmarks/README.md)
+- [Roadmap](ROADMAP.md)
+
+## License
+
+Apache-2.0

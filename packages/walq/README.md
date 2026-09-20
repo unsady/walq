@@ -10,7 +10,7 @@ Typed queue API for walq storage adapters.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
 
-Queues created with the same `Storage` instance share one poller and one serialized storage path, polled round-robin. A separate `Storage` instance has its own poller.
+Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single transaction. A separate `Storage` instance has its own coordinator.
 
 The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain.
 
