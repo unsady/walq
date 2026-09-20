@@ -21,6 +21,8 @@ function outcome(overrides: Partial<CoordinatorRunOutcome> = {}): CoordinatorRun
     confirmed: 10,
     lostLeases: 0,
     duplicates: 0,
+    groupedCalls: 0,
+    groupedRequests: 0,
     claimSamples: [0.01],
     completeSamples: [0.005],
     ...overrides,
@@ -157,6 +159,20 @@ describe('summarizeRuns', () => {
     const broken = summarizeRuns(scenario, 10, collected([outcome()], ['run timed out']))
     expect(broken.notes).toEqual(['1 of 2 runs failed: run timed out'])
     expect(broken.ok).toBe(false)
+  })
+
+  it('reports grouped-call metrics when the adapter batches requests', () => {
+    const result = summarizeRuns(
+      scenario,
+      10,
+      collected([
+        outcome({ groupedCalls: 2, groupedRequests: 8, claims: 8 }),
+        outcome({ groupedCalls: 2, groupedRequests: 4, claims: 4 }),
+      ]),
+    )
+
+    expect(result.metrics['grouped calls']).toBe(2)
+    expect(result.metrics['requests/grouped call']).toBe(3)
   })
 
   it('survives a scenario without a single usable run', () => {

@@ -28,12 +28,20 @@ type WorkerState = {
   nextPollAt: number
 }
 
+/** One claim waiting for the current microtask batch to flush. */
+type PendingClaim = {
+  input: ClaimInput
+  resolve: (jobs: ClaimedJob[]) => void
+  reject: (error: unknown) => void
+}
+
 export class StorageCoordinator {
   readonly #storage: Storage
   readonly #workers = new Map<CoordinatedWorker, WorkerState>()
   #loop: Promise<void> | undefined
   #pollDelay: Delay | undefined
   #cursor = 0
+  #pendingClaims: PendingClaim[] | undefined
 
   constructor(storage: Storage) {
     this.#storage = storage
@@ -74,8 +82,55 @@ export class StorageCoordinator {
     return this.#storage.enqueue(input)
   }
 
+  /**
+   * Claim from one queue. When the adapter supports grouped claims, requests
+   * issued in the same microtask batch are coalesced into one call so a single
+   * poller sweep acquires one storage transaction instead of one per queue.
+   */
   claim(input: ClaimInput): Promise<ClaimedJob[]> {
-    return this.#storage.claim(input)
+    if (this.#storage.claimQueues === undefined) return this.#storage.claim(input)
+
+    return new Promise<ClaimedJob[]>((resolve, reject) => {
+      const pending = this.#pendingClaims
+      const request: PendingClaim = { input, resolve, reject }
+      if (pending === undefined) {
+        this.#pendingClaims = [request]
+        queueMicrotask(() => {
+          void this.#flushClaims()
+        })
+      } else {
+        pending.push(request)
+      }
+    })
+  }
+
+  /** Run one grouped storage call and map results back to request order. */
+  async #flushClaims(): Promise<void> {
+    const batch = this.#pendingClaims
+    this.#pendingClaims = undefined
+    if (batch === undefined || batch.length === 0) return
+
+    try {
+      const claimQueues = this.#storage.claimQueues
+      if (claimQueues === undefined) {
+        for (const request of batch) {
+          this.#storage.claim(request.input).then(request.resolve, request.reject)
+        }
+        return
+      }
+
+      const results = await claimQueues.call(this.#storage, {
+        requests: batch.map((request) => request.input),
+      })
+      if (results.length !== batch.length) {
+        throw new Error(
+          `Grouped claim returned ${results.length} results for ${batch.length} requests`,
+        )
+      }
+      for (const [index, request] of batch.entries()) request.resolve(results[index] ?? [])
+    } catch (error) {
+      for (const request of batch) request.reject(error)
+    }
   }
 
   complete(input: CompleteInput): Promise<LeaseMutationResult> {

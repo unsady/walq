@@ -58,6 +58,8 @@ type Tracker = {
   confirmed: number
   lostLeases: number
   duplicates: number
+  groupedCalls: number
+  groupedRequests: number
   claimSamples: number[]
   completeSamples: number[]
   completedIds: Set<string>
@@ -74,6 +76,8 @@ export type CoordinatorRunOutcome = {
   confirmed: number
   lostLeases: number
   duplicates: number
+  groupedCalls: number
+  groupedRequests: number
   claimSamples: number[]
   completeSamples: number[]
 }
@@ -96,7 +100,7 @@ export function coordinatorScenarios(grid: CoordinatorGrid): CoordinatorScenario
 
 /** Count storage traffic and let the caller observe an idle poller. */
 function instrument(inner: Storage, tracker: Tracker): Storage {
-  return {
+  const wrapped: Storage = {
     async enqueue(input) {
       tracker.onOperation()
 
@@ -151,6 +155,28 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
       return inner.heartbeat(input)
     },
   }
+
+  // Forward the optional grouped capability; without this the wrapper would
+  // silently downgrade the coordinator to per-queue claim() calls.
+  const claimQueues = inner.claimQueues
+  if (claimQueues !== undefined) {
+    wrapped.claimQueues = async (input) => {
+      tracker.onOperation()
+      const started = performance.now()
+      const results = await claimQueues.call(inner, input)
+      tracker.claimSamples.push(performance.now() - started)
+      tracker.claims += input.requests.length
+      tracker.groupedCalls += 1
+      tracker.groupedRequests += input.requests.length
+      let empty = 0
+      for (const jobs of results) if (jobs.length === 0) empty += 1
+      tracker.emptyClaims += empty
+      if (empty === input.requests.length && input.requests.length > 0) tracker.onIdle()
+      return results
+    }
+  }
+
+  return wrapped
 }
 
 async function enqueueJobs(storage: Storage, queue: string, count: number): Promise<void> {
@@ -174,6 +200,8 @@ async function executeRun(
       confirmed: 0,
       lostLeases: 0,
       duplicates: 0,
+      groupedCalls: 0,
+      groupedRequests: 0,
       claimSamples: [],
       completeSamples: [],
       completedIds: new Set(),
@@ -270,6 +298,8 @@ async function executeRun(
         confirmed: tracker.confirmed,
         lostLeases: tracker.lostLeases,
         duplicates: tracker.duplicates,
+        groupedCalls: tracker.groupedCalls,
+        groupedRequests: tracker.groupedRequests,
         claimSamples: tracker.claimSamples,
         completeSamples: tracker.completeSamples,
       }
@@ -289,6 +319,7 @@ function sampleOf(outcome: CoordinatorRunOutcome, jobs: number): RunSample {
     'elapsed (ms)': outcome.elapsed,
     claims: outcome.claims,
     'empty claims': outcome.emptyClaims,
+    'grouped calls': outcome.groupedCalls,
   }
   if (outcome.firstHandler !== undefined) sample['first handler (ms)'] = outcome.firstHandler
 
@@ -335,6 +366,12 @@ export function summarizeRuns(
     'claim p95 (µs)': summarizeMicros(claimSamples).p95,
     'complete p95 (µs)': summarizeMicros(completeSamples).p95,
     'elapsed (ms)': median(valid.map((outcome) => outcome.elapsed)),
+  }
+  const groupedCalls = sum((outcome) => outcome.groupedCalls)
+  if (groupedCalls > 0) {
+    const groupedRequests = sum((outcome) => outcome.groupedRequests)
+    metrics['grouped calls'] = runs === 0 ? 0 : groupedCalls / runs
+    metrics['requests/grouped call'] = groupedRequests / groupedCalls
   }
   if (firstHandlers.length > 0) metrics['first handler (ms)'] = median(firstHandlers)
 

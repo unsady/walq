@@ -70,8 +70,12 @@ Grids: quick uses 1 and 8 queues, full uses 1, 4, 16, and 64. Scenarios are orde
 `shared` and `isolated` runs of one configuration sit next to each other.
 
 Reported: `jobs/sec` (median), `spread (%)` (noise across repeats), `claims/job`,
-`empty claims` per run, claim/complete latencies, and `first handler (ms)` — the delay between the
-start of the run and the first handler invocation.
+`empty claims` per run, claim/complete latencies, `grouped calls` and `requests/grouped call`, and
+`first handler (ms)` — the delay between the start of the run and the first handler invocation.
+The storage wrapper forwards the optional `claimQueues` capability, so the shared coordinator
+coalesces same-sweep worker claims into one grouped call (roughly one per sweep) while isolated
+coordinators issue one request per call. `claim p50/p95` is the latency of one `claimQueues` call,
+so it covers a whole grouped batch in shared mode and a single request in isolated mode.
 
 A run ends when storage **confirms** the last job, not when its handler returns, so the measured
 window covers the final `complete()` round trip. Every confirmed job is also tracked by id, so
@@ -115,13 +119,17 @@ direct measurement of time spent waiting for a lock.
 
 ## claim-grouping — multi-queue transaction prototype
 
-Compares the current adapter path with a benchmark-only prototype; the public `Storage` API is
-unchanged:
+Compares the per-queue adapter path with a benchmark-only prototype that predates the production
+`Storage.claimQueues` capability:
 
 - `current` calls `claim()` separately for every queue, creating one immediate transaction per
   call.
 - `grouped` runs the same recover/select/acquire sequence for every queue inside one immediate
   transaction. It is one writer-lock acquisition, not one SQL statement.
+
+The production adapter now exposes the same grouping as the optional `claimQueues` method, and
+the coordinator benchmark exercises it end to end. This suite keeps its own prepared statements so
+the grouped and current paths can be compared under one grid; it does not import adapter code.
 
 The quick grid uses 1, 8, and 32 queues with limits 1 and 16. The full grid covers 1, 4, 8, and 32
 queues with limits 1, 4, and 16. Both compare `solo` against `competing`. A competing scenario
@@ -140,8 +148,8 @@ samples instead of being starved for the entire run; `jobs/sec` uses only summed
 
 Jobs are distributed evenly across queues. Every claimed id is checked for uniqueness and a run
 is invalid when work is incomplete, duplicated, or the competing writer reports an error. The
-prototype duplicates the adapter's prepared statements inside the benchmark on purpose, so no
-experimental method leaks into the storage contract.
+prototype keeps its own prepared statements so it can compare `current` and `grouped` in one grid
+without depending on adapter internals; production code lives behind `Storage.claimQueues`.
 
 ## retention — completed/failed history growth and cleanup
 
