@@ -5,12 +5,12 @@ export type LeaseToken = string
 
 export type JobStatus = 'pending' | 'active' | 'completed' | 'failed'
 
-/** All timestamps are Unix time in milliseconds. Payload is serialized JSON. */
+/** All timestamps are Unix time in milliseconds. Data is serialized JSON. */
 export interface StoredJob {
   id: JobId
   queue: QueueName
   name: string
-  payload: string
+  data: string
   status: JobStatus
   createdAt: number
   availableAt: number
@@ -32,7 +32,7 @@ export interface ClaimedJob extends StoredJob {
 export interface EnqueueInput {
   queue: QueueName
   name: string
-  payload: string
+  data: string
   now: number
   availableAt: number
   attempts: number

@@ -17,7 +17,7 @@ import { initialize } from './schema.js'
 import { expiry, integer, lease, text } from './validation.js'
 
 const metadata =
-  'id, queue, name, payload, status, createdAt, availableAt, attemptsMade, attempts, error'
+  'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
@@ -44,8 +44,8 @@ class BetterSqlite3Storage implements Storage {
     this.insert = prepare(
       db,
       `
-        INSERT INTO walq_jobs (id, queue, name, payload, status, createdAt, availableAt, attemptsMade, attempts)
-        VALUES (@id, @queue, @name, @payload, 'pending', @now, @availableAt, 0, @attempts)
+        INSERT INTO walq_jobs (id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts)
+        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, 0, @attempts)
         RETURNING ${metadata}
       `,
     )
@@ -117,8 +117,8 @@ class BetterSqlite3Storage implements Storage {
     this.assertAutocommit()
     text(input.queue, 'queue')
     text(input.name, 'name')
-    text(input.payload, 'payload')
-    JSON.parse(input.payload)
+    text(input.data, 'data')
+    JSON.parse(input.data)
     integer(input.now, 'now')
     integer(input.availableAt, 'availableAt')
     integer(input.attempts, 'attempts', 1)

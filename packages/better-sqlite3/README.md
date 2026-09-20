@@ -17,7 +17,7 @@ const storage = betterSqlite3(db)
 await storage.enqueue({
   queue: 'email',
   name: 'send',
-  payload: JSON.stringify({ to: 'user@example.com' }),
+  data: JSON.stringify({ to: 'user@example.com' }),
   now: Date.now(),
   availableAt: Date.now(),
   attempts: 3,
@@ -56,7 +56,7 @@ Methods return promises to implement `@walq/core/storage`, but database work is
 **synchronous and blocks the event loop**. No background worker, polling loop,
 retry policy, or automatic retention is provided.
 
-Inputs are validated before mutation. Payload must already be serialized JSON.
+Inputs are validated before mutation. Data must already be serialized JSON.
 The adapter uses the supplied `now`, never its own clock. Job IDs and fresh lease
 tokens are generated with `crypto.randomUUID()`.
 

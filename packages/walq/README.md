@@ -5,9 +5,9 @@ Typed queue API for walq storage adapters.
 ## API
 
 - `new Queue(name, { storage, attempts? })` creates a queue. `attempts` defaults to 1.
-- `queue.add(payload)` serializes and enqueues a payload.
+- `queue.add(data)` serializes the data and enqueues a job.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
-- Handlers receive `(payload, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
+- Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
 
 Queues created with the same `Storage` instance share one poller and one serialized storage path, polled round-robin. A separate `Storage` instance has its own poller.

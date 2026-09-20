@@ -16,13 +16,13 @@ import { Queue } from './index.js'
 
 const now = 1_000
 
-function claimedJob(id: string, options: { queue?: string; payload?: string } = {}): ClaimedJob {
+function claimedJob(id: string, options: { queue?: string; data?: string } = {}): ClaimedJob {
   const queue = options.queue ?? 'email'
   return {
     id,
     queue,
     name: queue,
-    payload: options.payload ?? '{}',
+    data: options.data ?? '{}',
     status: 'active',
     createdAt: now,
     availableAt: now,
@@ -52,7 +52,7 @@ class TestStorage implements Storage {
       id: `job-${this.enqueues.length}`,
       queue: input.queue,
       name: input.name,
-      payload: input.payload,
+      data: input.data,
       status: 'pending',
       createdAt: input.now,
       availableAt: input.availableAt,
@@ -107,7 +107,7 @@ afterEach(() => {
 })
 
 describe('Queue', () => {
-  it('adds serialized payloads with queue defaults', async () => {
+  it('adds serialized data with queue defaults', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const storage = new TestStorage()
     const queue = new Queue<{ userId: string }>('email', { storage })
@@ -117,7 +117,7 @@ describe('Queue', () => {
       {
         queue: 'email',
         name: 'email',
-        payload: '{"userId":"123"}',
+        data: '{"userId":"123"}',
         now,
         availableAt: now,
         attempts: 1,
@@ -125,7 +125,7 @@ describe('Queue', () => {
     ])
   })
 
-  it('uses queue-level attempts and rejects invalid configuration or payloads', async () => {
+  it('uses queue-level attempts and rejects invalid configuration or data', async () => {
     const storage = new TestStorage()
     const queue = new Queue<unknown>('email', { storage, attempts: 3 })
 
@@ -173,7 +173,7 @@ describe('Queue', () => {
   it('records handler errors for immediate retry', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const storage = new TestStorage()
-    storage.jobs.push(claimedJob('1', { payload: '{"userId":"123"}' }))
+    storage.jobs.push(claimedJob('1', { data: '{"userId":"123"}' }))
     const queue = new Queue<{ userId: string }>('email', { storage })
     const worker = queue.process(async () => {
       throw new Error('send failed')
@@ -214,7 +214,7 @@ describe('Queue', () => {
     const storage = new TestStorage()
     const handled: string[] = []
     const queue = new Queue('email', { storage })
-    const worker = queue.process(async (_payload, context) => {
+    const worker = queue.process(async (_data, context) => {
       handled.push(context.jobId)
     })
 
@@ -236,7 +236,7 @@ describe('Queue', () => {
     const gate = deferred()
     let receivedContext: { signal: AbortSignal; jobId: string; attempt: number } | undefined
     const queue = new Queue('email', { storage })
-    const worker = queue.process(async (_payload, context) => {
+    const worker = queue.process(async (_data, context) => {
       receivedContext = context
       await gate.promise
     })
@@ -269,7 +269,7 @@ describe('Queue', () => {
     const gate = deferred()
     let signal: AbortSignal | undefined
     const queue = new Queue('email', { storage })
-    const worker = queue.process(async (_payload, context) => {
+    const worker = queue.process(async (_data, context) => {
       signal = context.signal
       await gate.promise
     })
@@ -292,10 +292,10 @@ describe('Queue', () => {
     const handled: string[] = []
     const email = new Queue('email', { storage })
     const sms = new Queue('sms', { storage })
-    const emailWorker = email.process(async (_payload, context) => {
+    const emailWorker = email.process(async (_data, context) => {
       handled.push(context.jobId)
     })
-    const smsWorker = sms.process(async (_payload, context) => {
+    const smsWorker = sms.process(async (_data, context) => {
       handled.push(context.jobId)
     })
 
@@ -315,10 +315,10 @@ describe('Queue', () => {
     const handled: string[] = []
     const email = new Queue('email', { storage })
     const sms = new Queue('sms', { storage })
-    const emailWorker = email.process(async (_payload, context) => {
+    const emailWorker = email.process(async (_data, context) => {
       handled.push(context.jobId)
     })
-    const smsWorker = sms.process(async (_payload, context) => {
+    const smsWorker = sms.process(async (_data, context) => {
       handled.push(context.jobId)
     })
 

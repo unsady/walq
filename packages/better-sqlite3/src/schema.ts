@@ -26,7 +26,7 @@ export function initialize(db: Database.Database): void {
         id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
         queue TEXT NOT NULL COLLATE BINARY,
         name TEXT NOT NULL,
-        payload TEXT NOT NULL,
+        data TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed')),
         createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
         availableAt INTEGER NOT NULL CHECK (availableAt >= 0),

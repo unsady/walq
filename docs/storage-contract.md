@@ -31,7 +31,7 @@ retention, cancellation, events, or a public Queue API.
   a shared clock or substitute its own time.
 - `limit` and `attempts` are positive safe integers.
 - Queue and job names are nonempty strings. Queue names are matched exactly.
-- Payload is a serialized JSON value. Serialization belongs above storage.
+- Data is a serialized JSON value. Serialization belongs above storage.
 - IDs and lease tokens are opaque strings. Storage generates unique job IDs and
   a fresh token for every successful claim; a job's token must never be reused.
 - Adapters must reject invalid inputs without mutation. Error classes and
@@ -45,11 +45,11 @@ lease credentials. No method is provided for querying arbitrary jobs yet.
 `enqueue` creates and returns a job with:
 
 - a generated ID;
-- the supplied queue, name, payload, availableAt, and attempts;
+- the supplied queue, name, data, availableAt, and attempts;
 - `createdAt = now`, `status = pending`, `attemptsMade = 0`, and `error = null`.
 
 An availableAt in the past is valid. Every call creates an independent job;
-matching names or payloads do not cause deduplication.
+matching names or data do not cause deduplication.
 
 ## Claim and expiration
 

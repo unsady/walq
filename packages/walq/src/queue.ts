@@ -10,11 +10,11 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
-export class Queue<Payload> {
+export class Queue<Data> {
   readonly #name: string
   readonly #storage: Storage
   readonly #attempts: number
-  #worker: QueueWorker<Payload> | undefined
+  #worker: QueueWorker<Data> | undefined
 
   constructor(name: string, options: QueueOptions) {
     if (typeof name !== 'string' || name.length === 0) {
@@ -29,16 +29,16 @@ export class Queue<Payload> {
     this.#attempts = attempts
   }
 
-  async add(payload: Payload): Promise<AddedJob> {
-    const serialized = JSON.stringify(payload)
-    if (serialized === undefined) throw new TypeError('Payload must be JSON serializable')
+  async add(data: Data): Promise<AddedJob> {
+    const serialized = JSON.stringify(data)
+    if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
     const now = Date.now()
     const coordinator = getCoordinator(this.#storage)
     const job = await coordinator.enqueue({
       queue: this.#name,
       name: this.#name,
-      payload: serialized,
+      data: serialized,
       now,
       availableAt: now,
       attempts: this.#attempts,
@@ -47,7 +47,7 @@ export class Queue<Payload> {
     return { id: job.id }
   }
 
-  process(processor: Processor<Payload>, options: ProcessOptions = {}): WorkerHandle {
+  process(processor: Processor<Data>, options: ProcessOptions = {}): WorkerHandle {
     if (this.#worker) throw new Error(`Queue ${this.#name} is already being processed`)
     if (typeof processor !== 'function') throw new TypeError('processor must be a function')
 

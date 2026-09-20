@@ -22,7 +22,7 @@ export type ProcessContext = {
   readonly attempt: number
 }
 
-export type Processor<Payload> = (payload: Payload, context: ProcessContext) => void | Promise<void>
+export type Processor<Data> = (data: Data, context: ProcessContext) => void | Promise<void>
 
 export interface WorkerHandle {
   /** Stop claiming jobs and wait for active handlers to finish. */

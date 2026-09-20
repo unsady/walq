@@ -7,7 +7,7 @@ import { deferred } from './delay.js'
 const enqueueInput: EnqueueInput = {
   queue: 'email',
   name: 'email',
-  payload: '{}',
+  data: '{}',
   now: 1_000,
   availableAt: 1_000,
   attempts: 1,
@@ -24,7 +24,7 @@ const storedJob: StoredJob = {
   id: 'job-1',
   queue: 'email',
   name: 'email',
-  payload: '{}',
+  data: '{}',
   status: 'pending',
   createdAt: 1_000,
   availableAt: 1_000,

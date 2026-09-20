@@ -16,10 +16,10 @@ function errorMessage(error: unknown): string {
   }
 }
 
-export class QueueWorker<Payload> implements CoordinatedWorker {
+export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #coordinator: StorageCoordinator
   readonly #queue: string
-  readonly #processor: Processor<Payload>
+  readonly #processor: Processor<Data>
   readonly #concurrency: number
   readonly #active = new Set<Promise<void>>()
   readonly #done = deferred()
@@ -29,7 +29,7 @@ export class QueueWorker<Payload> implements CoordinatedWorker {
   constructor(
     coordinator: StorageCoordinator,
     queue: string,
-    processor: Processor<Payload>,
+    processor: Processor<Data>,
     concurrency: number,
   ) {
     this.#coordinator = coordinator
@@ -119,8 +119,8 @@ export class QueueWorker<Payload> implements CoordinatedWorker {
     let succeeded = false
     let failure: unknown
     try {
-      const payload = JSON.parse(job.payload) as Payload
-      await this.#processor(payload, {
+      const data = JSON.parse(job.data) as Data
+      await this.#processor(data, {
         signal: controller.signal,
         jobId: job.id,
         attempt: job.attemptsMade,

@@ -14,7 +14,7 @@ const directories: string[] = []
 const input = {
   queue: 'email',
   name: 'send',
-  payload: '{"to":"a"}',
+  data: '{"to":"a"}',
   now: 10,
   availableAt: 10,
   attempts: 2,

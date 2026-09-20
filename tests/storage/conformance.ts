@@ -15,7 +15,7 @@ export type StorageCleanup = () => void | Promise<void>
 const queue = 'email'
 const otherQueue = 'other'
 const jobName = 'send'
-const payload = '{"to":"a"}'
+const data = '{"to":"a"}'
 const now = 10
 const leaseDuration = 20
 const expiresAt = 30
@@ -26,7 +26,7 @@ function enqueueInput(overrides: Partial<EnqueueInput> = {}): EnqueueInput {
   return {
     queue,
     name: jobName,
-    payload,
+    data,
     now,
     availableAt: now,
     attempts: 2,
@@ -88,7 +88,7 @@ export function runStorageConformance(
       expect(first).toMatchObject({
         queue,
         name: jobName,
-        payload,
+        data,
         status: 'pending',
         attemptsMade: 0,
         createdAt: now,
@@ -403,7 +403,7 @@ export function runStorageConformance(
         { now: -1 },
         { name: '' },
         { attempts: 0 },
-        { payload: 'undefined' },
+        { data: 'undefined' },
         { queue: '' },
         { availableAt: Number.POSITIVE_INFINITY },
         { now: 1.5 },
