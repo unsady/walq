@@ -1,33 +1,11 @@
-import type { ClaimedJob, Storage } from '@walq/core/storage'
+import type { ClaimedJob } from '@walq/core/storage'
 
-import type { Processor, WorkerHandle } from './types.js'
+import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
+import { deferred, delay, type Delay } from './delay.js'
+import type { Processor } from './types.js'
 
-const pollInterval = 1_000
 const leaseDuration = 30_000
 const heartbeatInterval = 10_000
-
-interface Delay {
-  promise: Promise<void>
-  finish(): void
-}
-
-function delay(duration: number): Delay {
-  let settled = false
-  let resolvePromise: () => void
-  const promise = new Promise<void>((resolve) => {
-    resolvePromise = resolve
-  })
-  const timer = setTimeout(finish, duration)
-
-  function finish(): void {
-    if (settled) return
-    settled = true
-    clearTimeout(timer)
-    resolvePromise()
-  }
-
-  return { promise, finish }
-}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.stack ?? error.message
@@ -38,73 +16,63 @@ function errorMessage(error: unknown): string {
   }
 }
 
-export class QueueWorker<Payload> implements WorkerHandle {
-  readonly #storage: Storage
+export class QueueWorker<Payload> implements CoordinatedWorker {
+  readonly #coordinator: StorageCoordinator
   readonly #queue: string
   readonly #processor: Processor<Payload>
   readonly #concurrency: number
   readonly #active = new Set<Promise<void>>()
-  readonly #loop: Promise<void>
-  readonly #onClose: () => void
-  #pollDelay: Delay | undefined
+  readonly #done = deferred()
   #closing = false
+  #polling = false
 
   constructor(
-    storage: Storage,
+    coordinator: StorageCoordinator,
     queue: string,
     processor: Processor<Payload>,
     concurrency: number,
-    onClose: () => void,
   ) {
-    this.#storage = storage
+    this.#coordinator = coordinator
     this.#queue = queue
     this.#processor = processor
     this.#concurrency = concurrency
-    this.#onClose = onClose
-    this.#loop = this.#run()
   }
 
+  /** Claim jobs for free slots and start their handlers. Returns their count. */
+  async poll(): Promise<number> {
+    if (this.#closing || this.#polling) return 0
+
+    const limit = this.#concurrency - this.#active.size
+    if (limit <= 0) return 0
+
+    this.#polling = true
+    try {
+      const jobs = await this.#coordinator.claim({
+        queue: this.#queue,
+        limit,
+        now: Date.now(),
+        leaseDuration,
+      })
+      for (const job of jobs) this.#start(job)
+      return jobs.length
+    } finally {
+      this.#polling = false
+      this.#settle()
+    }
+  }
+
+  /** Stop claiming jobs and wait for active handlers without aborting them. */
   async close(): Promise<void> {
     if (!this.#closing) {
       this.#closing = true
-      this.#wakePoller()
+      this.#coordinator.unregister(this)
+      this.#settle()
     }
-    await this.#loop
+    await this.#done.promise
   }
 
-  wake(): void {
-    this.#wakePoller()
-  }
-
-  async #run(): Promise<void> {
-    try {
-      while (!this.#closing) {
-        const freeSlots = this.#concurrency - this.#active.size
-        if (freeSlots === 0) {
-          await this.#waitForPoll()
-          continue
-        }
-
-        let jobs: ClaimedJob[]
-        try {
-          jobs = await this.#storage.claim({
-            queue: this.#queue,
-            limit: freeSlots,
-            now: Date.now(),
-            leaseDuration,
-          })
-        } catch {
-          if (!this.#closing) await this.#waitForPoll()
-          continue
-        }
-
-        for (const job of jobs) this.#start(job)
-        if (jobs.length === 0 && !this.#closing) await this.#waitForPoll()
-      }
-    } finally {
-      await Promise.all(this.#active)
-      this.#onClose()
-    }
+  #settle(): void {
+    if (this.#closing && !this.#polling && this.#active.size === 0) this.#done.resolve()
   }
 
   #start(job: ClaimedJob): void {
@@ -112,7 +80,8 @@ export class QueueWorker<Payload> implements WorkerHandle {
     this.#active.add(task)
     void task.finally(() => {
       this.#active.delete(task)
-      this.#wakePoller()
+      this.#coordinator.wake()
+      this.#settle()
     })
   }
 
@@ -122,14 +91,14 @@ export class QueueWorker<Payload> implements WorkerHandle {
     let leaseLost = false
     let heartbeatDelay: Delay | undefined
 
-    const heartbeat = async () => {
+    const heartbeat = async (): Promise<void> => {
       while (!stopped) {
         heartbeatDelay = delay(heartbeatInterval)
         await heartbeatDelay.promise
         if (stopped) return
 
         try {
-          const result = await this.#storage.heartbeat({
+          const result = await this.#coordinator.heartbeat({
             id: job.id,
             leaseToken: job.leaseToken,
             now: Date.now(),
@@ -169,14 +138,14 @@ export class QueueWorker<Payload> implements WorkerHandle {
 
     try {
       if (succeeded) {
-        await this.#storage.complete({
+        await this.#coordinator.complete({
           id: job.id,
           leaseToken: job.leaseToken,
           now: Date.now(),
         })
       } else {
         const now = Date.now()
-        await this.#storage.fail({
+        await this.#coordinator.fail({
           id: job.id,
           leaseToken: job.leaseToken,
           now,
@@ -187,15 +156,5 @@ export class QueueWorker<Payload> implements WorkerHandle {
     } catch {
       // The lease will be recovered if the final mutation did not commit.
     }
-  }
-
-  async #waitForPoll(): Promise<void> {
-    this.#pollDelay = delay(pollInterval)
-    await this.#pollDelay.promise
-    this.#pollDelay = undefined
-  }
-
-  #wakePoller(): void {
-    this.#pollDelay?.finish()
   }
 }

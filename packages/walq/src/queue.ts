@@ -1,5 +1,6 @@
 import type { Storage } from '@walq/core/storage'
 
+import { getCoordinator } from './coordinator.js'
 import type { AddedJob, ProcessOptions, Processor, QueueOptions, WorkerHandle } from './types.js'
 import { QueueWorker } from './worker.js'
 
@@ -33,7 +34,8 @@ export class Queue<Payload> {
     if (serialized === undefined) throw new TypeError('Payload must be JSON serializable')
 
     const now = Date.now()
-    const job = await this.#storage.enqueue({
+    const coordinator = getCoordinator(this.#storage)
+    const job = await coordinator.enqueue({
       queue: this.#name,
       name: this.#name,
       payload: serialized,
@@ -41,7 +43,7 @@ export class Queue<Payload> {
       availableAt: now,
       attempts: this.#attempts,
     })
-    this.#worker?.wake()
+    coordinator.wake()
     return { id: job.id }
   }
 
@@ -52,10 +54,16 @@ export class Queue<Payload> {
     const concurrency = options.concurrency ?? 1
     positiveInteger(concurrency, 'concurrency')
 
-    const worker = new QueueWorker(this.#storage, this.#name, processor, concurrency, () => {
-      if (this.#worker === worker) this.#worker = undefined
-    })
+    const coordinator = getCoordinator(this.#storage)
+    const worker = new QueueWorker(coordinator, this.#name, processor, concurrency)
     this.#worker = worker
-    return worker
+    coordinator.register(worker)
+
+    return {
+      close: async (): Promise<void> => {
+        await worker.close()
+        if (this.#worker === worker) this.#worker = undefined
+      },
+    }
   }
 }

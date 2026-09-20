@@ -11,16 +11,18 @@ import type {
 } from '@walq/core/storage'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { deferred } from './delay.js'
 import { Queue } from './index.js'
 
 const now = 1_000
 
-function claimedJob(id: string, payload = '{}'): ClaimedJob {
+function claimedJob(id: string, options: { queue?: string; payload?: string } = {}): ClaimedJob {
+  const queue = options.queue ?? 'email'
   return {
     id,
-    queue: 'email',
-    name: 'email',
-    payload,
+    queue,
+    name: queue,
+    payload: options.payload ?? '{}',
     status: 'active',
     createdAt: now,
     availableAt: now,
@@ -32,38 +34,21 @@ function claimedJob(id: string, payload = '{}'): ClaimedJob {
   }
 }
 
-function deferred(): { promise: Promise<void>; resolve(): void } {
-  let resolvePromise: () => void
-  const promise = new Promise<void>((resolve) => {
-    resolvePromise = resolve
-  })
-  return { promise, resolve: () => resolvePromise() }
-}
-
-async function waitFor(assertion: () => void): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      assertion()
-      return
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 0))
-    }
-  }
-  assertion()
-}
-
 class TestStorage implements Storage {
   readonly enqueues: EnqueueInput[] = []
   readonly claims: ClaimInput[] = []
   readonly completions: CompleteInput[] = []
   readonly failures: FailInput[] = []
   readonly heartbeats: HeartbeatInput[] = []
-  readonly jobs: ClaimedJob[] = []
   heartbeatResult: LeaseMutationResult = 'applied'
+  jobs: ClaimedJob[] = []
+  maxConcurrentCalls = 0
+  #runningCalls = 0
 
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
+    this.#enter()
     this.enqueues.push(input)
-    return {
+    const job: StoredJob = {
       id: `job-${this.enqueues.length}`,
       queue: input.queue,
       name: input.name,
@@ -75,26 +60,44 @@ class TestStorage implements Storage {
       attempts: input.attempts,
       error: null,
     }
+    return this.#leave(job)
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {
+    this.#enter()
     this.claims.push(input)
-    return this.jobs.splice(0, input.limit)
+    const claimed = this.jobs.filter((job) => job.queue === input.queue).slice(0, input.limit)
+    this.jobs = this.jobs.filter((job) => !claimed.includes(job))
+    return this.#leave(claimed)
   }
 
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {
+    this.#enter()
     this.completions.push(input)
-    return 'applied'
+    return this.#leave('applied')
   }
 
   async fail(input: FailInput): Promise<LeaseMutationResult> {
+    this.#enter()
     this.failures.push(input)
-    return 'applied'
+    return this.#leave('applied')
   }
 
   async heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult> {
+    this.#enter()
     this.heartbeats.push(input)
-    return this.heartbeatResult
+    return this.#leave(this.heartbeatResult)
+  }
+
+  #enter(): void {
+    this.#runningCalls += 1
+    this.maxConcurrentCalls = Math.max(this.maxConcurrentCalls, this.#runningCalls)
+  }
+
+  async #leave<T>(value: T): Promise<T> {
+    await Promise.resolve()
+    this.#runningCalls -= 1
+    return value
   }
 }
 
@@ -153,14 +156,14 @@ describe('Queue', () => {
       { concurrency: 2 },
     )
 
-    await waitFor(() => expect(active).toBe(2))
+    await vi.waitFor(() => expect(active).toBe(2))
     expect(storage.claims[0]!.limit).toBe(2)
     gates[0]!.resolve()
-    await waitFor(() => expect(storage.completions).toHaveLength(1))
-    await waitFor(() => expect(storage.claims.some((claim) => claim.limit === 1)).toBe(true))
+    await vi.waitFor(() => expect(storage.completions).toHaveLength(1))
+    await vi.waitFor(() => expect(storage.claims.some((claim) => claim.limit === 1)).toBe(true))
     gates[1]!.resolve()
     gates[2]!.resolve()
-    await waitFor(() => expect(storage.completions).toHaveLength(3))
+    await vi.waitFor(() => expect(storage.completions).toHaveLength(3))
     await worker.close()
 
     expect(maximumActive).toBe(2)
@@ -170,13 +173,13 @@ describe('Queue', () => {
   it('records handler errors for immediate retry', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const storage = new TestStorage()
-    storage.jobs.push(claimedJob('1', '{"userId":"123"}'))
+    storage.jobs.push(claimedJob('1', { payload: '{"userId":"123"}' }))
     const queue = new Queue<{ userId: string }>('email', { storage })
     const worker = queue.process(async () => {
       throw new Error('send failed')
     })
 
-    await waitFor(() => expect(storage.failures).toHaveLength(1))
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(1))
     await worker.close()
     expect(storage.failures[0]).toMatchObject({
       id: '1',
@@ -197,9 +200,31 @@ describe('Queue', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(storage.claims).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(999)
+    await vi.advanceTimersByTimeAsync(0)
     expect(storage.claims).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(0)
     expect(storage.claims).toHaveLength(2)
+    await worker.close()
+  })
+
+  it('wakes the poller when a job is added', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    const handled: string[] = []
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async (_payload, context) => {
+      handled.push(context.jobId)
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.claims).toHaveLength(1)
+    storage.jobs.push(claimedJob('job-1'))
+    await queue.add({ userId: '123' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(handled).toEqual(['job-1'])
     await worker.close()
   })
 
@@ -220,6 +245,7 @@ describe('Queue', () => {
     expect(receivedContext).toMatchObject({ jobId: '1', attempt: 1 })
     const closing = worker.close()
     await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(0)
     expect(storage.heartbeats).toHaveLength(1)
     expect(receivedContext!.signal.aborted).toBe(false)
     let closed = false
@@ -248,7 +274,9 @@ describe('Queue', () => {
       await gate.promise
     })
 
+    await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(0)
     expect(signal!.aborted).toBe(true)
     gate.resolve()
     await vi.advanceTimersByTimeAsync(0)
@@ -256,6 +284,52 @@ describe('Queue', () => {
 
     expect(storage.completions).toEqual([])
     expect(storage.failures).toEqual([])
+  })
+
+  it('processes several queues through one coordinator', async () => {
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('email-1'), claimedJob('sms-1', { queue: 'sms' }))
+    const handled: string[] = []
+    const email = new Queue('email', { storage })
+    const sms = new Queue('sms', { storage })
+    const emailWorker = email.process(async (_payload, context) => {
+      handled.push(context.jobId)
+    })
+    const smsWorker = sms.process(async (_payload, context) => {
+      handled.push(context.jobId)
+    })
+
+    await vi.waitFor(() => expect(handled).toHaveLength(2))
+    await emailWorker.close()
+    await smsWorker.close()
+
+    expect(handled.sort()).toEqual(['email-1', 'sms-1'])
+    expect(new Set(storage.claims.map((claim) => claim.queue))).toEqual(new Set(['email', 'sms']))
+    expect(storage.maxConcurrentCalls).toBe(1)
+  })
+
+  it('keeps other queues polling after one worker closes', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    const handled: string[] = []
+    const email = new Queue('email', { storage })
+    const sms = new Queue('sms', { storage })
+    const emailWorker = email.process(async (_payload, context) => {
+      handled.push(context.jobId)
+    })
+    const smsWorker = sms.process(async (_payload, context) => {
+      handled.push(context.jobId)
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    await emailWorker.close()
+    storage.jobs.push(claimedJob('sms-1', { queue: 'sms' }))
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(handled).toEqual(['sms-1'])
+    await smsWorker.close()
   })
 
   it('allows processing again after close but rejects concurrent processors', async () => {
