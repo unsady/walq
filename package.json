@@ -14,6 +14,8 @@
     "bench:full": "BENCH_GRID=full vitest bench --run --reporter=verbose",
     "bench:queue": "vitest bench --run --reporter=verbose benchmarks/coordinator.bench.ts",
     "bench:contention": "vitest bench --run --reporter=verbose benchmarks/contention.bench.ts",
+    "bench:claim-grouping": "vitest bench --run --reporter=verbose benchmarks/claim-grouping.bench.ts",
+    "bench:retention": "vitest bench --run --reporter=verbose benchmarks/retention.bench.ts",
     "bench:help": "vitest bench --help"
   },
   "devDependencies": {
