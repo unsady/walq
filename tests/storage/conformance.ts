@@ -461,3 +461,132 @@ export function runStorageConformance(
     })
   })
 }
+
+/**
+ * Conformance for the optional grouped claim capability. Adapters that expose
+ * claimQueues call this alongside runStorageConformance; adapters that do not
+ * are expected to fall back to claim() through the coordinator instead.
+ */
+export function runGroupedClaimConformance(
+  createStorage: StorageFactory,
+  cleanup: StorageCleanup,
+): void {
+  describe('grouped claim conformance', () => {
+    let storage: Storage
+
+    beforeEach(async () => {
+      storage = await createStorage()
+    })
+
+    afterEach(async () => {
+      await cleanup()
+    })
+
+    function claimQueues(requests: ClaimInput[]): Promise<ClaimedJob[][]> {
+      const grouped = storage.claimQueues
+      if (grouped === undefined) throw new Error('claimQueues is not implemented')
+      return grouped.call(storage, { requests })
+    }
+
+    it('maps every result to its request and bounds each request by its own limit', async () => {
+      await storage.enqueue(enqueueInput({ queue: 'a' }))
+      await storage.enqueue(enqueueInput({ queue: 'a' }))
+      await storage.enqueue(enqueueInput({ queue: 'b' }))
+
+      const results = await claimQueues([
+        claimInput({ queue: 'b', limit: 5 }),
+        claimInput({ queue: 'a', limit: 1 }),
+        claimInput({ queue: 'a', limit: 5 }),
+      ])
+
+      expect(results).toHaveLength(3)
+      expect(results[0]!.map((job) => job.queue)).toEqual(['b'])
+      expect(results[1]).toHaveLength(1)
+      expect(results[2]).toHaveLength(1)
+      expect([...results[1]!, ...results[2]!].every((job) => job.queue === 'a')).toBe(true)
+      const ids = results.flat().map((job) => job.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+
+    it('keeps repeated requests for one queue sequential without duplicate claims', async () => {
+      await storage.enqueue(enqueueInput())
+      await storage.enqueue(enqueueInput())
+      await storage.enqueue(enqueueInput())
+
+      const results = await claimQueues([
+        claimInput({ limit: 2 }),
+        claimInput({ limit: 2 }),
+        claimInput({ limit: 2 }),
+      ])
+
+      expect(results.map((jobs) => jobs.length)).toEqual([2, 1, 0])
+      const ids = results.flat().map((job) => job.id)
+      expect(new Set(ids).size).toBe(3)
+      expect(results.flat().every((job) => job.attemptsMade === 1)).toBe(true)
+    })
+
+    it('issues a distinct lease token to every job in one batch', async () => {
+      for (let index = 0; index < 4; index += 1) await storage.enqueue(enqueueInput())
+
+      const [jobs] = await claimQueues([claimInput({ limit: 4 })])
+      const tokens = jobs!.map((job) => job.leaseToken)
+
+      expect(jobs).toHaveLength(4)
+      expect(tokens.every((token) => token.length > 0)).toBe(true)
+      expect(new Set(tokens).size).toBe(4)
+    })
+
+    it('returns one empty result for a queue with no eligible work', async () => {
+      await storage.enqueue(enqueueInput())
+
+      const results = await claimQueues([
+        claimInput({ queue: 'missing' }),
+        claimInput({ queue: otherQueue }),
+      ])
+
+      expect(results).toEqual([[], []])
+    })
+
+    it('accepts an empty batch without touching storage', async () => {
+      await storage.enqueue(enqueueInput())
+
+      expect(await claimQueues([])).toEqual([])
+      expect(await storage.claim(claimInput())).toHaveLength(1)
+    })
+
+    it('recovers expired leases per requested queue and leaves other queues alone', async () => {
+      await storage.enqueue(enqueueInput({ queue, attempts: 1 }))
+      await storage.enqueue(enqueueInput({ queue: otherQueue, attempts: 1 }))
+      expect(await storage.claim(claimInput())).toHaveLength(1)
+      const [other] = await storage.claim(claimInput({ queue: otherQueue }))
+
+      const results = await claimQueues([claimInput({ now: expiresAt, limit: 1 })])
+      expect(results).toEqual([[]])
+
+      // Recovery of the email queue marked its exhausted job failed but must not
+      // have recovered the other queue's still-live lease.
+      expect(await storage.claim(claimInput({ queue, now: 100 }))).toEqual([])
+      expect(
+        await storage.heartbeat({
+          id: other!.id,
+          leaseToken: other!.leaseToken,
+          now: expiresAt - 1,
+          leaseDuration,
+        }),
+      ).toBe('applied')
+    })
+
+    it('rejects an invalid request before mutating any requested queue', async () => {
+      await storage.enqueue(enqueueInput({ queue: 'a' }))
+      await storage.enqueue(enqueueInput({ queue: 'b' }))
+
+      await expect(
+        claimQueues([claimInput({ queue: 'a' }), claimInput({ queue: 'b', limit: 0 })]),
+      ).rejects.toThrow(/.+/)
+
+      // Nothing was claimed, so both queues still hold their jobs.
+      expect(await storage.claim(claimInput({ queue: 'a' }))).toHaveLength(1)
+      expect(await storage.claim(claimInput({ queue: 'b' }))).toHaveLength(1)
+    })
+  })
+}

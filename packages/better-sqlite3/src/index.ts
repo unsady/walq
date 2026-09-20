@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import type {
   ClaimedJob,
   ClaimInput,
+  ClaimQueuesInput,
+  ClaimQueuesResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -20,6 +22,9 @@ const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 
+/** One validated queue request together with its computed lease expiry. */
+type ClaimStep = { input: ClaimInput; expiresAt: number }
+
 function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)
 }
@@ -33,9 +38,7 @@ class BetterSqlite3Storage implements Storage {
   private readonly completeStatement: Database.Statement
   private readonly failStatement: Database.Statement
   private readonly heartbeatStatement: Database.Statement
-  private readonly claimTransaction: Database.Transaction<
-    (input: ClaimInput, expiresAt: number) => ClaimedJob[]
-  >
+  private readonly claimTransaction: Database.Transaction<(steps: ClaimStep[]) => ClaimedJob[][]>
 
   constructor(db: Database.Database) {
     this.db = db
@@ -99,13 +102,28 @@ class BetterSqlite3Storage implements Storage {
         UPDATE walq_jobs SET expiresAt = max(expiresAt, @expiresAt) WHERE ${liveLease}
       `,
     )
-    this.claimTransaction = db.transaction((input: ClaimInput, expiresAt: number): ClaimedJob[] => {
-      this.recover.run(input)
-      const jobs = this.select.all(input) as { id: string }[]
-      return jobs.map(
-        ({ id }) => this.acquire.get({ id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
-      )
-    })
+    this.claimTransaction = db.transaction((steps: ClaimStep[]): ClaimedJob[][] =>
+      steps.map(({ input, expiresAt }) => this.claimStep(input, expiresAt)),
+    )
+  }
+
+  /** Validate one request and compute its expiry before any transaction opens. */
+  private prepareClaim(input: ClaimInput): ClaimStep {
+    text(input.queue, 'queue')
+    integer(input.limit, 'limit', 1)
+    return { input, expiresAt: expiry(input.now, input.leaseDuration) }
+  }
+
+  /**
+   * Recover, select, and acquire for one queue. Callers run this inside the
+   * shared immediate transaction so the sequence stays atomic per request.
+   */
+  private claimStep(input: ClaimInput, expiresAt: number): ClaimedJob[] {
+    this.recover.run(input)
+    const jobs = this.select.all(input) as { id: string }[]
+    return jobs.map(
+      ({ id }) => this.acquire.get({ id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
+    )
   }
 
   private assertAutocommit(): void {
@@ -127,10 +145,18 @@ class BetterSqlite3Storage implements Storage {
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {
     this.assertAutocommit()
-    text(input.queue, 'queue')
-    integer(input.limit, 'limit', 1)
-    const expiresAt = expiry(input.now, input.leaseDuration)
-    return this.claimTransaction.immediate(input, expiresAt)
+    const [jobs = []] = this.claimTransaction.immediate([this.prepareClaim(input)])
+    return jobs
+  }
+
+  async claimQueues(input: ClaimQueuesInput): Promise<ClaimQueuesResult> {
+    this.assertAutocommit()
+    if (!Array.isArray(input.requests)) throw new TypeError('requests must be an array')
+    // Validate the whole batch before opening a transaction so a bad request
+    // cannot mutate a queue that a later request would have touched.
+    const steps = input.requests.map((request) => this.prepareClaim(request))
+    if (steps.length === 0) return []
+    return this.claimTransaction.immediate(steps)
   }
 
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {

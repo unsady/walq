@@ -1,6 +1,8 @@
 import type {
   ClaimedJob,
   ClaimInput,
+  ClaimQueuesInput,
+  ClaimQueuesResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -21,6 +23,15 @@ export interface Storage {
 
   /** Recover expired leases and atomically claim up to limit eligible jobs. */
   claim(input: ClaimInput): Promise<ClaimedJob[]>
+
+  /**
+   * Optional grouped variant of claim: apply every request in order and return
+   * one result per request. Each request keeps the guarantees of claim. An
+   * adapter may share one transaction across the whole batch; callers must not
+   * assume atomicity across requests beyond what the adapter documents.
+   * Coordinators fall back to claim() when this method is absent.
+   */
+  claimQueues?(input: ClaimQueuesInput): Promise<ClaimQueuesResult>
 
   /** Complete a job only while its token matches and its lease is unexpired. */
   complete(input: CompleteInput): Promise<LeaseMutationResult>

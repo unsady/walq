@@ -20,7 +20,8 @@ adapters can implement the same contract.
   not provided.
 
 The contract does not include connections, migrations, polling, retry policies,
-retention, cancellation, events, or a public Queue API.
+retention, cancellation, events, or a public Queue API. `claimQueues` is an
+optional adapter capability; see [Grouped claim](#grouped-claim).
 
 ## Values and inputs
 
@@ -90,6 +91,27 @@ fail + retry    attemptsMade = 2
 
 A crash before the handler starts still consumes an attempt. `attempts = 1`
 permits no retry, including recovery after a worker crash.
+
+## Grouped claim
+
+`claimQueues` is an optional adapter capability for callers that need to claim
+from several queues at once. It accepts `{ requests: ClaimInput[] }` and returns
+`ClaimedJob[][]`, where `results[k]` belongs to `requests[k]`.
+
+- Each request has exactly the semantics of a standalone `claim`, including
+  recovery, ordering, limit, and fresh lease tokens.
+- Requests are applied in array order. Two requests for the same queue observe
+  each other, so the second sees only work the first left behind and no job is
+  claimed twice.
+- An empty `requests` array is valid and returns an empty result without
+  touching storage.
+- An adapter may run the whole batch in one transaction. When it does, an error
+  in any request rolls back the whole batch; when it does not, requests may
+  commit independently. Callers must not depend on cross-request atomicity.
+- Invalid requests are rejected without mutation. Adapters should validate the
+  whole batch before opening a transaction.
+- Absence of this method is not an error: a caller that needs grouped claims
+  must fall back to one `claim` call per request.
 
 ## Lease mutations
 

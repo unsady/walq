@@ -46,6 +46,18 @@ export interface ClaimInput {
   leaseDuration: number
 }
 
+/**
+ * A grouped claim over several queues. Requests are applied in order and the
+ * result at each index corresponds to the request at the same index.
+ */
+export interface ClaimQueuesInput {
+  /** Each request keeps the exact semantics of a standalone claim. */
+  requests: ClaimInput[]
+}
+
+/** Result of a grouped claim; `results[k]` belongs to `requests[k]`. */
+export type ClaimQueuesResult = ClaimedJob[][]
+
 export interface CompleteInput {
   id: JobId
   leaseToken: LeaseToken

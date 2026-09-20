@@ -65,6 +65,14 @@ all expired active jobs in the requested queue, regardless of the batch limit.
 Completion, failure, and heartbeat use atomic conditional updates. Database errors
 (including lock timeouts) reject promises, rather than returning `lease_lost`.
 
+The optional `claimQueues` method applies every request in order inside a single
+immediate transaction, so one coordinator sweep acquires one writer lock instead
+of one per queue. Each request keeps the per-queue recovery, ordering, limit, and
+lease-token semantics of `claim`. The whole batch is validated before the
+transaction opens, and an error in any request rolls back every request. The
+`StorageCoordinator` uses this method when present and otherwise falls back to
+one `claim` call per request.
+
 See [the storage contract](../../docs/storage-contract.md) for delivery semantics,
 attempt accounting, expiry boundaries, and lease protection. Tokens protect queue
 state, not handler side effects.

@@ -200,6 +200,34 @@ describe('SQLite integration', () => {
     })
   })
 
+  it('rolls back every grouped request when a later queue fails', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, queue: 'a' })
+    await storage.enqueue({ ...input, queue: 'b' })
+    await storage.claim({ ...claimInput, queue: 'a' })
+    await storage.claim({ ...claimInput, queue: 'b' })
+    db.exec(`CREATE TRIGGER reject_claim BEFORE UPDATE ON walq_jobs
+      WHEN NEW.status = 'active' AND NEW.queue = 'b'
+      BEGIN SELECT RAISE(ABORT, 'grouped claim failed'); END`)
+
+    await expect(
+      storage.claimQueues!({
+        requests: [
+          { ...claimInput, queue: 'a', now: 30 },
+          { ...claimInput, queue: 'b', now: 30 },
+        ],
+      }),
+    ).rejects.toThrow('grouped claim failed')
+
+    // The successful first request must roll back with the failed second one.
+    expect(
+      db.prepare('SELECT queue, status, attemptsMade FROM walq_jobs ORDER BY queue').all(),
+    ).toEqual([
+      { queue: 'a', status: 'active', attemptsMade: 1 },
+      { queue: 'b', status: 'active', attemptsMade: 1 },
+    ])
+  })
+
   it('rejects database lock errors rather than returning lease_lost', async () => {
     const path = filename()
     const first = open(path)
