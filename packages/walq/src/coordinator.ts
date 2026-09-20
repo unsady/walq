@@ -23,33 +23,51 @@ export type CoordinatedWorker = {
  * Single poller and single storage path for every worker of one Storage.
  * Workers register on process() and unregister on close().
  */
+type WorkerState = {
+  queue: string
+  nextPollAt: number
+}
+
 export class StorageCoordinator {
   readonly #storage: Storage
-  readonly #workers = new Set<CoordinatedWorker>()
+  readonly #workers = new Map<CoordinatedWorker, WorkerState>()
   #operationTail: Promise<void> = Promise.resolve()
   #loop: Promise<void> | undefined
   #pollDelay: Delay | undefined
-  #woken = false
   #cursor = 0
 
   constructor(storage: Storage) {
     this.#storage = storage
   }
 
-  register(worker: CoordinatedWorker): void {
-    this.#workers.add(worker)
+  register(queue: string, worker: CoordinatedWorker): void {
+    this.#workers.set(worker, { queue, nextPollAt: 0 })
     if (this.#loop === undefined) this.#loop = this.#run()
-    else this.wake()
+    else this.#pollDelay?.finish()
   }
 
   unregister(worker: CoordinatedWorker): void {
     this.#workers.delete(worker)
-    this.wake()
+    this.#pollDelay?.finish()
   }
 
-  /** Interrupt the poll wait so pending work is claimed without extra delay. */
-  wake(): void {
-    this.#woken = true
+  /** Wake workers for a queue after new work is committed. */
+  wakeQueue(queue: string): void {
+    let woken = false
+    for (const state of this.#workers.values()) {
+      if (state.queue !== queue) continue
+      state.nextPollAt = 0
+      woken = true
+    }
+    if (woken) this.#pollDelay?.finish()
+  }
+
+  /** Wake one worker after one of its handler slots becomes free. */
+  wakeWorker(worker: CoordinatedWorker): void {
+    const state = this.#workers.get(worker)
+    if (state === undefined) return
+
+    state.nextPollAt = 0
     this.#pollDelay?.finish()
   }
 
@@ -85,46 +103,42 @@ export class StorageCoordinator {
 
   async #run(): Promise<void> {
     while (this.#workers.size > 0) {
-      const dispatched = await this.#sweep()
-      if (!dispatched && this.#workers.size > 0) await this.#waitForPoll()
+      await this.#sweep()
+      if (this.#workers.size > 0) await this.#waitForPoll()
     }
     this.#loop = undefined
   }
 
-  /** Poll every worker once, rotating the start position for fairness. */
-  async #sweep(): Promise<boolean> {
-    let dispatched = false
-    const workers = [...this.#workers]
+  /** Poll ready workers once, rotating the start position for fairness. */
+  async #sweep(): Promise<void> {
+    const workers = [...this.#workers.keys()]
     const count = workers.length
 
     for (let index = 0; index < count; index += 1) {
       const worker = workers[(this.#cursor + index) % count]
-      if (worker === undefined || !this.#workers.has(worker)) continue
+      if (worker === undefined) continue
 
-      let started = 0
+      const state = this.#workers.get(worker)
+      if (state === undefined || state.nextPollAt > Date.now()) continue
+
+      // Set the backoff before polling so a wake during poll is not overwritten.
+      state.nextPollAt = Date.now() + pollInterval
       try {
-        started = await worker.poll()
+        await worker.poll()
       } catch {
-        // Polling resumes after the next interval.
+        // Polling resumes after the worker's interval.
       }
-      if (started > 0) dispatched = true
     }
 
     if (count > 0) this.#cursor = (this.#cursor + 1) % count
-    return dispatched
   }
 
   async #waitForPoll(): Promise<void> {
-    if (this.#woken) {
-      this.#woken = false
-      return
-    }
-
-    const pollDelay = delay(pollInterval)
+    const nextPollAt = Math.min(...[...this.#workers.values()].map((state) => state.nextPollAt))
+    const pollDelay = delay(Math.max(0, nextPollAt - Date.now()))
     this.#pollDelay = pollDelay
     await pollDelay.promise
-    this.#pollDelay = undefined
-    this.#woken = false
+    if (this.#pollDelay === pollDelay) this.#pollDelay = undefined
   }
 }
 

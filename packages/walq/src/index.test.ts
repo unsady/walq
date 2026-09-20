@@ -228,6 +228,28 @@ describe('Queue', () => {
     await worker.close()
   })
 
+  it('does not poll an idle queue when another queue is woken', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    const email = new Queue('email', { storage })
+    const sms = new Queue('sms', { storage })
+    const emailWorker = email.process(async () => {})
+    const smsWorker = sms.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.claims.filter((claim) => claim.queue === 'sms')).toHaveLength(1)
+
+    storage.jobs.push(claimedJob('email-1'))
+    await email.add({})
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(storage.completions).toHaveLength(1))
+
+    expect(storage.claims.filter((claim) => claim.queue === 'sms')).toHaveLength(1)
+    await emailWorker.close()
+    await smsWorker.close()
+  })
+
   it('passes job context and heartbeats during graceful close', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)

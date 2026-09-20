@@ -112,8 +112,8 @@ describe('StorageCoordinator', () => {
       },
     })
 
-    coordinator.register(worker('a'))
-    coordinator.register(worker('b'))
+    coordinator.register('a', worker('a'))
+    coordinator.register('b', worker('b'))
     await vi.advanceTimersByTimeAsync(1_000)
 
     order.length = 0
@@ -139,12 +139,47 @@ describe('StorageCoordinator', () => {
       },
     }
 
-    coordinator.register(worker)
+    coordinator.register('email', worker)
     await vi.advanceTimersByTimeAsync(0)
     expect(polls).toBe(1)
 
     coordinator.unregister(worker)
     await vi.advanceTimersByTimeAsync(5_000)
     expect(polls).toBe(1)
+  })
+
+  it('wakes only workers of the requested queue', async () => {
+    vi.useFakeTimers()
+    const { storage } = gatedStorage()
+    const coordinator = getCoordinator(storage)
+    const polls = { email: 0, sms: 0 }
+    const email: CoordinatedWorker = {
+      poll: async () => {
+        polls.email += 1
+        return 0
+      },
+    }
+    const sms: CoordinatedWorker = {
+      poll: async () => {
+        polls.sms += 1
+        return 0
+      },
+    }
+
+    coordinator.register('email', email)
+    coordinator.register('sms', sms)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(polls).toEqual({ email: 1, sms: 1 })
+
+    coordinator.wakeQueue('email')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(polls).toEqual({ email: 2, sms: 1 })
+
+    coordinator.wakeWorker(email)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(polls).toEqual({ email: 3, sms: 1 })
+
+    coordinator.unregister(email)
+    coordinator.unregister(sms)
   })
 })

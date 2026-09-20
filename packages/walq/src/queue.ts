@@ -43,7 +43,7 @@ export class Queue<Data> {
       availableAt: now,
       attempts: this.#attempts,
     })
-    coordinator.wake()
+    coordinator.wakeQueue(this.#name)
     return { id: job.id }
   }
 
@@ -57,7 +57,7 @@ export class Queue<Data> {
     const coordinator = getCoordinator(this.#storage)
     const worker = new QueueWorker(coordinator, this.#name, processor, concurrency)
     this.#worker = worker
-    coordinator.register(worker)
+    coordinator.register(this.#name, worker)
 
     return {
       close: async (): Promise<void> => {

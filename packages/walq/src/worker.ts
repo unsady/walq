@@ -80,7 +80,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     this.#active.add(task)
     void task.finally(() => {
       this.#active.delete(task)
-      this.#coordinator.wake()
+      this.#coordinator.wakeWorker(this)
       this.#settle()
     })
   }
