@@ -327,7 +327,7 @@ describe('Queue', () => {
 
     expect(handled.sort()).toEqual(['email-1', 'sms-1'])
     expect(new Set(storage.claims.map((claim) => claim.queue))).toEqual(new Set(['email', 'sms']))
-    expect(storage.maxConcurrentCalls).toBe(1)
+    expect(storage.maxConcurrentCalls).toBe(2)
   })
 
   it('keeps other queues polling after one worker closes', async () => {

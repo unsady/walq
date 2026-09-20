@@ -31,7 +31,6 @@ type WorkerState = {
 export class StorageCoordinator {
   readonly #storage: Storage
   readonly #workers = new Map<CoordinatedWorker, WorkerState>()
-  #operationTail: Promise<void> = Promise.resolve()
   #loop: Promise<void> | undefined
   #pollDelay: Delay | undefined
   #cursor = 0
@@ -72,33 +71,23 @@ export class StorageCoordinator {
   }
 
   enqueue(input: EnqueueInput): Promise<StoredJob> {
-    return this.#operate(() => this.#storage.enqueue(input))
+    return this.#storage.enqueue(input)
   }
 
   claim(input: ClaimInput): Promise<ClaimedJob[]> {
-    return this.#operate(() => this.#storage.claim(input))
+    return this.#storage.claim(input)
   }
 
   complete(input: CompleteInput): Promise<LeaseMutationResult> {
-    return this.#operate(() => this.#storage.complete(input))
+    return this.#storage.complete(input)
   }
 
   fail(input: FailInput): Promise<LeaseMutationResult> {
-    return this.#operate(() => this.#storage.fail(input))
+    return this.#storage.fail(input)
   }
 
   heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult> {
-    return this.#operate(() => this.#storage.heartbeat(input))
-  }
-
-  /** Run one storage operation at a time so writers never overlap in-process. */
-  #operate<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#operationTail.then(operation)
-    this.#operationTail = result.then(
-      () => undefined,
-      () => undefined,
-    )
-    return result
+    return this.#storage.heartbeat(input)
   }
 
   async #run(): Promise<void> {
@@ -109,10 +98,11 @@ export class StorageCoordinator {
     this.#loop = undefined
   }
 
-  /** Poll ready workers once, rotating the start position for fairness. */
+  /** Poll ready workers concurrently, rotating their start order for fairness. */
   async #sweep(): Promise<void> {
     const workers = [...this.#workers.keys()]
     const count = workers.length
+    const polls: Promise<void>[] = []
 
     for (let index = 0; index < count; index += 1) {
       const worker = workers[(this.#cursor + index) % count]
@@ -123,13 +113,15 @@ export class StorageCoordinator {
 
       // Set the backoff before polling so a wake during poll is not overwritten.
       state.nextPollAt = Date.now() + pollInterval
-      try {
-        await worker.poll()
-      } catch {
-        // Polling resumes after the worker's interval.
-      }
+      polls.push(
+        worker.poll().then(
+          () => undefined,
+          () => undefined,
+        ),
+      )
     }
 
+    await Promise.all(polls)
     if (count > 0) this.#cursor = (this.#cursor + 1) % count
   }
 

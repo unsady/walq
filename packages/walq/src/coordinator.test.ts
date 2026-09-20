@@ -87,17 +87,49 @@ describe('StorageCoordinator', () => {
     expect(getCoordinator(first)).not.toBe(getCoordinator(second))
   })
 
-  it('runs one storage operation at a time', async () => {
+  it('allows storage operations to overlap', async () => {
     const { storage, started, release } = gatedStorage()
     const coordinator = getCoordinator(storage)
 
     const first = coordinator.enqueue(enqueueInput)
     const second = coordinator.claim(claimInput)
-    await vi.waitFor(() => expect(started).toEqual(['enqueue']))
+    expect(started).toEqual(['enqueue', 'claim'])
 
     release()
     await Promise.all([first, second])
-    expect(started).toEqual(['enqueue', 'claim'])
+  })
+
+  it('polls ready workers concurrently', async () => {
+    vi.useFakeTimers()
+    const { storage } = gatedStorage()
+    const coordinator = getCoordinator(storage)
+    const gate = deferred()
+    const started: string[] = []
+    let blocking = false
+    const worker = (name: string): CoordinatedWorker => ({
+      poll: async () => {
+        started.push(name)
+        if (blocking) await gate.promise
+        return 0
+      },
+    })
+
+    const first = worker('a')
+    const second = worker('b')
+    coordinator.register('a', first)
+    coordinator.register('b', second)
+    await vi.advanceTimersByTimeAsync(0)
+
+    started.length = 0
+    blocking = true
+    coordinator.wakeQueue('a')
+    coordinator.wakeQueue('b')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(started.sort()).toEqual(['a', 'b'])
+
+    gate.resolve()
+    coordinator.unregister(first)
+    coordinator.unregister(second)
   })
 
   it('rotates the poll order between workers', async () => {
