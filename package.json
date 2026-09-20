@@ -9,15 +9,24 @@
     "format": "oxfmt --config oxfmt.config.ts --write .",
     "format:check": "oxfmt --config oxfmt.config.ts --check .",
     "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest --passWithNoTests"
+    "test:watch": "vitest --passWithNoTests",
+    "bench": "vitest bench --run --reporter=verbose",
+    "bench:full": "BENCH_GRID=full vitest bench --run --reporter=verbose",
+    "bench:queue": "vitest bench --run --reporter=verbose benchmarks/coordinator.bench.ts",
+    "bench:contention": "vitest bench --run --reporter=verbose benchmarks/contention.bench.ts",
+    "bench:help": "vitest bench --help"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.3",
+    "@walq/better-sqlite3": "workspace:*",
     "@walq/core": "workspace:*",
+    "better-sqlite3": "^13.0.3",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.1",
+    "walq": "workspace:*"
   },
   "packageManager": "pnpm@12.3.4"
 }

@@ -12,6 +12,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["*.config.ts", "packages/*/src/**/*.ts", "tests/**/*.ts"],
+  "include": ["*.config.ts", "packages/*/src/**/*.ts", "tests/**/*.ts", "benchmarks/**/*.ts"],
   "exclude": ["node_modules", "dist", "coverage"]
 }

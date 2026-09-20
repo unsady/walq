@@ -109,12 +109,21 @@ importers:
 
   .:
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
       '@types/node':
         specifier: ^22.20.3
         version: 22.20.3
+      '@walq/better-sqlite3':
+        specifier: workspace:*
+        version: link:packages/better-sqlite3
       '@walq/core':
         specifier: workspace:*
         version: link:packages/core
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
       oxfmt:
         specifier: ^0.68.0
         version: 0.68.0
@@ -127,6 +136,9 @@ importers:
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.3)(vite@8.3.0(@types/node@22.20.3))
+      walq:
+        specifier: workspace:*
+        version: link:packages/walq
 
   packages/better-sqlite3:
     dependencies:
