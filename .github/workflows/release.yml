@@ -35,16 +35,16 @@ jobs:
       - name: Verify release tag
         run: |
           node --input-type=module -e "
-            import walq from './packages/walq/package.json' with { type: 'json' };
+            import core from './packages/core/package.json' with { type: 'json' };
             import adapter from './packages/better-sqlite3/package.json' with { type: 'json' };
             const tag = process.env.GITHUB_REF_NAME;
-            if (walq.version !== adapter.version || tag !== 'v' + walq.version) {
+            if (core.version !== adapter.version || tag !== 'v' + core.version) {
               throw new Error('Tag and package versions must match');
             }
           "
       - name: Publish core
         run: |
-          VERSION=$(node -p "require('./packages/walq/package.json').version")
+          VERSION=$(node -p "require('./packages/core/package.json').version")
           npm view "@walq/core@$VERSION" version >/dev/null 2>&1 || pnpm --filter @walq/core publish --access public --provenance --no-git-checks
       - name: Publish better-sqlite3 adapter
         run: |

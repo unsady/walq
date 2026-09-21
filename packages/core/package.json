@@ -16,7 +16,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/unsady/walq.git",
-    "directory": "packages/walq"
+    "directory": "packages/core"
   },
   "files": [
     "dist",

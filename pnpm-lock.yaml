@@ -126,7 +126,7 @@ importers:
         version: link:packages/better-sqlite3
       '@walq/core':
         specifier: workspace:*
-        version: link:packages/walq
+        version: link:packages/core
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -157,7 +157,7 @@ importers:
         version: 22.20.3
       '@walq/core':
         specifier: workspace:*
-        version: link:../walq
+        version: link:../core
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -165,7 +165,7 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  packages/walq:
+  packages/core:
     devDependencies:
       '@types/node':
         specifier: ^22.20.3

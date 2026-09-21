@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '..')
 const packageDirectories = {
   adapter: join(root, 'packages/better-sqlite3'),
-  walq: join(root, 'packages/walq'),
+  core: join(root, 'packages/core'),
 }
 const manifests = Object.fromEntries(
   Object.entries(packageDirectories).map(([key, directory]) => [
@@ -36,9 +36,9 @@ function pack(packageDirectory, tarballName) {
 
 try {
   run('pnpm', ['build'])
-  run('pnpm', ['exec', 'publint', 'packages/walq', '--pack=pnpm', '--strict'])
+  run('pnpm', ['exec', 'publint', 'packages/core', '--pack=pnpm', '--strict'])
   run('pnpm', ['exec', 'publint', 'packages/better-sqlite3', '--pack=pnpm', '--strict'])
-  run('pnpm', ['exec', 'attw', '--pack', 'packages/walq', '--profile', 'esm-only', '--quiet'])
+  run('pnpm', ['exec', 'attw', '--pack', 'packages/core', '--profile', 'esm-only', '--quiet'])
   run('pnpm', [
     'exec',
     'attw',
@@ -49,7 +49,7 @@ try {
     '--quiet',
   ])
 
-  const walq = pack(packageDirectories.walq, tarballName(manifests.walq))
+  const core = pack(packageDirectories.core, tarballName(manifests.core))
   const adapter = pack(packageDirectories.adapter, tarballName(manifests.adapter))
 
   writeFileSync(
@@ -60,7 +60,7 @@ try {
         type: 'module',
         dependencies: {
           '@walq/better-sqlite3': `file:${adapter}`,
-          '@walq/core': `file:${walq}`,
+          '@walq/core': `file:${core}`,
           'better-sqlite3': '^13.0.3',
         },
       },

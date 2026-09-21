@@ -12,7 +12,7 @@
     "tsBuildInfoFile": "../../.cache/better-sqlite3.tsbuildinfo",
     "types": ["node"]
   },
-  "references": [{ "path": "../walq/tsconfig.build.json" }],
+  "references": [{ "path": "../core/tsconfig.build.json" }],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/fixtures/**"]
 }

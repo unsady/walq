@@ -4,8 +4,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "tsc -b packages/walq/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json",
-    "clean": "tsc -b --clean packages/walq/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json",
+    "build": "tsc -b packages/core/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json",
+    "clean": "tsc -b --clean packages/core/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --config oxlint.config.ts",
     "format": "oxfmt --config oxfmt.config.ts --write .",

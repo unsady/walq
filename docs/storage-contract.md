@@ -1,6 +1,6 @@
 # Storage contract
 
-`packages/walq/src/storage.ts` defines the adapter boundary. Its interface and
+`packages/core/src/storage.ts` defines the adapter boundary. Its interface and
 related types are exported from `@walq/core/storage`, separately from the main
 package entry point. All operations are asynchronous so local SQLite and remote
 adapters can implement the same contract.

@@ -9,7 +9,7 @@
     "outDir": "dist",
     "rootDir": "src",
     "sourceMap": true,
-    "tsBuildInfoFile": "../../.cache/walq.tsbuildinfo",
+    "tsBuildInfoFile": "../../.cache/core.tsbuildinfo",
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
