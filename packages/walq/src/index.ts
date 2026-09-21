@@ -2,6 +2,7 @@ export { Queue } from './queue.js'
 export type {
   AddedJob,
   ClaimErrorContext,
+  CleanupErrorContext,
   HandlerErrorContext,
   JobErrorContext,
   ProcessContext,
@@ -11,5 +12,6 @@ export type {
   ProcessOptions,
   Processor,
   QueueOptions,
+  RetentionOptions,
   WorkerHandle,
 } from './types.js'

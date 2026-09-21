@@ -1,6 +1,8 @@
 import type {
   ClaimInput,
   ClaimedJob,
+  CleanupInput,
+  CleanupResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -48,6 +50,14 @@ export class StorageCoordinator {
   }
 
   register(queue: string, worker: CoordinatedWorker): void {
+    for (const state of this.#workers.values()) {
+      if (state.queue === queue) {
+        throw new Error(
+          `Queue "${queue}" is already being processed on this storage; close the existing worker first`,
+        )
+      }
+    }
+
     this.#workers.set(worker, { queue, nextPollAt: 0 })
     if (this.#loop === undefined) this.#loop = this.#run()
     else this.#pollDelay?.finish()
@@ -142,6 +152,10 @@ export class StorageCoordinator {
 
   heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult> {
     return this.#storage.heartbeat(input)
+  }
+
+  cleanup(input: CleanupInput): Promise<CleanupResult> {
+    return this.#storage.cleanup(input)
   }
 
   async #run(): Promise<void> {

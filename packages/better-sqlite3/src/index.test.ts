@@ -151,6 +151,205 @@ describe('SQLite job columns', () => {
   })
 })
 
+describe('SQLite retention', () => {
+  const cleanupInput = { queue: 'email', retention: { completed: 0, failed: 0 }, limit: 10 }
+
+  it('records finishedAt on terminal transitions and clears it on retry', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, attempts: 2 })
+    let [job] = await storage.claim(claimInput)
+    await storage.fail({ ...job!, now: 11, error: 'retry', retryAt: 11 })
+    expect(db.prepare('SELECT status, finishedAt FROM walq_jobs').get()).toEqual({
+      status: 'pending',
+      finishedAt: null,
+    })
+
+    ;[job] = await storage.claim({ ...claimInput, now: 11 })
+    await storage.complete({ ...job!, now: 12 })
+    expect(db.prepare('SELECT status, finishedAt FROM walq_jobs').get()).toEqual({
+      status: 'completed',
+      finishedAt: 12,
+    })
+
+    await storage.enqueue({ ...input, attempts: 1 })
+    ;[job] = await storage.claim(claimInput)
+    await storage.fail({ ...job!, now: 13, error: 'terminal', retryAt: null })
+    expect(
+      db.prepare('SELECT status, finishedAt FROM walq_jobs WHERE id = ?').get(job!.id),
+    ).toEqual({ status: 'failed', finishedAt: 13 })
+  })
+
+  it('stamps recovered terminal failures with the recovery time', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, attempts: 1 })
+    await storage.claim(claimInput)
+    await storage.claim({ ...claimInput, now: 30 })
+    expect(db.prepare('SELECT status, finishedAt FROM walq_jobs').get()).toEqual({
+      status: 'failed',
+      finishedAt: 30,
+    })
+  })
+
+  it('keeps the newest terminal rows per status and queue', async () => {
+    const { db, storage } = open()
+    const completed: string[] = []
+    for (const now of [11, 12, 13, 14]) {
+      const stored = await storage.enqueue({ ...input, now, availableAt: now, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now })
+      await storage.complete({ ...job!, now })
+      completed.push(stored.id)
+    }
+    const failed: string[] = []
+    for (const now of [21, 22]) {
+      const stored = await storage.enqueue({ ...input, now, availableAt: now, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now })
+      await storage.fail({ ...job!, now, error: 'terminal', retryAt: null })
+      failed.push(stored.id)
+    }
+    const other = await storage.enqueue({
+      ...input,
+      queue: 'other',
+      now: 30,
+      availableAt: 30,
+      attempts: 1,
+    })
+    const [otherJob] = await storage.claim({ ...claimInput, queue: 'other', now: 30 })
+    await storage.complete({ ...otherJob!, now: 30 })
+
+    expect(
+      await storage.cleanup({
+        queue: 'email',
+        retention: { completed: 2, failed: 1 },
+        limit: 10,
+      }),
+    ).toEqual({ removed: 3, more: false })
+
+    const remaining = db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all() as {
+      id: string
+    }[]
+    expect(remaining.map((row) => row.id)).toEqual([
+      completed[2],
+      completed[3],
+      failed[1],
+      other.id,
+    ])
+  })
+
+  it('deletes eligible rows from the oldest end and reports remaining work', async () => {
+    const { db, storage } = open()
+    const completed: string[] = []
+    for (const now of [11, 12, 13, 14]) {
+      const stored = await storage.enqueue({ ...input, now, availableAt: now, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now })
+      await storage.complete({ ...job!, now })
+      completed.push(stored.id)
+    }
+
+    const remaining = (): unknown[] =>
+      db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all()
+    const batch = { ...cleanupInput, retention: { completed: 2, failed: 0 }, limit: 1 }
+
+    // Only the two oldest rows are eligible; the oldest goes first.
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
+    expect(remaining()).toEqual([{ id: completed[1] }, { id: completed[2] }, { id: completed[3] }])
+
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: false })
+    expect(remaining()).toEqual([{ id: completed[2] }, { id: completed[3] }])
+    expect(await storage.cleanup(batch)).toEqual({ removed: 0, more: false })
+    expect(remaining()).toEqual([{ id: completed[2] }, { id: completed[3] }])
+  })
+
+  it('breaks finish-time ties by id so the newest rows survive', async () => {
+    const { db, storage } = open()
+    const ids: string[] = []
+    for (let index = 0; index < 4; index += 1) {
+      const stored = await storage.enqueue({ ...input, now: 11, availableAt: 11, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now: 11 })
+      await storage.complete({ ...job!, now: 11 })
+      ids.push(stored.id)
+    }
+
+    expect(
+      await storage.cleanup({
+        ...cleanupInput,
+        retention: { completed: 2, failed: 0 },
+      }),
+    ).toEqual({ removed: 2, more: false })
+
+    const remaining = db.prepare('SELECT id FROM walq_jobs').all() as { id: string }[]
+    expect(remaining.map((row) => row.id).sort()).toEqual([...ids].sort().slice(-2))
+  })
+
+  it('decides retention through bounded index queries', () => {
+    const { db } = open()
+    const queries = [
+      `
+        SELECT finishedAt, id FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        ORDER BY finishedAt DESC, id DESC
+        LIMIT 1 OFFSET @offset
+      `,
+      `
+        SELECT rowid FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        ORDER BY finishedAt, id
+        LIMIT @limit
+      `,
+      `
+        SELECT rowid FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          AND (finishedAt, id) < (@finishedAt, @id)
+        ORDER BY finishedAt, id
+        LIMIT @limit
+      `,
+      `
+        SELECT 1 AS found FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        LIMIT 1
+      `,
+      `
+        SELECT 1 AS found FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          AND (finishedAt, id) < (@finishedAt, @id)
+        LIMIT 1
+      `,
+    ]
+
+    for (const query of queries) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all({
+        queue: 'email',
+        status: 'completed',
+        limit: 10,
+        offset: 0,
+        finishedAt: 5,
+        id: 'x',
+      }) as { detail: string }[]
+      const detail = plan.map((row) => row.detail).join('; ')
+
+      // Searching the partial terminal index keeps the work proportional to
+      // the batch instead of scanning the whole terminal history.
+      expect(detail).toContain('SEARCH walq_jobs USING')
+      expect(detail).toContain('walq_terminal')
+      expect(detail).not.toContain('SCAN walq_jobs')
+    }
+  })
+
+  it('rejects cleanup inside a caller transaction and invalid retention', async () => {
+    const { db, storage } = open()
+    db.exec('BEGIN')
+    await expect(storage.cleanup(cleanupInput)).rejects.toThrow('transaction')
+    db.exec('ROLLBACK')
+
+    await expect(storage.cleanup({ ...cleanupInput, limit: 0 })).rejects.toThrow('limit')
+    await expect(
+      storage.cleanup({ ...cleanupInput, retention: { completed: -1, failed: 0 } }),
+    ).rejects.toThrow('retention.completed')
+    await expect(
+      storage.cleanup({ ...cleanupInput, retention: { completed: 0, failed: 1.5 } }),
+    ).rejects.toThrow('retention.failed')
+  })
+})
+
 describe('SQLite integration', () => {
   it('persists enqueued jobs across reopen', async () => {
     const path = filename()
@@ -182,8 +381,18 @@ describe('SQLite integration', () => {
     db.exec('BEGIN')
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 2')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 3')
     expect(() => betterSqlite3(db)).toThrow('version')
+  })
+
+  it('rejects a version 1 database instead of migrating it', () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    db.exec(`
+      CREATE TABLE walq_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      INSERT INTO walq_schema (id, version) VALUES (1, 1);
+    `)
+    expect(() => betterSqlite3(db)).toThrow('Unsupported walq schema version: 1')
   })
 
   it('rolls back the whole claim on a database error', async () => {

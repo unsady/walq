@@ -2,6 +2,8 @@ import type {
   ClaimedJob,
   ClaimInput,
   ClaimQueuesInput,
+  CleanupInput,
+  CleanupResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -98,6 +100,10 @@ class TestStorage implements Storage {
     return this.#leave(this.heartbeatResult)
   }
 
+  async cleanup(_input: CleanupInput): Promise<CleanupResult> {
+    return { removed: 0, more: false }
+  }
+
   #enter(): void {
     this.#runningCalls += 1
     this.maxConcurrentCalls = Math.max(this.maxConcurrentCalls, this.#runningCalls)
@@ -127,6 +133,23 @@ class GroupedTestStorage extends TestStorage {
       throw error
     }
     return Promise.all(requests.map((request) => this.claim(request)))
+  }
+}
+
+/** Records and controls bounded cleanup calls. */
+class CleanupTestStorage extends TestStorage {
+  readonly cleanups: CleanupInput[] = []
+  readonly cleanupResults: CleanupResult[] = []
+  readonly cleanupErrors: unknown[] = []
+  cleanupResult: CleanupResult = { removed: 0, more: false }
+  cleanupGate: Promise<void> | undefined
+
+  async cleanup(input: CleanupInput): Promise<CleanupResult> {
+    this.cleanups.push(input)
+    const error = this.cleanupErrors.shift()
+    if (error !== undefined) throw error
+    await this.cleanupGate
+    return this.cleanupResults.shift() ?? this.cleanupResult
   }
 }
 
@@ -613,5 +636,189 @@ describe('Queue', () => {
 
     await emailWorker.close()
     await smsWorker.close()
+  })
+})
+
+describe('terminal-job retention', () => {
+  it('defers the first pass and coalesces transitions within the interval', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async () => {})
+
+    // The startup pass runs after process() returns rather than inside it.
+    expect(storage.cleanups).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toEqual([
+      { queue: 'email', retention: { completed: 0, failed: 100 }, limit: expect.any(Number) },
+    ])
+
+    storage.jobs.push(claimedJob('1'), claimedJob('2'))
+    await queue.add({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.completions).toHaveLength(2)
+    // Both completions are inside the throttle window of the startup pass.
+    expect(storage.cleanups).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(storage.cleanups).toHaveLength(2)
+    await worker.close()
+
+    const afterClose = storage.cleanups.length
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(storage.cleanups).toHaveLength(afterClose)
+  })
+
+  it('passes queue retention to cleanup and skips disabled policies', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', { storage, retention: { completed: 3, failed: null } })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups[0]!.retention).toEqual({ completed: 3, failed: null })
+    await worker.close()
+
+    const disabled = new CleanupTestStorage()
+    const second = new Queue('email', {
+      storage: disabled,
+      retention: { completed: null, failed: null },
+    })
+    const secondWorker = second.process(async () => {})
+    await vi.advanceTimersByTimeAsync(1)
+    expect(disabled.cleanups).toEqual([])
+    await secondWorker.close()
+  })
+
+  it('cleans after claim passes that may have recovered expired jobs', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', { storage, retention: { completed: 0, failed: 0 } })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(1)
+
+    // An idle claim can still recover an expired job into a terminal row even
+    // though it returns no jobs and no handler completes or fails.
+    storage.claims.length = 0
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(storage.claims.length).toBeGreaterThan(0)
+    expect(storage.completions).toEqual([])
+    expect(storage.cleanups).toHaveLength(2)
+    await worker.close()
+  })
+
+  it('reports cleanup failures and retries on the next claim pass', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const reports: ProcessErrorContext[] = []
+    const queue = new Queue('email', {
+      storage,
+      onError: (_error, context) => {
+        reports.push(context)
+      },
+    })
+    const worker = queue.process(async () => {})
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(1)
+
+    storage.cleanupErrors.push(new Error('cleanup failed'))
+    storage.jobs.push(claimedJob('1'))
+    await queue.add({})
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(reports).toEqual([{ queue: 'email', operation: 'cleanup' }])
+    expect(storage.cleanups).toHaveLength(2)
+
+    storage.jobs.push(claimedJob('2'))
+    await queue.add({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.completions).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(storage.cleanups).toHaveLength(3)
+    expect(reports).toHaveLength(1)
+    await worker.close()
+  })
+
+  it('drains bounded batches while cleanup reports remaining work', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async () => {})
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(1)
+
+    storage.cleanupResults.push(
+      { removed: 2, more: true },
+      { removed: 2, more: true },
+      { removed: 1, more: false },
+    )
+    storage.jobs.push(claimedJob('1'))
+    await queue.add({})
+    await vi.advanceTimersByTimeAsync(1_000)
+    // Each drain batch yields through its own zero-delay timer.
+    for (let turn = 0; turn < 5; turn += 1) await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(4)
+
+    await worker.close()
+    const afterClose = storage.cleanups.length
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(storage.cleanups).toHaveLength(afterClose)
+  })
+
+  it('waits for an in-flight cleanup pass during close', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const gate = deferred()
+    storage.cleanupGate = gate.promise
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async () => {})
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(1)
+
+    let closed = false
+    const closing = worker.close().then(() => {
+      closed = true
+    })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(closed).toBe(false)
+
+    gate.resolve()
+    await closing
+    expect(closed).toBe(true)
+  })
+
+  it('rejects a second worker for the same queue name on one storage', async () => {
+    const storage = new TestStorage()
+    const first = new Queue('email', { storage })
+    const second = new Queue('email', { storage })
+    const worker = first.process(async () => {})
+
+    expect(() => second.process(async () => {})).toThrow('already being processed')
+    await worker.close()
+
+    // The queue can be processed again once the first worker closes.
+    const replacement = second.process(async () => {})
+    await replacement.close()
+  })
+
+  it('rejects invalid retention configuration', () => {
+    const storage = new TestStorage()
+
+    expect(() => new Queue('email', { storage, retention: { completed: -1 } })).toThrow(
+      'retention.completed',
+    )
+    expect(() => new Queue('email', { storage, retention: { failed: 1.5 } })).toThrow(
+      'retention.failed',
+    )
+    expect(() => new Queue('email', { storage, retention: 'all' as never })).toThrow(
+      'retention must be an object',
+    )
   })
 })

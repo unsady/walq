@@ -1,4 +1,4 @@
-import type { Storage } from '@walq/core/storage'
+import type { RetentionPolicy, Storage } from '@walq/core/storage'
 
 import { getCoordinator } from './coordinator.js'
 import type {
@@ -11,10 +11,27 @@ import type {
 } from './types.js'
 import { QueueWorker } from './worker.js'
 
+const defaultCompletedRetention = 0
+const defaultFailedRetention = 100
+
 function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${name} must be a positive safe integer`)
   }
+}
+
+function retentionValue(
+  value: number | null | undefined,
+  fallback: number,
+  name: string,
+): number | null {
+  if (value === undefined) return fallback
+  if (value === null) return null
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be null or a nonnegative safe integer`)
+  }
+
+  return value
 }
 
 export class Queue<Data> {
@@ -22,6 +39,7 @@ export class Queue<Data> {
   readonly #storage: Storage
   readonly #attempts: number
   readonly #onError: ProcessErrorHandler | undefined
+  readonly #retention: RetentionPolicy
   #worker: QueueWorker<Data> | undefined
 
   constructor(name: string, options: QueueOptions) {
@@ -37,10 +55,23 @@ export class Queue<Data> {
       throw new TypeError('onError must be a function')
     }
 
+    const retention = options.retention
+    if (retention !== undefined && (typeof retention !== 'object' || retention === null)) {
+      throw new TypeError('retention must be an object')
+    }
+
     this.#name = name
     this.#storage = options.storage
     this.#attempts = attempts
     this.#onError = onError
+    this.#retention = {
+      completed: retentionValue(
+        retention?.completed,
+        defaultCompletedRetention,
+        'retention.completed',
+      ),
+      failed: retentionValue(retention?.failed, defaultFailedRetention, 'retention.failed'),
+    }
   }
 
   async add(data: Data): Promise<AddedJob> {
@@ -69,9 +100,16 @@ export class Queue<Data> {
     positiveInteger(concurrency, 'concurrency')
 
     const coordinator = getCoordinator(this.#storage)
-    const worker = new QueueWorker(coordinator, this.#name, processor, concurrency, this.#onError)
-    this.#worker = worker
+    const worker = new QueueWorker(coordinator, this.#name, processor, {
+      concurrency,
+      onError: this.#onError,
+      retention: this.#retention,
+    })
+    // Registration can reject a second worker for the same queue name, so it
+    // must happen before any maintenance or polling starts.
     coordinator.register(this.#name, worker)
+    this.#worker = worker
+    worker.start()
 
     return {
       close: async (): Promise<void> => {

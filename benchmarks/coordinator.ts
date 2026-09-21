@@ -154,6 +154,11 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 
       return inner.heartbeat(input)
     },
+    async cleanup(input) {
+      tracker.onOperation()
+
+      return inner.cleanup(input)
+    },
   }
 
   // Forward the optional grouped capability; without this the wrapper would

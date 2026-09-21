@@ -85,6 +85,7 @@ class GroupedClaimer {
           UPDATE walq_jobs SET
             status = CASE WHEN attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
             availableAt = CASE WHEN attemptsMade < attempts THEN expiresAt ELSE availableAt END,
+            finishedAt = CASE WHEN attemptsMade < attempts THEN NULL ELSE @now END,
             leaseToken = NULL, expiresAt = NULL
           WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
         `,

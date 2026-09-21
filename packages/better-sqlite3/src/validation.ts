@@ -20,6 +20,11 @@ export function expiry(now: number, duration: number): number {
   return result
 }
 
+export function retentionCount(value: number | null, name: string): void {
+  if (value === null) return
+  integer(value, name, 0)
+}
+
 export function lease(input: CompleteInput): void {
   text(input.id, 'id')
   text(input.leaseToken, 'leaseToken')

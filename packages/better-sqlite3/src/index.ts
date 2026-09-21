@@ -5,6 +5,8 @@ import type {
   ClaimInput,
   ClaimQueuesInput,
   ClaimQueuesResult,
+  CleanupInput,
+  CleanupResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -16,7 +18,7 @@ import type {
 import type Database from 'better-sqlite3'
 
 import { initialize } from './schema.js'
-import { expiry, integer, lease, text } from './validation.js'
+import { expiry, integer, lease, retentionCount, text } from './validation.js'
 
 const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
@@ -37,7 +39,13 @@ class BetterSqlite3Storage implements Storage {
   private readonly completeStatement: Database.Statement
   private readonly failStatement: Database.Statement
   private readonly heartbeatStatement: Database.Statement
+  private readonly retainedBoundary: Database.Statement
+  private readonly hasTerminal: Database.Statement
+  private readonly hasOlderTerminal: Database.Statement
+  private readonly deleteOldestTerminal: Database.Statement
+  private readonly deleteOlderTerminal: Database.Statement
   private readonly claimTransaction: Database.Transaction<(steps: ClaimStep[]) => ClaimedJob[][]>
+  private readonly cleanupTransaction: Database.Transaction<(input: CleanupInput) => CleanupResult>
 
   constructor(db: Database.Database) {
     this.db = db
@@ -57,6 +65,7 @@ class BetterSqlite3Storage implements Storage {
         UPDATE walq_jobs SET
           status = CASE WHEN attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
           availableAt = CASE WHEN attemptsMade < attempts THEN expiresAt ELSE availableAt END,
+          finishedAt = CASE WHEN attemptsMade < attempts THEN NULL ELSE @now END,
           leaseToken = NULL, expiresAt = NULL
         WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
       `,
@@ -81,7 +90,7 @@ class BetterSqlite3Storage implements Storage {
     this.completeStatement = prepare(
       db,
       `
-        UPDATE walq_jobs SET status = 'completed', leaseToken = NULL, expiresAt = NULL
+        UPDATE walq_jobs SET status = 'completed', finishedAt = @now, leaseToken = NULL, expiresAt = NULL
         WHERE ${liveLease}
       `,
     )
@@ -91,6 +100,7 @@ class BetterSqlite3Storage implements Storage {
         UPDATE walq_jobs SET
           status = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
           availableAt = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN @retryAt ELSE availableAt END,
+          finishedAt = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN NULL ELSE @now END,
           error = @error, leaseToken = NULL, expiresAt = NULL
         WHERE ${liveLease}
       `,
@@ -101,9 +111,129 @@ class BetterSqlite3Storage implements Storage {
         UPDATE walq_jobs SET expiresAt = max(expiresAt, @expiresAt) WHERE ${liveLease}
       `,
     )
+    this.retainedBoundary = prepare(
+      db,
+      `
+        SELECT finishedAt AS finishedAt, id AS id FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        ORDER BY finishedAt DESC, id DESC
+        LIMIT 1 OFFSET @offset
+      `,
+    )
+    this.hasTerminal = prepare(
+      db,
+      `
+        SELECT 1 AS found FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        LIMIT 1
+      `,
+    )
+    this.hasOlderTerminal = prepare(
+      db,
+      `
+        SELECT 1 AS found FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          AND (finishedAt, id) < (@finishedAt, @id)
+        LIMIT 1
+      `,
+    )
+    this.deleteOldestTerminal = prepare(
+      db,
+      `
+        DELETE FROM walq_jobs
+        WHERE rowid IN (
+          SELECT rowid FROM walq_jobs
+          WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          ORDER BY finishedAt, id
+          LIMIT @limit
+        )
+      `,
+    )
+    this.deleteOlderTerminal = prepare(
+      db,
+      `
+        DELETE FROM walq_jobs
+        WHERE rowid IN (
+          SELECT rowid FROM walq_jobs
+          WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+            AND (finishedAt, id) < (@finishedAt, @id)
+          ORDER BY finishedAt, id
+          LIMIT @limit
+        )
+      `,
+    )
     this.claimTransaction = db.transaction((steps: ClaimStep[]): ClaimedJob[][] =>
       steps.map(({ input, expiresAt }) => this.claimStep(input, expiresAt)),
     )
+    this.cleanupTransaction = db.transaction((input: CleanupInput): CleanupResult => {
+      const queue = input.queue
+      // Every statement below is an index lookup: locating the retained
+      // boundary walks at most `keep` index entries, deletion is bounded by
+      // `limit`, and `more` is decided by existence checks. The work of a call
+      // never scales with the size of the terminal history.
+      const retainedBoundary = (
+        status: 'completed' | 'failed',
+        keep: number,
+      ): { finishedAt: number; id: string } | undefined =>
+        this.retainedBoundary.get({ queue, status, offset: keep - 1 }) as
+          | { finishedAt: number; id: string }
+          | undefined
+
+      let budget = input.limit
+      let removed = 0
+      for (const status of ['completed', 'failed'] as const) {
+        const keep = input.retention[status]
+        if (keep === null) continue
+
+        if (budget === 0) {
+          // The limit is spent; only the verdict of the remaining status is
+          // still missing.
+          if (keep === 0) {
+            if (this.hasTerminal.get({ queue, status }) !== undefined) {
+              return { removed, more: true }
+            }
+            continue
+          }
+          const boundary = retainedBoundary(status, keep)
+          if (
+            boundary !== undefined &&
+            this.hasOlderTerminal.get({ queue, status, ...boundary }) !== undefined
+          ) {
+            return { removed, more: true }
+          }
+          continue
+        }
+
+        if (keep === 0) {
+          // No retained rows: delete the oldest rows up to the limit.
+          const deleted = this.deleteOldestTerminal.run({ queue, status, limit: budget }).changes
+          removed += deleted
+          budget -= deleted
+          if (this.hasTerminal.get({ queue, status }) !== undefined) {
+            return { removed, more: true }
+          }
+          continue
+        }
+
+        // Delete the oldest rows strictly older than the boundary, so an
+        // interrupted drain keeps the most recent history.
+        const boundary = retainedBoundary(status, keep)
+        // Fewer terminal rows than the retention count: nothing is eligible.
+        if (boundary === undefined) continue
+        const deleted = this.deleteOlderTerminal.run({
+          queue,
+          status,
+          ...boundary,
+          limit: budget,
+        }).changes
+        removed += deleted
+        budget -= deleted
+        if (this.hasOlderTerminal.get({ queue, status, ...boundary }) !== undefined) {
+          return { removed, more: true }
+        }
+      }
+      return { removed, more: false }
+    })
   }
 
   private prepareClaim(input: ClaimInput): ClaimStep {
@@ -178,6 +308,18 @@ class BetterSqlite3Storage implements Storage {
     return this.heartbeatStatement.run({ ...input, expiresAt }).changes === 1
       ? 'applied'
       : 'lease_lost'
+  }
+
+  async cleanup(input: CleanupInput): Promise<CleanupResult> {
+    this.assertAutocommit()
+    text(input.queue, 'queue')
+    integer(input.limit, 'limit', 1)
+    if (input.retention === null || typeof input.retention !== 'object') {
+      throw new TypeError('retention must be an object')
+    }
+    retentionCount(input.retention.completed, 'retention.completed')
+    retentionCount(input.retention.failed, 'retention.failed')
+    return this.cleanupTransaction.immediate(input)
   }
 }
 

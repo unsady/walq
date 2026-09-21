@@ -3,6 +3,8 @@ import type {
   ClaimInput,
   ClaimQueuesInput,
   ClaimQueuesResult,
+  CleanupInput,
+  CleanupResult,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -41,4 +43,7 @@ export interface Storage {
 
   /** Extend a live lease without changing its token or consuming an attempt. */
   heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult>
+
+  /** Bounded removal of terminal jobs beyond a queue's retention policy. */
+  cleanup(input: CleanupInput): Promise<CleanupResult>
 }

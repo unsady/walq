@@ -71,6 +71,9 @@ function groupedStorage(
     async heartbeat() {
       return 'applied'
     },
+    async cleanup() {
+      return { removed: 0, more: false }
+    },
   }
 
   return { storage, calls }
@@ -116,6 +119,11 @@ function gatedStorage(): GatedStorage {
       started.push('heartbeat')
       await gate.promise
       return 'applied'
+    },
+    async cleanup() {
+      started.push('cleanup')
+      await gate.promise
+      return { removed: 0, more: false }
     },
   }
 
@@ -250,8 +258,13 @@ describe('StorageCoordinator', () => {
       coordinator.complete({ id: 'job-1', leaseToken: 'lease-1', now }),
       coordinator.fail({ id: 'job-1', leaseToken: 'lease-1', now, error: '', retryAt: null }),
       coordinator.heartbeat({ id: 'job-1', leaseToken: 'lease-1', now, leaseDuration: 30_000 }),
+      coordinator.cleanup({
+        queue: 'email',
+        retention: { completed: 0, failed: 10 },
+        limit: 500,
+      }),
     ]
-    expect(started).toEqual(['enqueue', 'complete', 'fail', 'heartbeat'])
+    expect(started).toEqual(['enqueue', 'complete', 'fail', 'heartbeat', 'cleanup'])
 
     release()
     await Promise.all(pending)

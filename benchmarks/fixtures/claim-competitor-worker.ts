@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     )
   `)
   const complete = db.prepare(`
-    UPDATE walq_jobs SET status = 'completed', leaseToken = NULL, expiresAt = NULL
+    UPDATE walq_jobs SET status = 'completed', finishedAt = @now, leaseToken = NULL, expiresAt = NULL
     WHERE id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now
   `)
   const leases: Lease[] = []

@@ -73,6 +73,27 @@ export interface FailInput {
   retryAt: number | null
 }
 
+/** How many terminal jobs of each status one queue keeps. Null keeps all. */
+export interface RetentionPolicy {
+  completed: number | null
+  failed: number | null
+}
+
+/** Bounded removal of terminal jobs that exceed a queue's retention policy. */
+export interface CleanupInput {
+  queue: QueueName
+  retention: RetentionPolicy
+  /** Maximum number of rows this call may delete. */
+  limit: number
+}
+
+export interface CleanupResult {
+  /** Terminal rows removed by this call. */
+  removed: number
+  /** Another call may still find eligible terminal rows. */
+  more: boolean
+}
+
 export interface HeartbeatInput {
   id: JobId
   leaseToken: LeaseToken

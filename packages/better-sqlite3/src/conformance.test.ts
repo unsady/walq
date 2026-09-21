@@ -2,6 +2,7 @@ import type { Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
 import {
+  runCleanupConformance,
   runGroupedClaimConformance,
   runStorageConformance,
 } from '../../../tests/storage/conformance.js'
@@ -23,3 +24,4 @@ async function cleanup(): Promise<void> {
 
 runStorageConformance(createStorage, cleanup)
 runGroupedClaimConformance(createStorage, cleanup)
+runCleanupConformance(createStorage, cleanup)

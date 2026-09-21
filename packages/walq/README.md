@@ -4,23 +4,55 @@ Typed queue API for walq storage adapters.
 
 ## API
 
-- `new Queue(name, { storage, attempts?, onError? })` creates a queue. `attempts` defaults to 1.
+- `new Queue(name, { storage, attempts?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
+- `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Omitted statuses default to `completed: 0` and `failed: 100`; `null` keeps every job of that status.
 - `queue.add(data)` serializes the data and enqueues a job.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
 
-Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single transaction. A separate `Storage` instance has its own coordinator.
+Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single transaction. A separate `Storage` instance has its own coordinator. One queue name can be processed by only one worker per `Storage`; registering a second worker for the same name is rejected.
 
 The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain.
 
 Handlers run concurrently as asynchronous tasks in the current Node.js process. They are not worker threads. The context signal aborts when the job loses its lease, but handlers must stop cooperatively. Delivery is at-least-once, so handlers must tolerate repeated execution.
+
+## Retention
+
+Terminal jobs are removed asynchronously after `complete()` or a terminal
+`fail()` commits. Retention is per queue and per status: by default every
+completed job is removed and the newest 100 failures are kept for diagnostics.
+Pass `retention` to keep more or fewer:
+
+```ts
+const queue = new Queue('email', {
+  storage,
+  retention: { completed: 10, failed: 1_000 },
+})
+```
+
+A `null` count keeps every job of that status, for example
+`retention: { completed: null, failed: null }` to disable cleanup entirely.
+
+Cleanup runs in bounded batches, at most one pass per second per queue, and
+yields to queue work between batches while eligible rows remain. A deferred task
+schedules passes after claim passes (which can recover expired jobs) and after
+terminal transitions, so `process()` and handler acknowledgements never run
+database maintenance themselves. An idle queue pays at most one pass per
+throttle interval. `worker.close()` stops scheduling new passes and waits for a
+batch already in flight.
+
+Every storage adapter implements bounded `cleanup`. Because cleanup is
+asynchronous, terminal rows may remain
+visible after `complete()` and can survive a process crash until a later worker
+starts or finishes another job.
 
 ## Error reporting
 
 `onError(err, ctx)` receives errors the queue would otherwise swallow. `ctx` is discriminated by `operation`:
 
 - `claim` — a claim failed before any job was acquired. Grouped claim failures are reported once per affected queue.
+- `cleanup` — a bounded cleanup pass failed for the queue. Cleanup is retried after the next terminal transition.
 - `heartbeat`, `complete`, `fail` — a lease mutation for a claimed job failed.
 - `handler` — the handler threw or rejected.
 

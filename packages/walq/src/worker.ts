@@ -1,4 +1,4 @@
-import type { ClaimedJob } from '@walq/core/storage'
+import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/storage'
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
 import { deferred, delay, type Delay } from './delay.js'
@@ -6,6 +6,14 @@ import type { ProcessErrorContext, ProcessErrorHandler, Processor } from './type
 
 const leaseDuration = 30_000
 const heartbeatInterval = 10_000
+const cleanupInterval = 1_000
+const cleanupBatch = 500
+
+export type WorkerOptions = {
+  concurrency: number
+  retention: RetentionPolicy
+  onError: ProcessErrorHandler | undefined
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.stack ?? error.message
@@ -18,7 +26,7 @@ function errorMessage(error: unknown): string {
 
 function describeContext(context: ProcessErrorContext): string {
   const parts = [`walq queue "${context.queue}" ${context.operation} failed`]
-  if (context.operation !== 'claim') {
+  if (context.operation !== 'claim' && context.operation !== 'cleanup') {
     parts.push(`job ${context.jobId}`, `attempt ${context.attempt}`)
   }
   return parts.join(', ')
@@ -49,8 +57,14 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #processor: Processor<Data>
   readonly #concurrency: number
   readonly #onError: ProcessErrorHandler | undefined
+  readonly #retention: RetentionPolicy
+  readonly #cleanupEnabled: boolean
   readonly #active = new Set<Promise<void>>()
   readonly #done = deferred()
+  #cleanupNeeded = false
+  #cleanupTask: Promise<void> | undefined
+  #cleanupTimer: Delay | undefined
+  #nextCleanupAt = 0
   #closing = false
   #polling = false
 
@@ -58,14 +72,21 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     coordinator: StorageCoordinator,
     queue: string,
     processor: Processor<Data>,
-    concurrency: number,
-    onError?: ProcessErrorHandler,
+    options: WorkerOptions,
   ) {
     this.#coordinator = coordinator
     this.#queue = queue
     this.#processor = processor
-    this.#concurrency = concurrency
-    this.#onError = onError
+    this.#concurrency = options.concurrency
+    this.#onError = options.onError
+    this.#retention = options.retention
+    this.#cleanupEnabled = options.retention.completed !== null || options.retention.failed !== null
+  }
+
+  /** Start maintenance after the worker is registered with the coordinator. */
+  start(): void {
+    // A restart may find terminal rows that the previous process left behind.
+    this.#scheduleCleanup()
   }
 
   async poll(): Promise<number> {
@@ -88,6 +109,9 @@ export class QueueWorker<Data> implements CoordinatedWorker {
         this.#report(error, { queue: this.#queue, operation: 'claim' })
         return 0
       }
+      // A claim also recovers expired leases, which can produce terminal rows
+      // that no complete() or fail() call in this process observes.
+      this.#scheduleCleanup()
       for (const job of jobs) this.#start(job)
       return jobs.length
     } finally {
@@ -101,9 +125,12 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     if (!this.#closing) {
       this.#closing = true
       this.#coordinator.unregister(this)
+      this.#cleanupTimer?.finish()
       this.#settle()
     }
     await this.#done.promise
+    // Bounded cleanup batches in flight must finish before close() resolves.
+    await this.#cleanupTask
   }
 
   #settle(): void {
@@ -189,20 +216,20 @@ export class QueueWorker<Data> implements CoordinatedWorker {
 
     try {
       if (succeeded) {
-        await this.#coordinator.complete({
-          id: job.id,
-          leaseToken: job.leaseToken,
-          now: Date.now(),
-        })
+        const context = { id: job.id, leaseToken: job.leaseToken, now: Date.now() }
+        if ((await this.#coordinator.complete(context)) === 'applied') this.#scheduleCleanup()
       } else {
         const now = Date.now()
-        await this.#coordinator.fail({
+        const result = await this.#coordinator.fail({
           id: job.id,
           leaseToken: job.leaseToken,
           now,
           error: errorMessage(failure),
           retryAt: now,
         })
+        // The adapter schedules a retry while attempts remain, so only an
+        // exhausted attempt budget produces a terminal row.
+        if (result === 'applied' && job.attemptsMade >= job.attempts) this.#scheduleCleanup()
       }
     } catch (error) {
       // The lease will be recovered if the final mutation did not commit.
@@ -228,6 +255,71 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       })
     } catch (callbackError) {
       safeConsoleCallbackError(callbackError, context)
+    }
+  }
+
+  /** Coalesce terminal transitions into at most one cleanup pass per interval. */
+  #scheduleCleanup(): void {
+    if (!this.#cleanupEnabled || this.#closing) return
+    this.#cleanupNeeded = true
+    if (this.#cleanupTask !== undefined) return
+    this.#cleanupTask = this.#runCleanup()
+  }
+
+  async #runCleanup(): Promise<void> {
+    let throttled = false
+    try {
+      // Never run database work in the caller's continuation: defer the first
+      // batch so process() and terminal transitions stay off the cleanup path.
+      const start = delay(0)
+      this.#cleanupTimer = start
+      await start.promise
+      this.#cleanupTimer = undefined
+      if (this.#closing) return
+
+      while (!this.#closing && this.#cleanupNeeded) {
+        this.#cleanupNeeded = false
+        if (!throttled) {
+          throttled = true
+          const wait = this.#nextCleanupAt - Date.now()
+          if (wait > 0) {
+            const timer = delay(wait)
+            this.#cleanupTimer = timer
+            await timer.promise
+            this.#cleanupTimer = undefined
+            if (this.#closing) return
+          }
+        }
+
+        // Update the throttle before the call so a failing adapter is retried at
+        // the same bounded rate as a successful one.
+        this.#nextCleanupAt = Date.now() + cleanupInterval
+        let result: CleanupResult
+        try {
+          result = await this.#coordinator.cleanup({
+            queue: this.#queue,
+            retention: this.#retention,
+            limit: cleanupBatch,
+          })
+        } catch (error) {
+          this.#report(error, { queue: this.#queue, operation: 'cleanup' })
+          return
+        }
+
+        if (!result.more) return
+
+        // Keep draining one bounded batch at a time, yielding between batches so
+        // polling, heartbeats, and handler work are not starved.
+        this.#cleanupNeeded = true
+        const timer = delay(0)
+        this.#cleanupTimer = timer
+        await timer.promise
+        this.#cleanupTimer = undefined
+      }
+    } finally {
+      this.#cleanupTimer = undefined
+      this.#cleanupTask = undefined
+      if (this.#cleanupNeeded && !this.#closing) this.#scheduleCleanup()
     }
   }
 }

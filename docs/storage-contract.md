@@ -20,8 +20,8 @@ adapters can implement the same contract.
   not provided.
 
 The contract does not include connections, migrations, polling, retry policies,
-retention, cancellation, events, or a public Queue API. `claimQueues` is an
-optional adapter capability; see [Grouped claim](#grouped-claim).
+cancellation, events, or a public Queue API. `claimQueues` is an optional adapter
+capability; see [Grouped claim](#grouped-claim) and [Cleanup](#cleanup).
 
 ## Values and inputs
 
@@ -30,7 +30,8 @@ optional adapter capability; see [Grouped claim](#grouped-claim).
 - Callers provide `now`. Each operation uses that value consistently. Distributed
   callers must use sufficiently synchronized clocks; storage does not establish
   a shared clock or substitute its own time.
-- `limit` and `attempts` are positive safe integers.
+- `limit` and `attempts` are positive safe integers. Retention counts are `null`
+  or nonnegative safe integers.
 - Queue and job names are nonempty strings. Queue names are matched exactly.
 - Data is a serialized JSON value. Serialization belongs above storage.
 - IDs and lease tokens are opaque strings. Storage generates unique job IDs and
@@ -149,6 +150,46 @@ Set expiry to `max(current expiresAt, now + leaseDuration)`. Keep the same token
 status, attemptsMade, and other job metadata. Heartbeat never shortens a lease and
 cannot revive an expired one.
 
+## Cleanup
+
+`cleanup` provides bounded terminal-job retention. Every adapter must implement
+it. The method removes only terminal jobs of one queue and never touches pending
+or active rows. The input carries:
+
+- `queue` — the exact queue name to clean;
+- `retention.completed` and `retention.failed` — how many jobs of each status to
+  keep, where `0` makes every terminal job of that status eligible and `null`
+  keeps all of them;
+- `limit` — a positive bound on rows deleted by this call.
+
+Within one call the adapter must:
+
+1. Consider only rows of the requested queue with one of the two terminal
+   statuses.
+2. Order each status by the time the job finished, newest first, with a stable
+   tie-breaker.
+3. Delete only rows beyond the first `retention[status]` rows of that order.
+   A bounded call deletes from the oldest eligible rows first, so repeated calls
+   converge on the newest retained rows.
+4. Delete at most `limit` rows across both statuses as one atomic mutation.
+
+The result is `{ removed, more }`. `removed` is the number of rows deleted by
+this call. `more` reports that another call may still find eligible rows; it may
+be `true` even when nothing remains, so a caller repeats until it sees `false`.
+
+One call must stay proportional to `limit` and the retention counts rather than
+to the size of the terminal history, so draining a large backlog remains linear
+in the number of deleted rows.
+
+Cleanup is idempotent and restart-safe: leftover terminal rows are discovered by
+a later call, including after a process crash. It is separate from `complete`
+and `fail`, so successful handler acknowledgement never waits for maintenance.
+Deletion frees pages for reuse but does not necessarily shrink the database
+file; adapters must not run `VACUUM` as part of cleanup.
+
+Callers choose when to run cleanup and how to bound and space batches. The
+contract does not schedule cleanup or delete any rows outside this method.
+
 ## State transitions
 
 | Operation                                     | From                             | To        |
@@ -162,5 +203,7 @@ cannot revive an expired one.
 | expiration recovery with attempts exhausted   | active, expired                  | failed    |
 | heartbeat                                     | active, live matching lease      | active    |
 
-Completed and failed jobs are terminal. Retention and deletion are outside this
-contract; these operations do not delete jobs.
+Completed and failed jobs are terminal. `enqueue`, `claim`, `complete`, `fail`,
+and `heartbeat` never delete jobs; deletion happens only through
+[cleanup](#cleanup). Adapters record when a job
+became terminal so retention can keep the most recently finished jobs.

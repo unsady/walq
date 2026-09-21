@@ -3,6 +3,8 @@ import { Buffer } from 'node:buffer'
 import type {
   ClaimedJob,
   ClaimInput,
+  CleanupInput,
+  CleanupResult,
   EnqueueInput,
   LeaseMutationResult,
   Storage,
@@ -466,8 +468,7 @@ export function runStorageConformance(
  * Conformance for the optional grouped claim capability. Adapters that expose
  * claimQueues call this alongside runStorageConformance; adapters that do not
  * are expected to fall back to claim() through the coordinator instead.
- */
-export function runGroupedClaimConformance(
+ */ export function runGroupedClaimConformance(
   createStorage: StorageFactory,
   cleanup: StorageCleanup,
 ): void {
@@ -587,6 +588,150 @@ export function runGroupedClaimConformance(
       // Nothing was claimed, so both queues still hold their jobs.
       expect(await storage.claim(claimInput({ queue: 'a' }))).toHaveLength(1)
       expect(await storage.claim(claimInput({ queue: 'b' }))).toHaveLength(1)
+    })
+  })
+}
+
+/** Conformance for bounded terminal-job cleanup. */
+export function runCleanupConformance(
+  createStorage: StorageFactory,
+  cleanup: StorageCleanup,
+): void {
+  describe('cleanup conformance', () => {
+    let storage: Storage
+
+    beforeEach(async () => {
+      storage = await createStorage()
+    })
+
+    afterEach(async () => {
+      await cleanup()
+    })
+
+    function runCleanup(input: CleanupInput): Promise<CleanupResult> {
+      return storage.cleanup(input)
+    }
+
+    function cleanupInput(overrides: Partial<CleanupInput> = {}): CleanupInput {
+      return { queue, retention: { completed: 0, failed: 0 }, limit: 10, ...overrides }
+    }
+
+    /** Create one terminal job for `queue` whose finish time is `finishedAt`. */
+    async function finish(
+      status: 'completed' | 'failed',
+      finishedAt: number,
+      targetQueue = queue,
+    ): Promise<ClaimedJob> {
+      const created = await storage.enqueue(
+        enqueueInput({
+          queue: targetQueue,
+          now: finishedAt,
+          availableAt: finishedAt,
+          attempts: 1,
+        }),
+      )
+      const [job] = await storage.claim(
+        claimInput({ queue: targetQueue, now: finishedAt, limit: 1 }),
+      )
+      if (job === undefined || job.id !== created.id) {
+        throw new Error('cleanup conformance could not claim the seeded job')
+      }
+
+      const result =
+        status === 'failed'
+          ? await storage.fail({
+              id: job.id,
+              leaseToken: job.leaseToken,
+              now: finishedAt,
+              error: 'cleanup failure',
+              retryAt: null,
+            })
+          : await storage.complete({ id: job.id, leaseToken: job.leaseToken, now: finishedAt })
+      if (result !== 'applied') throw new Error('cleanup conformance could not finish the job')
+
+      return job
+    }
+
+    it('removes only terminal rows beyond the retention counts and queue scope', async () => {
+      for (const finishedAt of [100, 101, 102, 103]) await finish('completed', finishedAt)
+      for (const finishedAt of [200, 201, 202]) await finish('failed', finishedAt)
+      for (const finishedAt of [300, 301]) await finish('completed', finishedAt, otherQueue)
+
+      const activeSource = await storage.enqueue(
+        enqueueInput({ queue, now: 400, availableAt: 400, attempts: 1 }),
+      )
+      const [active] = await storage.claim(
+        claimInput({ queue, now: 400, limit: 1, leaseDuration: 10_000 }),
+      )
+      expect(active?.id).toBe(activeSource.id)
+      const pending = await storage.enqueue(enqueueInput({ queue, now: 401, availableAt: 401 }))
+
+      // Four completed and three failed rows are eligible: keep 2 and 1.
+      expect(await runCleanup(cleanupInput({ retention: { completed: 2, failed: 1 } }))).toEqual({
+        removed: 4,
+        more: false,
+      })
+      expect(await runCleanup(cleanupInput({ retention: { completed: 2, failed: 1 } }))).toEqual({
+        removed: 0,
+        more: false,
+      })
+
+      // Tightening the limits removes the retained rows as well.
+      expect(await runCleanup(cleanupInput())).toEqual({ removed: 3, more: false })
+
+      // Another queue keeps its rows until it is cleaned with its own policy.
+      expect(await runCleanup(cleanupInput({ queue: otherQueue }))).toEqual({
+        removed: 2,
+        more: false,
+      })
+
+      // Pending and active rows were never eligible.
+      expect(
+        await storage.heartbeat({
+          id: active!.id,
+          leaseToken: active!.leaseToken,
+          now: 402,
+          leaseDuration: 10_000,
+        }),
+      ).toBe('applied')
+      const claimed = await storage.claim(claimInput({ queue, now: 402, limit: 10 }))
+      expect(claimed.map((job) => job.id)).toEqual([pending.id])
+    })
+
+    it('bounds work per call and reports that more rows remain', async () => {
+      for (const finishedAt of [100, 101, 102, 103, 104]) await finish('completed', finishedAt)
+
+      expect(await runCleanup(cleanupInput({ limit: 2 }))).toEqual({ removed: 2, more: true })
+      expect(await runCleanup(cleanupInput({ limit: 2 }))).toEqual({ removed: 2, more: true })
+      expect(await runCleanup(cleanupInput({ limit: 2 }))).toEqual({ removed: 1, more: false })
+      expect(await runCleanup(cleanupInput({ limit: 2 }))).toEqual({ removed: 0, more: false })
+    })
+
+    it('keeps every terminal row for a null retention count', async () => {
+      await finish('completed', 100)
+      await finish('failed', 101)
+
+      expect(
+        await runCleanup(cleanupInput({ retention: { completed: null, failed: null } })),
+      ).toEqual({ removed: 0, more: false })
+      expect(await runCleanup(cleanupInput())).toEqual({ removed: 2, more: false })
+    })
+
+    it('rejects invalid inputs without mutating terminal rows', async () => {
+      await finish('completed', 100)
+
+      const patches: Partial<CleanupInput>[] = [
+        { queue: '' },
+        { limit: 0 },
+        { limit: 1.5 },
+        { retention: { completed: -1, failed: 0 } },
+        { retention: { completed: 0, failed: 1.5 } },
+      ]
+      for (const patch of patches) {
+        await expect(runCleanup({ ...cleanupInput(), ...patch })).rejects.toThrow(/.+/)
+      }
+
+      expect(await runCleanup(cleanupInput())).toEqual({ removed: 1, more: false })
     })
   })
 }
