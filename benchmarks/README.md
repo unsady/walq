@@ -35,6 +35,8 @@ only `*.test.ts`, so the heavy workloads never run there.
 | `BENCH_RETENTION_BATCH` |           | Replaces every retention cleanup batch size with one value                                                 |
 | `BENCH_CLAIM_QUEUES`    | grid      | Replaces the claim-grouping queue tiers, for example `32,64,128`                                           |
 | `BENCH_CLAIM_LIMITS`    | grid      | Replaces the claim-grouping claim limits, for example `16`                                                 |
+| `BENCH_CLAIM_MODES`     | grid      | Replaces the claim-grouping modes, for example `grouped`                                                   |
+| `BENCH_CLAIM_CHUNKS`    | `all`     | Queues per grouped transaction; `all` or positive integers, for example `all,16,32,64`                     |
 
 The previous `--suite`, `--repeats`, `--warmup`, `--jobs`, `--only`, `--json`, `--full` and
 `--help` flags, and the `BENCH_SUITES` variable, are gone because `vitest bench` owns the CLI.
@@ -141,10 +143,11 @@ opens a second connection in a worker thread against the same WAL file and repea
 measured enqueue and complete writes against pre-created leases, alternating their order and
 yielding for one millisecond between cycles to avoid artificial writer starvation.
 
-Reported: claimed `jobs/sec`; individual transaction p50/p95/p99; event-loop p95/p99; and the
-competing connection's enqueue and complete p95/p99. Transaction latency intentionally has a
-different unit of work: one queue claim for `current`, versus one all-queue transaction for
-`grouped`. Before each all-queue round the suite schedules a `setImmediate`; the time until that
+Reported: claimed `jobs/sec`; individual transaction p50/p95/p99; average jobs per transaction;
+the commit count; event-loop p95/p99; and the competing connection's enqueue and complete
+p95/p99. Transaction latency intentionally has a different unit of work: one queue claim for
+`current`, versus one grouped transaction for `grouped` (all queues by default, or a `chunk` of
+queues when the chunk tiers are configured). Before each all-queue round the suite schedules a `setImmediate`; the time until that
 callback runs is the event-loop stall sample. It includes the whole claim round and scheduler
 latency, so use it as a responsiveness comparison rather than exact CPU time. Competing runs add
 short, unmeasured pauses between selected rounds so the second connection produces enough latency
@@ -155,11 +158,14 @@ is invalid when work is incomplete, duplicated, or the competing writer reports 
 prototype keeps its own prepared statements so it can compare `current` and `grouped` in one grid
 without depending on adapter internals; production code lives behind `Storage.claimQueues`.
 
-`BENCH_CLAIM_QUEUES` and `BENCH_CLAIM_LIMITS` replace the queue and limit tiers so a longer
-`BEGIN IMMEDIATE` can be probed without editing the grid:
+`BENCH_CLAIM_QUEUES`, `BENCH_CLAIM_LIMITS`, `BENCH_CLAIM_MODES` and `BENCH_CLAIM_CHUNKS`
+replace the queue, limit, mode and chunk tiers so a longer `BEGIN IMMEDIATE` can be probed without
+editing the grid. `chunk all` keeps the original behaviour of one transaction per round; smaller
+chunks split the round into several transactions:
 
 ```sh
-BENCH_CLAIM_QUEUES=32,64,128 BENCH_CLAIM_LIMITS=16 pnpm bench:claim-grouping
+BENCH_CLAIM_QUEUES=128,256 BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
+  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench:claim-grouping
 ```
 
 ## complete-batch — batched completion prototype

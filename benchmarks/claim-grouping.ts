@@ -30,11 +30,16 @@ import { defineScenario, type ScenarioDefinition } from './scenario.js'
 export type ClaimGroupingMode = 'current' | 'grouped'
 export type ClaimGroupingPlacement = 'solo' | 'competing'
 
+/** One `BEGIN IMMEDIATE ... COMMIT` executed by the Walq side, with how many jobs it claimed. */
+export type TransactionSample = { micros: number; jobs: number }
+
 export type ClaimGroupingGrid = {
   queues: number[]
   limits: number[]
   modes: ClaimGroupingMode[]
   placements: ClaimGroupingPlacement[]
+  /** Queues per transaction for `grouped`; `undefined` means one transaction per whole round. */
+  chunks: (number | undefined)[]
 }
 
 export type ClaimGroupingScenario = {
@@ -42,6 +47,8 @@ export type ClaimGroupingScenario = {
   limit: number
   mode: ClaimGroupingMode
   placement: ClaimGroupingPlacement
+  chunkSize: number | undefined
+  chunksConfigured: boolean
 }
 
 export const quickClaimGroupingGrid: ClaimGroupingGrid = {
@@ -49,6 +56,7 @@ export const quickClaimGroupingGrid: ClaimGroupingGrid = {
   limits: [1, 16],
   modes: ['current', 'grouped'],
   placements: ['solo', 'competing'],
+  chunks: [undefined],
 }
 
 export const fullClaimGroupingGrid: ClaimGroupingGrid = {
@@ -56,6 +64,7 @@ export const fullClaimGroupingGrid: ClaimGroupingGrid = {
   limits: [1, 4, 16],
   modes: ['current', 'grouped'],
   placements: ['solo', 'competing'],
+  chunks: [undefined],
 }
 
 const metadata =
@@ -68,7 +77,7 @@ type ClaimGroupingOutcome = {
   elapsed: number
   claimed: number
   duplicates: number
-  transactionSamples: number[]
+  transactions: TransactionSample[]
   eventLoopSamples: number[]
   competitor: ClaimCompetitorReport
 }
@@ -126,9 +135,30 @@ class GroupedClaimer {
     })
   }
 
-  claim(requests: ClaimRequest[]): ClaimedJob[] {
-    return this.#transaction.immediate(requests)
+  claim(
+    requests: ClaimRequest[],
+    chunkSize: number | undefined,
+    transactions: TransactionSample[],
+  ): ClaimedJob[] {
+    const claimed: ClaimedJob[] = []
+    for (const chunk of chunkRequests(requests, chunkSize)) {
+      const started = performance.now()
+      const jobs = this.#transaction.immediate(chunk)
+      transactions.push({ micros: performance.now() - started, jobs: jobs.length })
+      claimed.push(...jobs)
+    }
+    return claimed
   }
+}
+
+function chunkRequests(requests: ClaimRequest[], chunkSize: number | undefined): ClaimRequest[][] {
+  if (chunkSize === undefined || chunkSize >= requests.length) return [requests]
+
+  const chunks: ClaimRequest[][] = []
+  for (let index = 0; index < requests.length; index += chunkSize) {
+    chunks.push(requests.slice(index, index + chunkSize))
+  }
+  return chunks
 }
 
 function emptyCompetitor(): ClaimCompetitorReport {
@@ -136,11 +166,24 @@ function emptyCompetitor(): ClaimCompetitorReport {
 }
 
 export function claimGroupingScenarios(grid: ClaimGroupingGrid): ClaimGroupingScenario[] {
+  const chunksConfigured = grid.chunks.length > 1 || grid.chunks[0] !== undefined
   const scenarios: ClaimGroupingScenario[] = []
   for (const queues of grid.queues) {
     for (const limit of grid.limits) {
       for (const placement of grid.placements) {
-        for (const mode of grid.modes) scenarios.push({ queues, limit, mode, placement })
+        for (const mode of grid.modes) {
+          const chunks = mode === 'grouped' ? grid.chunks : [undefined]
+          for (const chunkSize of chunks) {
+            scenarios.push({
+              queues,
+              limit,
+              mode,
+              placement,
+              chunkSize,
+              chunksConfigured: mode === 'grouped' && chunksConfigured,
+            })
+          }
+        }
       }
     }
   }
@@ -157,6 +200,41 @@ export function claimLimitOverride(value: string | undefined): number[] | undefi
   return csvNumbers(value, 'BENCH_CLAIM_LIMITS')
 }
 
+/**
+ * Optional override that replaces the grouped chunk tiers. Accepts positive integers and `all`
+ * (one transaction for the whole round), for example `BENCH_CLAIM_CHUNKS=all,16,32,64`.
+ */
+export function claimChunkOverride(value: string | undefined): (number | undefined)[] | undefined {
+  if (value === undefined || value === '') return undefined
+
+  return value.split(',').map((part) => {
+    const token = part.trim().toLowerCase()
+    if (token === 'all') return undefined
+    const parsed = Number(token)
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(
+        `BENCH_CLAIM_CHUNKS must be a comma-separated list of positive integers or "all", received "${value}"`,
+      )
+    }
+    return parsed
+  })
+}
+
+/** Optional override that replaces the claim modes, for example `BENCH_CLAIM_MODES=grouped`. */
+export function claimModeOverride(value: string | undefined): ClaimGroupingMode[] | undefined {
+  if (value === undefined || value === '') return undefined
+
+  return value.split(',').map((part) => {
+    const token = part.trim()
+    if (token !== 'current' && token !== 'grouped') {
+      throw new Error(
+        `BENCH_CLAIM_MODES must be a comma-separated list of current/grouped, received "${value}"`,
+      )
+    }
+    return token
+  })
+}
+
 function csvNumbers(value: string | undefined, label: string): number[] | undefined {
   if (value === undefined || value === '') return undefined
 
@@ -171,20 +249,29 @@ function csvNumbers(value: string | undefined, label: string): number[] | undefi
   })
 }
 
-/** Apply the queue/limit overrides without mutating the source grid. */
+/** Apply the queue/limit/mode/chunk overrides without mutating the source grid. */
 export function withClaimGroupingTiers(
   grid: ClaimGroupingGrid,
-  overrides: { queues: number[] | undefined; limits: number[] | undefined },
+  overrides: {
+    queues: number[] | undefined
+    limits: number[] | undefined
+    modes?: ClaimGroupingMode[] | undefined
+    chunks?: (number | undefined)[] | undefined
+  },
 ): ClaimGroupingGrid {
   return {
     ...grid,
     queues: overrides.queues ?? grid.queues,
     limits: overrides.limits ?? grid.limits,
+    modes: overrides.modes ?? grid.modes,
+    chunks: overrides.chunks ?? grid.chunks,
   }
 }
 
 export function claimGroupingScenarioName(scenario: ClaimGroupingScenario): string {
-  return `${scenario.mode} / ${scenario.placement} / ${scenario.queues} queues / limit ${scenario.limit}`
+  const base = `${scenario.mode} / ${scenario.placement} / ${scenario.queues} queues / limit ${scenario.limit}`
+  if (!scenario.chunksConfigured) return base
+  return `${base} / chunk ${scenario.chunkSize ?? 'all'}`
 }
 
 function prepareJobs(db: Database.Database, queues: string[], jobs: number): void {
@@ -213,13 +300,13 @@ function nextTurn(): Promise<number> {
 async function claimCurrent(
   storage: Storage,
   requests: ClaimRequest[],
-  transactionSamples: number[],
+  transactions: TransactionSample[],
 ): Promise<ClaimedJob[]> {
   const claimed: ClaimedJob[] = []
   for (const request of requests) {
     const started = performance.now()
     const jobs = await storage.claim(request)
-    transactionSamples.push(performance.now() - started)
+    transactions.push({ micros: performance.now() - started, jobs: jobs.length })
     claimed.push(...jobs)
   }
   return claimed
@@ -228,12 +315,10 @@ async function claimCurrent(
 function claimGrouped(
   claimer: GroupedClaimer,
   requests: ClaimRequest[],
-  transactionSamples: number[],
+  chunkSize: number | undefined,
+  transactions: TransactionSample[],
 ): ClaimedJob[] {
-  const started = performance.now()
-  const claimed = claimer.claim(requests)
-  transactionSamples.push(performance.now() - started)
-  return claimed
+  return claimer.claim(requests, chunkSize, transactions)
 }
 
 function startCompetitor(
@@ -313,7 +398,7 @@ async function executeRun(
   const grouped = new GroupedClaimer(db)
   const competitor =
     scenario.placement === 'competing' ? startCompetitor(path, synchronous) : undefined
-  const transactionSamples: number[] = []
+  const transactions: TransactionSample[] = []
   const eventLoopSamples: number[] = []
   const claimedIds = new Set<string>()
   let claimed = 0
@@ -337,8 +422,8 @@ async function executeRun(
       const roundStarted = performance.now()
       const jobsInRound =
         scenario.mode === 'current'
-          ? await claimCurrent(storage, requests, transactionSamples)
-          : claimGrouped(grouped, requests, transactionSamples)
+          ? await claimCurrent(storage, requests, transactions)
+          : claimGrouped(grouped, requests, scenario.chunkSize, transactions)
       elapsed += performance.now() - roundStarted
       eventLoopSamples.push(await turn)
       for (const job of jobsInRound) claimedIds.add(job.id)
@@ -360,7 +445,7 @@ async function executeRun(
       elapsed,
       claimed,
       duplicates: claimed - claimedIds.size,
-      transactionSamples,
+      transactions,
       eventLoopSamples,
       competitor: competitorReport,
     }
@@ -391,7 +476,17 @@ function summarizeRuns(
     .map((outcome) => invalidReason(outcome, jobs))
     .filter((reason): reason is string => reason !== undefined)
   const rates = valid.map((outcome) => (outcome.claimed / outcome.elapsed) * 1000)
-  const transaction = summarizeMicros(valid.flatMap((outcome) => outcome.transactionSamples))
+  const transaction = summarizeMicros(
+    valid.flatMap((outcome) => outcome.transactions.map((sample) => sample.micros)),
+  )
+  const transactionJobs = valid.flatMap((outcome) =>
+    outcome.transactions.map((sample) => sample.jobs),
+  )
+  const commits = valid.map((outcome) => outcome.transactions.length)
+  const jobsPerTransaction =
+    transactionJobs.length === 0
+      ? 0
+      : transactionJobs.reduce((total, jobs) => total + jobs, 0) / transactionJobs.length
   const eventLoop = summarizeMicros(valid.flatMap((outcome) => outcome.eventLoopSamples))
   const enqueue = summarizeMicros(valid.flatMap((outcome) => outcome.competitor.enqueueSamples))
   const complete = summarizeMicros(valid.flatMap((outcome) => outcome.competitor.completeSamples))
@@ -412,6 +507,7 @@ function summarizeRuns(
       placement: scenario.placement,
       queues: scenario.queues,
       limit: scenario.limit,
+      chunk: scenario.chunkSize ?? 'all',
       jobs,
     },
     metrics: {
@@ -420,6 +516,8 @@ function summarizeRuns(
       'transaction p50 (µs)': transaction.p50,
       'transaction p95 (µs)': transaction.p95,
       'transaction p99 (µs)': transaction.p99,
+      'jobs/transaction': jobsPerTransaction,
+      commits: median(commits),
       'event loop p95 (µs)': eventLoop.p95,
       'event loop p99 (µs)': eventLoop.p99,
       'enqueue p95 (µs)': enqueue.p95,
@@ -433,6 +531,7 @@ function summarizeRuns(
       'elapsed (ms)': outcome.elapsed,
       claimed: outcome.claimed,
       duplicates: outcome.duplicates,
+      commits: outcome.transactions.length,
       'competitor ops': outcome.competitor.operations,
     })),
     notes,

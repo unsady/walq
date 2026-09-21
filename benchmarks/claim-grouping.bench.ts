@@ -2,9 +2,11 @@ import { expect, test } from 'vitest'
 
 import { readBenchEnvironment } from './bench-options.js'
 import {
+  claimChunkOverride,
   claimGroupingScenarioName,
   claimGroupingScenarios,
   claimLimitOverride,
+  claimModeOverride,
   claimQueueOverride,
   defineClaimGroupingScenario,
   fullClaimGroupingGrid,
@@ -21,6 +23,8 @@ const grid = withClaimGroupingTiers(
   {
     queues: claimQueueOverride(process.env.BENCH_CLAIM_QUEUES),
     limits: claimLimitOverride(process.env.BENCH_CLAIM_LIMITS),
+    modes: claimModeOverride(process.env.BENCH_CLAIM_MODES),
+    chunks: claimChunkOverride(process.env.BENCH_CLAIM_CHUNKS),
   },
 )
 const jobs = environment.jobs ?? 4096
