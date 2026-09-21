@@ -7,8 +7,8 @@ const source = (path: string): string => fileURLToPath(new URL(path, import.meta
 export default defineConfig({
   resolve: {
     alias: [
-      { find: /^walq\/storage$/, replacement: source('./packages/walq/src/storage.ts') },
-      { find: /^walq$/, replacement: source('./packages/walq/src/index.ts') },
+      { find: /^@walq\/core\/storage$/, replacement: source('./packages/walq/src/storage.ts') },
+      { find: /^@walq\/core$/, replacement: source('./packages/walq/src/index.ts') },
       {
         find: /^@walq\/better-sqlite3$/,
         replacement: source('./packages/better-sqlite3/src/index.ts'),

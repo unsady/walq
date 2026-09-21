@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 
+import type { ClaimedJob, LeaseMutationResult } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { ClaimedJob, LeaseMutationResult } from 'walq/storage'
 
 import { betterSqlite3 } from './index.js'
 

@@ -1,5 +1,5 @@
 {
-  "name": "walq",
+  "name": "@walq/core",
   "version": "0.1.0",
   "description": "A small, typed, lease-based job queue for SQLite.",
   "keywords": [

@@ -1,4 +1,4 @@
-import type { CompleteInput, RetentionRule } from 'walq/storage'
+import type { CompleteInput, RetentionRule } from '@walq/core/storage'
 
 export function integer(value: number, name: string, minimum = 0): void {
   if (!Number.isSafeInteger(value) || value < minimum) {

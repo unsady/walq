@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to `walq` and `@walq/better-sqlite3` are documented here.
+Notable changes to `@walq/core` and `@walq/better-sqlite3` are documented here.
 
 ## 0.1.0 — Unreleased
 

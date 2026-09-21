@@ -32,13 +32,13 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.3",
     "@walq/better-sqlite3": "workspace:*",
+    "@walq/core": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
     "publint": "^0.3.16",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1",
-    "walq": "workspace:*"
+    "vitest": "^5.0.1"
   },
   "packageManager": "pnpm@12.3.4"
 }

@@ -2,8 +2,8 @@ import { registerHooks } from 'node:module'
 import { performance } from 'node:perf_hooks'
 import { parentPort, workerData } from 'node:worker_threads'
 
+import type { ClaimedJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
-import type { ClaimedJob } from 'walq/storage'
 
 import type { SynchronousMode } from '../bench-options.js'
 

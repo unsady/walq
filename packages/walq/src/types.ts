@@ -1,4 +1,4 @@
-import type { Storage } from 'walq/storage'
+import type { Storage } from '@walq/core/storage'
 
 /**
  * Public retention rule for one terminal status. A `number` is the count

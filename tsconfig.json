@@ -12,8 +12,8 @@
     "skipLibCheck": true,
     "noEmit": true,
     "paths": {
-      "walq": ["./packages/walq/src/index.ts"],
-      "walq/storage": ["./packages/walq/src/storage.ts"],
+      "@walq/core": ["./packages/walq/src/index.ts"],
+      "@walq/core/storage": ["./packages/walq/src/storage.ts"],
       "@walq/better-sqlite3": ["./packages/better-sqlite3/src/index.ts"]
     }
   },

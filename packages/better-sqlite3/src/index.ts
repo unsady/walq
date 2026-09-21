@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
 
-import type Database from 'better-sqlite3'
 import type {
   ClaimedJob,
   ClaimInput,
@@ -15,7 +14,8 @@ import type {
   LeaseMutationResult,
   Storage,
   StoredJob,
-} from 'walq/storage'
+} from '@walq/core/storage'
+import type Database from 'better-sqlite3'
 
 import { chunkClaims } from './chunking.js'
 import { TerminalCleanup } from './cleanup.js'

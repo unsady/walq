@@ -60,8 +60,8 @@ try {
         type: 'module',
         dependencies: {
           '@walq/better-sqlite3': `file:${adapter}`,
+          '@walq/core': `file:${walq}`,
           'better-sqlite3': '^13.0.3',
-          walq: `file:${walq}`,
         },
       },
       null,
@@ -72,7 +72,7 @@ try {
     join(temporaryDirectory, 'smoke.mjs'),
     `import Database from 'better-sqlite3'
 import { betterSqlite3 } from '@walq/better-sqlite3'
-import { Queue } from 'walq'
+import { Queue } from '@walq/core'
 
 const db = new Database(':memory:')
 const queue = new Queue('smoke', { storage: betterSqlite3(db) })
@@ -88,8 +88,8 @@ db.close()
   writeFileSync(
     join(temporaryDirectory, 'types.ts'),
     `import { betterSqlite3 } from '@walq/better-sqlite3'
-import { Queue } from 'walq'
-import type { Storage } from 'walq/storage'
+import { Queue } from '@walq/core'
+import type { Storage } from '@walq/core/storage'
 
 const acceptsStorage = (storage: Storage) => new Queue('typed', { storage })
 void acceptsStorage

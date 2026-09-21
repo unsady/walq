@@ -6,4 +6,4 @@ Add a changeset for every user-visible package change:
 pnpm changeset
 ```
 
-`walq` and `@walq/better-sqlite3` are released at the same version while the public storage contract is stabilizing.
+`@walq/core` and `@walq/better-sqlite3` are released at the same version while the public storage contract is stabilizing.

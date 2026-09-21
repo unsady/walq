@@ -1,5 +1,5 @@
+import type { ClaimedJob, ClaimInput, EnqueueInput, Storage, StoredJob } from '@walq/core/storage'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ClaimedJob, ClaimInput, EnqueueInput, Storage, StoredJob } from 'walq/storage'
 
 import { getCoordinator, type CoordinatedWorker } from './coordinator.js'
 import { deferred } from './delay.js'

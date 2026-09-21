@@ -3,7 +3,7 @@
   "access": "public",
   "baseBranch": "main",
   "commit": false,
-  "fixed": [["walq", "@walq/better-sqlite3"]],
+  "fixed": [["@walq/core", "@walq/better-sqlite3"]],
   "ignore": [],
   "linked": [],
   "privatePackages": {

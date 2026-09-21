@@ -11,7 +11,7 @@ Walq provides reliable at-least-once processing without Redis or a separate queu
 Walq is ESM-only and requires Node.js 22 or newer.
 
 ```sh
-pnpm add walq @walq/better-sqlite3 better-sqlite3
+pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
 ```
 
 `better-sqlite3` uses a native addon and requires either a supported prebuilt binary or native build tools.
@@ -31,7 +31,7 @@ pnpm add walq @walq/better-sqlite3 better-sqlite3
 ```ts
 import Database from 'better-sqlite3'
 import { betterSqlite3 } from '@walq/better-sqlite3'
-import { Queue } from 'walq'
+import { Queue } from '@walq/core'
 
 const db = new Database('queue.sqlite')
 db.pragma('journal_mode = WAL')

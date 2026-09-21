@@ -1,5 +1,5 @@
+import { Queue } from '@walq/core'
 import { describe, expect, it, vi } from 'vitest'
-import { Queue } from 'walq'
 
 import {
   coordinatorScenarios,

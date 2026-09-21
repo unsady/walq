@@ -16,7 +16,7 @@ import type {
 export type * from './storage-types.js'
 
 /**
- * Asynchronous adapter contract exposed through `walq/storage`.
+ * Asynchronous adapter contract exposed through `@walq/core/storage`.
  * See https://github.com/unsady/walq/blob/main/docs/storage-contract.md.
  */
 export interface Storage {

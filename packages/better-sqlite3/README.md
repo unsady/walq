@@ -4,7 +4,7 @@ A `Storage` implementation for walq using a caller-owned `better-sqlite3`
 connection. It is ESM-only and requires Node.js 22 or newer. Install its peer dependencies alongside it; `better-sqlite3` uses a native addon and requires a supported prebuilt binary or native build tools.
 
 ```sh
-pnpm add walq @walq/better-sqlite3 better-sqlite3
+pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
 ```
 
 ```ts
@@ -30,7 +30,7 @@ await storage.enqueue({
 db.close()
 ```
 
-The `walq` package accepts this value as `storage: betterSqlite3(db)`. One
+The `@walq/core` package accepts this value as `storage: betterSqlite3(db)`. One
 storage instance can serve multiple queues, isolated by their exact queue names.
 
 ## Connection and schema
@@ -56,7 +56,7 @@ storage instance can serve multiple queues, isolated by their exact queue names.
 
 ## Behavior
 
-Methods return promises to implement `walq/storage`, but database work is
+Methods return promises to implement `@walq/core/storage`, but database work is
 **synchronous and blocks the event loop**. No background worker, polling loop,
 retry policy, or cleanup scheduler is provided.
 

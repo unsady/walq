@@ -1,4 +1,3 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   ClaimedJob,
   ClaimInput,
@@ -12,7 +11,8 @@ import type {
   LeaseMutationResult,
   Storage,
   StoredJob,
-} from 'walq/storage'
+} from '@walq/core/storage'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { deferred } from './delay.js'
 import { Queue, type ProcessErrorContext, type ProcessErrorHandler } from './index.js'
