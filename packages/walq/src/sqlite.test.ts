@@ -1,6 +1,6 @@
 import { betterSqlite3 } from '@walq/better-sqlite3'
 import Database from 'better-sqlite3'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 
 import { Queue } from './index.js'
 
@@ -13,6 +13,7 @@ function openStorage() {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const db of databases.splice(0)) if (db.open) db.close()
 })
 
@@ -38,6 +39,7 @@ it('processes a job through the SQLite storage adapter', async () => {
 })
 
 it('immediately retries failed handlers while attempts remain', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
   const storage = openStorage()
   const queue = new Queue('email', { storage, attempts: 2 })
   let calls = 0

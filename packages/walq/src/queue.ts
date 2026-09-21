@@ -1,7 +1,14 @@
 import type { Storage } from '@walq/core/storage'
 
 import { getCoordinator } from './coordinator.js'
-import type { AddedJob, ProcessOptions, Processor, QueueOptions, WorkerHandle } from './types.js'
+import type {
+  AddedJob,
+  ProcessErrorHandler,
+  ProcessOptions,
+  Processor,
+  QueueOptions,
+  WorkerHandle,
+} from './types.js'
 import { QueueWorker } from './worker.js'
 
 function positiveInteger(value: number, name: string): void {
@@ -14,6 +21,7 @@ export class Queue<Data> {
   readonly #name: string
   readonly #storage: Storage
   readonly #attempts: number
+  readonly #onError: ProcessErrorHandler | undefined
   #worker: QueueWorker<Data> | undefined
 
   constructor(name: string, options: QueueOptions) {
@@ -24,9 +32,15 @@ export class Queue<Data> {
     const attempts = options.attempts ?? 1
     positiveInteger(attempts, 'attempts')
 
+    const onError = options.onError
+    if (onError !== undefined && typeof onError !== 'function') {
+      throw new TypeError('onError must be a function')
+    }
+
     this.#name = name
     this.#storage = options.storage
     this.#attempts = attempts
+    this.#onError = onError
   }
 
   async add(data: Data): Promise<AddedJob> {
@@ -55,7 +69,7 @@ export class Queue<Data> {
     positiveInteger(concurrency, 'concurrency')
 
     const coordinator = getCoordinator(this.#storage)
-    const worker = new QueueWorker(coordinator, this.#name, processor, concurrency)
+    const worker = new QueueWorker(coordinator, this.#name, processor, concurrency, this.#onError)
     this.#worker = worker
     coordinator.register(this.#name, worker)
 

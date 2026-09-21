@@ -2,7 +2,7 @@ import type { ClaimedJob } from '@walq/core/storage'
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
 import { deferred, delay, type Delay } from './delay.js'
-import type { Processor } from './types.js'
+import type { ProcessErrorContext, ProcessErrorHandler, Processor } from './types.js'
 
 const leaseDuration = 30_000
 const heartbeatInterval = 10_000
@@ -16,11 +16,39 @@ function errorMessage(error: unknown): string {
   }
 }
 
+function describeContext(context: ProcessErrorContext): string {
+  const parts = [`walq queue "${context.queue}" ${context.operation} failed`]
+  if (context.operation !== 'claim') {
+    parts.push(`job ${context.jobId}`, `attempt ${context.attempt}`)
+  }
+  return parts.join(', ')
+}
+
+function safeConsoleError(error: unknown, context: ProcessErrorContext): void {
+  try {
+    console.error(describeContext(context), error, context)
+  } catch {
+    // Observability must never break queue execution.
+  }
+}
+
+function safeConsoleCallbackError(error: unknown, context: ProcessErrorContext): void {
+  try {
+    console.error(
+      `walq onError callback failed (${context.operation} in queue "${context.queue}")`,
+      error,
+    )
+  } catch {
+    // Observability must never break queue execution.
+  }
+}
+
 export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #coordinator: StorageCoordinator
   readonly #queue: string
   readonly #processor: Processor<Data>
   readonly #concurrency: number
+  readonly #onError: ProcessErrorHandler | undefined
   readonly #active = new Set<Promise<void>>()
   readonly #done = deferred()
   #closing = false
@@ -31,11 +59,13 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     queue: string,
     processor: Processor<Data>,
     concurrency: number,
+    onError?: ProcessErrorHandler,
   ) {
     this.#coordinator = coordinator
     this.#queue = queue
     this.#processor = processor
     this.#concurrency = concurrency
+    this.#onError = onError
   }
 
   /** Claim jobs for free slots and start their handlers. Returns their count. */
@@ -47,12 +77,18 @@ export class QueueWorker<Data> implements CoordinatedWorker {
 
     this.#polling = true
     try {
-      const jobs = await this.#coordinator.claim({
-        queue: this.#queue,
-        limit,
-        now: Date.now(),
-        leaseDuration,
-      })
+      let jobs: ClaimedJob[]
+      try {
+        jobs = await this.#coordinator.claim({
+          queue: this.#queue,
+          limit,
+          now: Date.now(),
+          leaseDuration,
+        })
+      } catch (error) {
+        this.#report(error, { queue: this.#queue, operation: 'claim' })
+        return 0
+      }
       for (const job of jobs) this.#start(job)
       return jobs.length
     } finally {
@@ -109,8 +145,14 @@ export class QueueWorker<Data> implements CoordinatedWorker {
             controller.abort()
             return
           }
-        } catch {
+        } catch (error) {
           // A later heartbeat or lease mutation can still establish the outcome.
+          this.#report(error, {
+            queue: this.#queue,
+            operation: 'heartbeat',
+            jobId: job.id,
+            attempt: job.attemptsMade,
+          })
         }
       }
     }
@@ -134,6 +176,16 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       await heartbeatTask
     }
 
+    if (!succeeded) {
+      this.#report(failure, {
+        queue: this.#queue,
+        operation: 'handler',
+        jobId: job.id,
+        attempt: job.attemptsMade,
+        attemptsExhausted: job.attemptsMade >= job.attempts,
+      })
+    }
+
     if (leaseLost) return
 
     try {
@@ -153,8 +205,30 @@ export class QueueWorker<Data> implements CoordinatedWorker {
           retryAt: now,
         })
       }
-    } catch {
+    } catch (error) {
       // The lease will be recovered if the final mutation did not commit.
+      this.#report(error, {
+        queue: this.#queue,
+        operation: succeeded ? 'complete' : 'fail',
+        jobId: job.id,
+        attempt: job.attemptsMade,
+      })
+    }
+  }
+
+  #report(error: unknown, context: ProcessErrorContext): void {
+    const onError = this.#onError
+    if (onError === undefined) {
+      safeConsoleError(error, context)
+      return
+    }
+
+    try {
+      void Promise.resolve(onError(error, context)).catch((callbackError: unknown) => {
+        safeConsoleCallbackError(callbackError, context)
+      })
+    } catch (callbackError) {
+      safeConsoleCallbackError(callbackError, context)
     }
   }
 }

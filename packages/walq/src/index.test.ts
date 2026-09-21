@@ -1,6 +1,7 @@
 import type {
   ClaimedJob,
   ClaimInput,
+  ClaimQueuesInput,
   CompleteInput,
   EnqueueInput,
   FailInput,
@@ -12,7 +13,7 @@ import type {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { deferred } from './delay.js'
-import { Queue } from './index.js'
+import { Queue, type ProcessErrorContext, type ProcessErrorHandler } from './index.js'
 
 const now = 1_000
 
@@ -40,6 +41,10 @@ class TestStorage implements Storage {
   readonly completions: CompleteInput[] = []
   readonly failures: FailInput[] = []
   readonly heartbeats: HeartbeatInput[] = []
+  readonly claimErrors: unknown[] = []
+  readonly completeErrors: unknown[] = []
+  readonly failErrors: unknown[] = []
+  readonly heartbeatErrors: unknown[] = []
   heartbeatResult: LeaseMutationResult = 'applied'
   jobs: ClaimedJob[] = []
   maxConcurrentCalls = 0
@@ -66,6 +71,7 @@ class TestStorage implements Storage {
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {
     this.#enter()
     this.claims.push(input)
+    this.#maybeThrow(this.claimErrors)
     const claimed = this.jobs.filter((job) => job.queue === input.queue).slice(0, input.limit)
     this.jobs = this.jobs.filter((job) => !claimed.includes(job))
     return this.#leave(claimed)
@@ -74,18 +80,21 @@ class TestStorage implements Storage {
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {
     this.#enter()
     this.completions.push(input)
+    this.#maybeThrow(this.completeErrors)
     return this.#leave('applied')
   }
 
   async fail(input: FailInput): Promise<LeaseMutationResult> {
     this.#enter()
     this.failures.push(input)
+    this.#maybeThrow(this.failErrors)
     return this.#leave('applied')
   }
 
   async heartbeat(input: HeartbeatInput): Promise<LeaseMutationResult> {
     this.#enter()
     this.heartbeats.push(input)
+    this.#maybeThrow(this.heartbeatErrors)
     return this.#leave(this.heartbeatResult)
   }
 
@@ -98,6 +107,26 @@ class TestStorage implements Storage {
     await Promise.resolve()
     this.#runningCalls -= 1
     return value
+  }
+
+  #maybeThrow(errors: unknown[]): void {
+    if (errors.length === 0) return
+    this.#runningCalls -= 1
+    throw errors.shift()
+  }
+}
+
+/** Adds the optional grouped claim capability routed through `claim`. */
+class GroupedTestStorage extends TestStorage {
+  groupedError: unknown = undefined
+
+  async claimQueues({ requests }: ClaimQueuesInput): Promise<ClaimedJob[][]> {
+    const error = this.groupedError
+    if (error !== undefined) {
+      this.groupedError = undefined
+      throw error
+    }
+    return Promise.all(requests.map((request) => this.claim(request)))
   }
 }
 
@@ -171,6 +200,7 @@ describe('Queue', () => {
   })
 
   it('records handler errors for immediate retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const storage = new TestStorage()
     storage.jobs.push(claimedJob('1', { data: '{"userId":"123"}' }))
@@ -363,5 +393,225 @@ describe('Queue', () => {
     await first.close()
     const second = queue.process(async () => {})
     await second.close()
+  })
+
+  it('rejects a non-function onError', () => {
+    const storage = new TestStorage()
+
+    expect(
+      () => new Queue('email', { storage, onError: 'log' as unknown as ProcessErrorHandler }),
+    ).toThrow('onError must be a function')
+  })
+
+  it('reports claim errors to onError and keeps polling', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    storage.claimErrors.push(new Error('claim failed'))
+    const reports: ProcessErrorContext[] = []
+    const queue = new Queue('email', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(reports).toEqual([{ queue: 'email', operation: 'claim' }])
+
+    storage.jobs.push(claimedJob('1'))
+    await queue.add({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(storage.completions).toHaveLength(1)
+
+    await worker.close()
+  })
+
+  it('reports heartbeat errors without losing the lease', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    storage.heartbeatErrors.push(new Error('heartbeat failed'))
+    storage.jobs.push(claimedJob('1'))
+    const reports: ProcessErrorContext[] = []
+    const gate = deferred()
+    const queue = new Queue('email', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const worker = queue.process(async () => {
+      await gate.promise
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(reports).toEqual([{ queue: 'email', operation: 'heartbeat', jobId: '1', attempt: 1 }])
+
+    gate.resolve()
+    await worker.close()
+    expect(storage.completions).toHaveLength(1)
+  })
+
+  it('reports completion errors', async () => {
+    const storage = new TestStorage()
+    storage.completeErrors.push(new Error('complete failed'))
+    storage.jobs.push(claimedJob('1'))
+    const reports: ProcessErrorContext[] = []
+    const queue = new Queue('email', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const worker = queue.process(async () => {})
+
+    await vi.waitFor(() => expect(reports).toHaveLength(1))
+    expect(reports[0]).toEqual({
+      queue: 'email',
+      operation: 'complete',
+      jobId: '1',
+      attempt: 1,
+    })
+
+    await worker.close()
+    expect(storage.completions).toHaveLength(1)
+  })
+
+  it('reports handler and fail errors with attempt-budget state', async () => {
+    const storage = new TestStorage()
+    storage.jobs.push(
+      { ...claimedJob('exhausted'), attemptsMade: 1, attempts: 1 },
+      { ...claimedJob('retryable'), attemptsMade: 1, attempts: 2 },
+    )
+    storage.failErrors.push(new Error('fail failed'))
+    const reports: ProcessErrorContext[] = []
+    const queue = new Queue('email', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const worker = queue.process(async () => {
+      throw new Error('send failed')
+    })
+
+    await vi.waitFor(() => expect(reports).toHaveLength(3))
+    await worker.close()
+
+    expect(reports).toEqual([
+      {
+        queue: 'email',
+        operation: 'handler',
+        jobId: 'exhausted',
+        attempt: 1,
+        attemptsExhausted: true,
+      },
+      { queue: 'email', operation: 'fail', jobId: 'exhausted', attempt: 1 },
+      {
+        queue: 'email',
+        operation: 'handler',
+        jobId: 'retryable',
+        attempt: 1,
+        attemptsExhausted: false,
+      },
+    ])
+  })
+
+  it('logs errors to console when onError is absent', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('1'))
+    const queue = new Queue('email', { storage })
+    const worker = queue.process(async () => {
+      throw new Error('send failed')
+    })
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(1))
+    await worker.close()
+
+    const call = consoleError.mock.calls.find(
+      ([, error]) => error instanceof Error && error.message === 'send failed',
+    )
+    expect(call?.[0]).toContain('queue "email"')
+    expect(call?.[0]).toContain('handler')
+    expect(call?.[2]).toMatchObject({ operation: 'handler', jobId: '1', attempt: 1 })
+  })
+
+  it('isolates thrown and rejected onError callbacks from queue execution', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const storage = new TestStorage()
+    storage.claimErrors.push(new Error('claim failed'))
+    let calls = 0
+    const queue = new Queue('email', {
+      storage,
+      onError: () => {
+        calls += 1
+        if (calls === 1) throw new Error('sync callback failure')
+        return Promise.reject(new Error('async callback failure'))
+      },
+    })
+    const worker = queue.process(async (_data, context) => {
+      if (context.jobId === '2') throw new Error('send failed')
+    })
+
+    await vi.waitFor(() => expect(calls).toBe(1))
+
+    storage.jobs.push(claimedJob('2'))
+    await queue.add({})
+    await vi.waitFor(() => expect(calls).toBe(2))
+
+    storage.jobs.push(claimedJob('3'))
+    await queue.add({})
+    await vi.waitFor(() => expect(storage.completions).toHaveLength(1))
+
+    await worker.close()
+    expect(storage.failures).toHaveLength(1)
+    expect(storage.failures[0]!.id).toBe('2')
+  })
+
+  it('reports grouped claim failures per queue and keeps polling', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new GroupedTestStorage()
+    const reports: ProcessErrorContext[] = []
+    const email = new Queue('email', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const sms = new Queue('sms', {
+      storage,
+      onError: (err, ctx) => {
+        reports.push(ctx)
+      },
+    })
+    const emailWorker = email.process(async () => {})
+    const smsWorker = sms.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    storage.groupedError = new Error('grouped claim failed')
+    await Promise.all([email.add({}), sms.add({})])
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(reports.map((context) => context.queue).sort()).toEqual(['email', 'sms'])
+    expect(reports.every((context) => context.operation === 'claim')).toBe(true)
+
+    storage.jobs.push(
+      claimedJob('email-1', { queue: 'email' }),
+      claimedJob('sms-1', { queue: 'sms' }),
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(storage.completions.map(({ id }) => id).sort()).toEqual(['email-1', 'sms-1'])
+
+    await emailWorker.close()
+    await smsWorker.close()
   })
 })

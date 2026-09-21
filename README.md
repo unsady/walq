@@ -38,6 +38,17 @@ await queue.add({ name: 'Ada' })
 
 When shutting down, call `await worker.close()` to wait for active handlers, then `db.close()`.
 
+Queue errors that would otherwise be swallowed — failed claims, lease mutations, and handler failures — are written to `console.error`. Pass `onError` when creating the queue to handle them yourself; `lease_lost` is a normal protocol outcome and is never reported.
+
+```ts
+const queue = new Queue<{ name: string }>('greetings', {
+  storage: betterSqlite3(db),
+  onError(err, ctx) {
+    console.error(`[${ctx.queue}] ${ctx.operation} failed`, err, ctx)
+  },
+})
+```
+
 Jobs move from `pending` to `active` when claimed. Completing a live lease makes the job `completed`; failures retry while attempts remain, and expired leases are recovered automatically. Delivery is at least once, so handlers should be idempotent when side effects cannot safely be repeated.
 
 Queues using the same `Storage` instance share one coordinator. Supported adapters can group claims from several queues into one database transaction.
