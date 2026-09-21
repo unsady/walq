@@ -556,6 +556,30 @@ export function runStorageConformance(
       expect(await storage.claim(claimInput())).toHaveLength(1)
     })
 
+    it('claims every requested queue exactly once when the batch spans several transactions', async () => {
+      // A limit above any internal budget forces the adapter to commit the batch
+      // in several transactions; a small limit keeps it in as few as possible.
+      for (const limit of [512, 16]) {
+        const queues = Array.from({ length: 40 }, (_, index) => `queue-${limit}-${index}`)
+        for (const queue of queues) {
+          await storage.enqueue(enqueueInput({ queue }))
+          await storage.enqueue(enqueueInput({ queue }))
+        }
+
+        const requests = queues.map((queue) => claimInput({ queue, limit }))
+        const results = await claimQueues(requests)
+
+        expect(results).toHaveLength(queues.length)
+        expect(results.map((jobs) => jobs.length)).toEqual(queues.map(() => 2))
+        const ids = results.flat().map((job) => job.id)
+        expect(new Set(ids).size).toBe(ids.length)
+        expect(results.flat().every((job) => job.attemptsMade === 1)).toBe(true)
+
+        // Every job is leased, so a later sweep finds nothing left behind.
+        expect((await claimQueues(requests)).flat()).toEqual([])
+      }
+    })
+
     it('recovers expired leases per requested queue and leaves other queues alone', async () => {
       await storage.enqueue(enqueueInput({ queue, attempts: 1 }))
       await storage.enqueue(enqueueInput({ queue: otherQueue, attempts: 1 }))

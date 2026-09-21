@@ -548,7 +548,7 @@ describe('SQLite integration', () => {
     })
   })
 
-  it('rolls back every grouped request when a later queue fails', async () => {
+  it('rolls back every request in one chunk when a later queue fails', async () => {
     const { db, storage } = open()
     await storage.enqueue({ ...input, queue: 'a' })
     await storage.enqueue({ ...input, queue: 'b' })
@@ -558,6 +558,7 @@ describe('SQLite integration', () => {
       WHEN NEW.status = 'active' AND NEW.queue = 'b'
       BEGIN SELECT RAISE(ABORT, 'grouped claim failed'); END`)
 
+    // The default limit keeps both requests in one chunk, so they share a transaction.
     await expect(
       storage.claimQueues!({
         requests: [
@@ -574,6 +575,53 @@ describe('SQLite integration', () => {
       { queue: 'a', status: 'active', attemptsMade: 1 },
       { queue: 'b', status: 'active', attemptsMade: 1 },
     ])
+  })
+
+  it('keeps earlier chunks committed when a later chunk fails', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, queue: 'a' })
+    await storage.enqueue({ ...input, queue: 'b' })
+    db.exec(`CREATE TRIGGER reject_claim BEFORE UPDATE ON walq_jobs
+      WHEN NEW.status = 'active' AND NEW.queue = 'b'
+      BEGIN SELECT RAISE(ABORT, 'grouped claim failed'); END`)
+
+    // A limit above the budget gives every request its own transaction, so the
+    // failure cannot reach the chunk that already committed.
+    await expect(
+      storage.claimQueues!({
+        requests: [
+          { ...claimInput, queue: 'a', now: 30, limit: 600 },
+          { ...claimInput, queue: 'b', now: 30, limit: 600 },
+        ],
+      }),
+    ).rejects.toThrow('grouped claim failed')
+
+    expect(
+      db.prepare('SELECT queue, status, attemptsMade FROM walq_jobs ORDER BY queue').all(),
+    ).toEqual([
+      { queue: 'a', status: 'active', attemptsMade: 1 },
+      { queue: 'b', status: 'pending', attemptsMade: 0 },
+    ])
+  })
+
+  it('claims every queue once when a batch spans several transactions', async () => {
+    const { db, storage } = open()
+    const queues = Array.from({ length: 70 }, (_, index) => `queue-${index}`)
+    for (const queue of queues) {
+      await storage.enqueue({ ...input, queue })
+      await storage.enqueue({ ...input, queue })
+    }
+
+    // limit 16 fits 32 queues per transaction, so 70 queues need three of them.
+    const requests = queues.map((queue) => ({ ...claimInput, queue, limit: 16 }))
+    const results = await storage.claimQueues!({ requests })
+
+    expect(results).toHaveLength(queues.length)
+    expect(results.map((jobs) => jobs.length)).toEqual(queues.map(() => 2))
+    expect(new Set(results.flat().map((job) => job.id)).size).toBe(queues.length * 2)
+    expect(
+      db.prepare("SELECT count(*) AS c FROM walq_jobs WHERE status = 'pending'").get(),
+    ).toEqual({ c: 0 })
   })
 
   it('rejects database lock errors rather than returning lease_lost', async () => {

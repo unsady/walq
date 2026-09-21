@@ -17,6 +17,7 @@ import type {
 } from '@walq/core/storage'
 import type Database from 'better-sqlite3'
 
+import { chunkClaims } from './chunking.js'
 import { TerminalCleanup } from './cleanup.js'
 import { initialize } from './schema.js'
 import { expiry, integer, lease, retentionRule, text } from './validation.js'
@@ -161,7 +162,14 @@ class BetterSqlite3Storage implements Storage {
     // cannot mutate a queue that a later request would have touched.
     const steps = input.requests.map((request) => this.prepareClaim(request))
     if (steps.length === 0) return []
-    return this.claimTransaction.immediate(steps)
+
+    // A sweep can cover many queues, so requests are packed until their summed
+    // limits reach `claimBudget` (see `chunking.ts`). Chunks commit in order: a
+    // failure in a later chunk keeps the earlier ones, which the storage
+    // contract allows.
+    return chunkClaims(steps, (step) => step.input.limit).flatMap((chunk) =>
+      this.claimTransaction.immediate(chunk),
+    )
   }
 
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {

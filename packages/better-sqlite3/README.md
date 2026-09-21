@@ -68,11 +68,20 @@ transitions record the finish timestamp used for retention ordering. Database
 errors (including lock timeouts) reject promises, rather than returning
 `lease_lost`.
 
-The optional `claimQueues` method applies every request in order inside a single
-immediate transaction, so one coordinator sweep acquires one writer lock instead
-of one per queue. Each request keeps the per-queue recovery, ordering, limit, and
-lease-token semantics of `claim`. The whole batch is validated before the
-transaction opens, and an error in any request rolls back every request. The
+The optional `claimQueues` method applies every request in order and returns one
+result per request, so one coordinator sweep claims from many queues in one call.
+Each request keeps the per-queue recovery, ordering, limit, and lease-token
+semantics of `claim`. The whole batch is validated before the first transaction
+opens.
+
+A sweep is split into transactions of at most 512 jobs so one writer-lock hold
+stays bounded as the fan-out grows: requests are packed until their summed
+limits reach the budget, so a uniform limit covers `floor(512 / limit)` queues
+(limit 16 -> 32 queues, 32 -> 16, 64 -> 8). A request whose own limit is above
+the budget cannot be split and takes a transaction of its own. With `limit 16`
+and 128 queues that is four immediate transactions instead of one. Chunks commit
+in order, so an error in a later chunk keeps the chunks that already committed;
+the storage contract does not promise cross-request atomicity. The
 `StorageCoordinator` uses this method when present and otherwise falls back to
 one `claim` call per request.
 
