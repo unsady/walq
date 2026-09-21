@@ -32,23 +32,23 @@ function describeContext(context: ProcessErrorContext): string {
   return parts.join(', ')
 }
 
-function safeConsoleError(error: unknown, context: ProcessErrorContext): void {
+function safeConsoleLog(...args: unknown[]): void {
   try {
-    console.error(describeContext(context), error, context)
+    console.error(...args)
   } catch {
     // Observability must never break queue execution.
   }
 }
 
+function safeConsoleError(error: unknown, context: ProcessErrorContext): void {
+  safeConsoleLog(describeContext(context), error, context)
+}
+
 function safeConsoleCallbackError(error: unknown, context: ProcessErrorContext): void {
-  try {
-    console.error(
-      `walq onError callback failed (${context.operation} in queue "${context.queue}")`,
-      error,
-    )
-  } catch {
-    // Observability must never break queue execution.
-  }
+  safeConsoleLog(
+    `walq onError callback failed (${context.operation} in queue "${context.queue}")`,
+    error,
+  )
 }
 
 export class QueueWorker<Data> implements CoordinatedWorker {
@@ -267,59 +267,65 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   }
 
   async #runCleanup(): Promise<void> {
-    let throttled = false
     try {
       // Never run database work in the caller's continuation: defer the first
       // batch so process() and terminal transitions stay off the cleanup path.
-      const start = delay(0)
-      this.#cleanupTimer = start
-      await start.promise
-      this.#cleanupTimer = undefined
+      await this.#pauseCleanup(0)
       if (this.#closing) return
-
-      while (!this.#closing && this.#cleanupNeeded) {
-        this.#cleanupNeeded = false
-        if (!throttled) {
-          throttled = true
-          const wait = this.#nextCleanupAt - Date.now()
-          if (wait > 0) {
-            const timer = delay(wait)
-            this.#cleanupTimer = timer
-            await timer.promise
-            this.#cleanupTimer = undefined
-            if (this.#closing) return
-          }
-        }
-
-        // Update the throttle before the call so a failing adapter is retried at
-        // the same bounded rate as a successful one.
-        this.#nextCleanupAt = Date.now() + cleanupInterval
-        let result: CleanupResult
-        try {
-          result = await this.#coordinator.cleanup({
-            queue: this.#queue,
-            retention: this.#retention,
-            limit: cleanupBatch,
-          })
-        } catch (error) {
-          this.#report(error, { queue: this.#queue, operation: 'cleanup' })
-          return
-        }
-
-        if (!result.more) return
-
-        // Keep draining one bounded batch at a time, yielding between batches so
-        // polling, heartbeats, and handler work are not starved.
-        this.#cleanupNeeded = true
-        const timer = delay(0)
-        this.#cleanupTimer = timer
-        await timer.promise
-        this.#cleanupTimer = undefined
-      }
+      await this.#drainCleanup()
     } finally {
       this.#cleanupTimer = undefined
       this.#cleanupTask = undefined
       if (this.#cleanupNeeded && !this.#closing) this.#scheduleCleanup()
+    }
+  }
+
+  /** Wait through a tracked timer so close() can interrupt the pause. */
+  async #pauseCleanup(duration: number): Promise<void> {
+    const timer = delay(duration)
+    this.#cleanupTimer = timer
+    await timer.promise
+    this.#cleanupTimer = undefined
+  }
+
+  /** Delete bounded batches until nothing is left, work is coalesced, or close. */
+  async #drainCleanup(): Promise<void> {
+    let throttled = false
+    while (!this.#closing && this.#cleanupNeeded) {
+      this.#cleanupNeeded = false
+      if (!throttled) {
+        throttled = true
+        const wait = this.#nextCleanupAt - Date.now()
+        if (wait > 0) {
+          await this.#pauseCleanup(wait)
+          if (this.#closing) return
+        }
+      }
+
+      // Record the throttle before the call so a failing adapter is retried at
+      // the same bounded rate as a successful one.
+      this.#nextCleanupAt = Date.now() + cleanupInterval
+      const result = await this.#cleanupBatch()
+      if (result === undefined || !result.more) return
+
+      // Keep draining one bounded batch at a time, yielding between batches so
+      // polling, heartbeats, and handler work are not starved.
+      this.#cleanupNeeded = true
+      await this.#pauseCleanup(0)
+    }
+  }
+
+  /** Run one bounded batch; adapter errors are reported and end the pass. */
+  async #cleanupBatch(): Promise<CleanupResult | undefined> {
+    try {
+      return await this.#coordinator.cleanup({
+        queue: this.#queue,
+        retention: this.#retention,
+        limit: cleanupBatch,
+      })
+    } catch (error) {
+      this.#report(error, { queue: this.#queue, operation: 'cleanup' })
+      return undefined
     }
   }
 }

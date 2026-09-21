@@ -259,6 +259,32 @@ describe('SQLite retention', () => {
     expect(remaining()).toEqual([{ id: completed[2] }, { id: completed[3] }])
   })
 
+  it('exhausts the shared budget across statuses before reporting more', async () => {
+    const { db, storage } = open()
+    for (const now of [11, 12, 13]) {
+      await storage.enqueue({ ...input, now, availableAt: now, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now })
+      await storage.complete({ ...job!, now })
+    }
+    const failed: string[] = []
+    for (const now of [21, 22]) {
+      const stored = await storage.enqueue({ ...input, now, availableAt: now, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now })
+      await storage.fail({ ...job!, now, error: 'terminal', retryAt: null })
+      failed.push(stored.id)
+    }
+    const batch = { queue: 'email', retention: { completed: 0, failed: 1 }, limit: 1 }
+
+    // Delete the oldest completed rows first; only the failed verdict remains.
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
+    expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: false })
+
+    const remaining = db.prepare('SELECT id FROM walq_jobs').all() as { id: string }[]
+    expect(remaining.map((row) => row.id)).toEqual([failed[1]])
+  })
+
   it('breaks finish-time ties by id so the newest rows survive', async () => {
     const { db, storage } = open()
     const ids: string[] = []
