@@ -2,8 +2,14 @@ import { writeFileSync } from 'node:fs'
 
 import type { Bench, BenchResult } from 'vitest'
 
-import { artifactPath, readBenchEnvironment } from './bench-options.js'
-import { describeEnvironment, renderJson, type BenchmarkResult } from './harness.js'
+import { artifactPath, readBenchEnvironment, type BenchEnvironment } from './bench-options.js'
+import {
+  describeEnvironment,
+  renderDomainSummary,
+  renderJson,
+  type BenchmarkResult,
+  type MetricValue,
+} from './harness.js'
 import type { ScenarioDefinition } from './scenario.js'
 import type { DomainBenchResult } from './vitest-provider.js'
 
@@ -33,7 +39,7 @@ export async function executeDefinitions(
       serialized.set(definition.name, storage.get(definition.name))
   }
 
-  return definitions.map((definition) => {
+  const results = definitions.map((definition) => {
     const result = serialized.get(definition.name) as DomainBenchResult | undefined
     if (result?.domain === undefined) {
       throw new Error(`benchmark provider returned no domain metrics for "${definition.name}"`)
@@ -41,6 +47,37 @@ export async function executeDefinitions(
 
     return result.domain
   })
+
+  if (results.length > 0) {
+    const environment = readBenchEnvironment(process.env)
+    process.stdout.write(
+      `${renderDomainSummary(
+        groupName,
+        describeEnvironment(),
+        summarySettings(environment, definitions[0]?.descriptor.jobs),
+        results,
+      )}\n`,
+    )
+  }
+
+  return results
+}
+
+/** Settings shown once per suite in the compact domain summary. */
+function summarySettings(
+  environment: BenchEnvironment,
+  defaultJobs: number | undefined,
+): Record<string, MetricValue> {
+  const settings: Record<string, MetricValue> = {
+    grid: environment.grid,
+    repeats: environment.repeats,
+    warmup: environment.warmup,
+    synchronous: environment.synchronous,
+    jobs: environment.jobs ?? defaultJobs ?? 0,
+  }
+  if (environment.only !== undefined) settings.only = environment.only
+
+  return settings
 }
 
 /** Persist the domain results of one suite when `BENCH_JSON` is set. */

@@ -14,7 +14,7 @@ import {
   settledWithin,
   spread,
   SuiteAbortError,
-  summarizeMicros,
+  summarizePerRunMicros,
   type BenchmarkResult,
   type Collected,
   type RunSample,
@@ -86,12 +86,45 @@ export function scenarioName(scenario: CoordinatorScenario): string {
   return `${scenario.mode} / ${scenario.queues} queues / ${scenario.profile}`
 }
 
-/** Shared and isolated variants of one configuration stay adjacent. */
+/** Number of queues that actually receive jobs under one profile. */
+function activeQueues(queues: number, profile: CoordinatorProfile): number {
+  return profile === 'sparse' ? Math.max(1, Math.ceil(queues / 4)) : queues
+}
+
+/**
+ * Signature of the work a scenario performs. Variants that run identically must not be
+ * measured twice: one queue shares a single coordinator either way, and `sparse` cannot thin a
+ * one-queue workload. `bursty` keeps its profile because its enqueue strategy, not the queue
+ * count, is what distinguishes it.
+ */
+function workloadKey(scenario: CoordinatorScenario): string {
+  const mode = scenario.queues === 1 ? 'single-queue' : scenario.mode
+  const profile =
+    scenario.profile === 'bursty'
+      ? scenario.profile
+      : activeQueues(scenario.queues, scenario.profile) === scenario.queues
+        ? 'preloaded'
+        : scenario.profile
+
+  return `${mode}|${scenario.queues}|${profile}`
+}
+
+/**
+ * Expand the grid into distinct workloads, deduplicating the degenerate single-queue variants.
+ * Shared and isolated variants of one configuration stay adjacent.
+ */
 export function coordinatorScenarios(grid: CoordinatorGrid): CoordinatorScenario[] {
   const scenarios: CoordinatorScenario[] = []
+  const seen = new Set<string>()
   for (const queues of grid.queues) {
     for (const profile of grid.profiles) {
-      for (const mode of grid.modes) scenarios.push({ mode, queues, profile })
+      for (const mode of grid.modes) {
+        const candidate = { mode, queues, profile }
+        const key = workloadKey(candidate)
+        if (seen.has(key)) continue
+        seen.add(key)
+        scenarios.push(candidate)
+      }
     }
   }
 
@@ -217,9 +250,7 @@ async function executeRun(
     const base = betterSqlite3(db)
     // Distinct wrapper objects always produce distinct coordinators.
     const shared = scenario.mode === 'shared' ? instrument(base, tracker) : undefined
-    const activeQueues =
-      scenario.profile === 'sparse' ? Math.max(1, Math.ceil(scenario.queues / 4)) : scenario.queues
-    const counts = distribute(jobs, activeQueues)
+    const counts = distribute(jobs, activeQueues(scenario.queues, scenario.profile))
     const entries = Array.from({ length: scenario.queues }, (_, index) => {
       const name = `bench-${index}`
       const storage = shared ?? instrument(base, tracker)
@@ -355,8 +386,8 @@ export function summarizeRuns(
 
   const runs = valid.length
   const rates = valid.map((outcome) => (jobs / outcome.elapsed) * 1000)
-  const claimSamples = valid.flatMap((outcome) => outcome.claimSamples)
-  const completeSamples = valid.flatMap((outcome) => outcome.completeSamples)
+  const claim = summarizePerRunMicros(valid.map((outcome) => outcome.claimSamples))
+  const complete = summarizePerRunMicros(valid.map((outcome) => outcome.completeSamples))
   const firstHandlers = valid.flatMap((outcome) =>
     outcome.firstHandler === undefined ? [] : [outcome.firstHandler],
   )
@@ -367,9 +398,9 @@ export function summarizeRuns(
     'spread (%)': spread(rates),
     'claims/job': runs === 0 ? 0 : sum((outcome) => outcome.claims) / (jobs * runs),
     'empty claims': runs === 0 ? 0 : sum((outcome) => outcome.emptyClaims) / runs,
-    'claim p50 (µs)': summarizeMicros(claimSamples).p50,
-    'claim p95 (µs)': summarizeMicros(claimSamples).p95,
-    'complete p95 (µs)': summarizeMicros(completeSamples).p95,
+    'claim p50 (µs)': claim.p50,
+    'claim p95 (µs)': claim.p95,
+    'complete p95 (µs)': complete.p95,
     'elapsed (ms)': median(valid.map((outcome) => outcome.elapsed)),
   }
   const groupedCalls = sum((outcome) => outcome.groupedCalls)

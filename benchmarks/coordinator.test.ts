@@ -4,8 +4,10 @@ import { Queue } from 'walq'
 import {
   coordinatorScenarios,
   defineCoordinatorScenario,
+  fullCoordinatorGrid,
   invalidReason,
   quickCoordinatorGrid,
+  scenarioName,
   summarizeRuns,
   type CoordinatorRunOutcome,
   type CoordinatorScenario,
@@ -95,25 +97,35 @@ describe('cleanup', () => {
 })
 
 describe('coordinatorScenarios', () => {
-  it('keeps both modes of one configuration next to each other', () => {
-    expect(coordinatorScenarios(quickCoordinatorGrid).map((entry) => entry.mode)).toEqual([
-      'shared',
-      'isolated',
-      'shared',
-      'isolated',
-      'shared',
-      'isolated',
-      'shared',
-      'isolated',
-      'shared',
-      'isolated',
-      'shared',
-      'isolated',
+  it('collapses the single-queue variants that execute identically', () => {
+    const single = coordinatorScenarios(quickCoordinatorGrid).filter(
+      (scenario) => scenario.queues === 1,
+    )
+
+    // One queue shares a single coordinator either way, and `sparse` cannot thin it,
+    // so only the preloaded and bursty baselines remain.
+    expect(single.map((scenario) => `${scenario.profile}/${scenario.mode}`)).toEqual([
+      'saturated/shared',
+      'bursty/shared',
     ])
   })
 
-  it('covers every combination of the grid', () => {
-    expect(coordinatorScenarios(quickCoordinatorGrid)).toHaveLength(12)
+  it('keeps both modes of one multi-queue configuration next to each other', () => {
+    const modes = coordinatorScenarios(quickCoordinatorGrid)
+      .filter((scenario) => scenario.queues > 1)
+      .map((scenario) => scenario.mode)
+
+    expect(modes).toEqual(['shared', 'isolated', 'shared', 'isolated', 'shared', 'isolated'])
+  })
+
+  it('keeps one scenario per distinct workload', () => {
+    for (const grid of [quickCoordinatorGrid, fullCoordinatorGrid]) {
+      const scenarios = coordinatorScenarios(grid)
+
+      expect(new Set(scenarios.map(scenarioName)).size).toBe(scenarios.length)
+    }
+    expect(coordinatorScenarios(quickCoordinatorGrid)).toHaveLength(8)
+    expect(coordinatorScenarios(fullCoordinatorGrid)).toHaveLength(20)
   })
 })
 
@@ -159,6 +171,21 @@ describe('summarizeRuns', () => {
     const broken = summarizeRuns(scenario, 10, collected([outcome()], ['run timed out']))
     expect(broken.notes).toEqual(['1 of 2 runs failed: run timed out'])
     expect(broken.ok).toBe(false)
+  })
+
+  it('aggregates latency by the median across runs instead of pooling samples', () => {
+    const result = summarizeRuns(
+      scenario,
+      10,
+      collected([
+        outcome({ claimSamples: [1, 1, 1, 1] }),
+        outcome({ claimSamples: [10] }),
+        outcome({ claimSamples: [20] }),
+      ]),
+    )
+
+    // Per-run p95 is 1, 10 and 20 ms; their median is 10 ms, not the pooled percentile.
+    expect(result.metrics['claim p95 (µs)']).toBe(10_000)
   })
 
   it('reports grouped-call metrics when the adapter batches requests', () => {

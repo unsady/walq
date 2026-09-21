@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { Bench, BenchRegistration, BenchResult } from 'vitest'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { BenchmarkResult } from './harness.js'
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
@@ -31,8 +31,8 @@ const emptyStats = {
   variance: 0,
 }
 
-function domain(scenario: string): BenchmarkResult {
-  return { suite: 'test', scenario, params: {}, metrics: {}, samples: [], notes: [], ok: true }
+function domain(scenario: string, metrics: Record<string, number> = {}): BenchmarkResult {
+  return { suite: 'test', scenario, params: {}, metrics, samples: [], notes: [], ok: true }
 }
 
 function benchResult(
@@ -100,9 +100,16 @@ function benchWithoutDomain(name: string, fn: () => Promise<unknown>): BenchRegi
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.restoreAllMocks()
 })
 
 describe('executeDefinitions', () => {
+  let write: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    write = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+  })
+
   it('runs a single scenario through registration.run', async () => {
     const results = await executeDefinitions(
       fakeBench(new Map()),
@@ -119,6 +126,18 @@ describe('executeDefinitions', () => {
     const results = await executeDefinitions(fakeBench(new Map()), definitions, 'test group')
 
     expect(results.map((result) => result.scenario)).toEqual(['alpha', 'beta'])
+  })
+
+  it('prints the suite domain summary once after the run', async () => {
+    const results = new Map([['alpha', domain('alpha', { 'jobs/sec': 100, 'spread (%)': 3 })]])
+    await executeDefinitions(fakeBench(results), [definition('alpha')], 'test (quick)')
+
+    const output = (write.mock.calls as unknown[][]).map((call) => String(call[0])).join('')
+    expect(output).toContain('domain summary — test (quick)')
+    expect(output).not.toContain('###')
+    expect(output).toContain('jobs/sec')
+    expect(output).toContain('env  ')
+    expect(output).toContain('opts grid=quick repeats=3')
   })
 
   it('fails when the provider omits the domain metrics', async () => {

@@ -13,7 +13,7 @@ import {
   median,
   numeric,
   spread,
-  summarizeMicros,
+  summarizePerRunMicros,
   type BenchmarkResult,
   type Collected,
 } from './harness.js'
@@ -48,8 +48,12 @@ type Lease = { id: string; leaseToken: string }
 
 /**
  * Benchmark-only prototype: apply several completions inside one immediate transaction.
- * `complete batch 1` uses the production `Storage.complete` autocommit path instead, so the
- * comparison isolates the extra headroom of batching rather than a rewritten baseline.
+ *
+ * `complete batch 1` uses the production asynchronous `Storage.complete` path, which issues one
+ * autocommit `UPDATE` through the adapter. The larger tiers use this prototype's synchronous SQL
+ * inside one immediate transaction, so the measured gap mixes two changes: batching many
+ * completions into one transaction, and comparing the adapter/async path with direct benchmark
+ * SQL. It is not an isolation of batching alone.
  */
 class BatchedCompleter {
   readonly #statement: Database.Statement
@@ -171,7 +175,17 @@ export function summarizeCompleteBatchRuns(
     .filter((reason): reason is string => reason !== undefined)
   const notes = [...collected.failures, ...invalid]
   const rates = valid.map((outcome) => (outcome.applied / outcome.workloadDuration) * 1000)
-  const commit = summarizeMicros(valid.flatMap((outcome) => outcome.commitSamples))
+  const commit = summarizePerRunMicros(valid.map((outcome) => outcome.commitSamples))
+  // Per-run commit time divided by the jobs actually applied, then aggregated by median so a
+  // run with a short last batch cannot inflate the per-job cost by assuming every batch was full.
+  const perJobMean = median(
+    valid.map((outcome) =>
+      outcome.applied === 0
+        ? 0
+        : (outcome.commitSamples.reduce((total, sample) => total + sample, 0) * 1000) /
+          outcome.applied,
+    ),
+  )
 
   return {
     suite: 'complete-batch',
@@ -184,7 +198,7 @@ export function summarizeCompleteBatchRuns(
       'commit p50 (µs)': commit.p50,
       'commit p95 (µs)': commit.p95,
       'commit p99 (µs)': commit.p99,
-      'per-job mean (µs)': commit.mean / scenario.batch,
+      'per-job mean (µs)': perJobMean,
     },
     samples: valid.map((outcome) => ({
       'complete jobs/sec': (outcome.applied / outcome.workloadDuration) * 1000,

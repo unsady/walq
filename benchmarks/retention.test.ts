@@ -26,7 +26,6 @@ function outcome(overrides: Partial<RetentionOutcome> = {}): RetentionOutcome {
     eventLoopSamples: [1, 2, 3],
     workloadDuration: 100,
     errors: [],
-    leaseProbe: undefined,
     cleanup: 10,
     cleanupBatches: 2,
     cleanupBatchSamples: [1, 2],
@@ -42,11 +41,17 @@ function outcome(overrides: Partial<RetentionOutcome> = {}): RetentionOutcome {
 }
 
 describe('retention grid', () => {
-  it('builds a small unique quick matrix', () => {
+  it('keeps only the zero and 25k baseline plus 25k cleanup in quick', () => {
     const scenarios = retentionScenarios(quickRetentionGrid)
+    const described = scenarios.map((scenario) => `${scenario.history}/${scenario.cleanup}`).sort()
 
-    expect(scenarios).toHaveLength(7)
-    expect(new Set(scenarios.map(retentionScenarioName)).size).toBe(7)
+    expect(described).toEqual([
+      '0/retained',
+      '25000/delete',
+      '25000/delete-vacuum',
+      '25000/retained',
+    ])
+    expect(new Set(scenarios.map(retentionScenarioName)).size).toBe(4)
   })
 
   it('includes a million-row history in the full matrix', () => {
@@ -113,10 +118,7 @@ describe('retentionInvalidReason', () => {
     expect(retentionInvalidReason(outcome({ lostLeases: 1 }), 100)).toContain('lost lease')
   })
 
-  it('rejects a failed lease probe and storage errors', () => {
-    expect(retentionInvalidReason(outcome({ leaseProbe: 'probe broken' }), 100)).toBe(
-      'probe broken',
-    )
+  it('rejects storage errors', () => {
     expect(retentionInvalidReason(outcome({ errors: ['boom'] }), 100)).toBe('boom')
   })
 })

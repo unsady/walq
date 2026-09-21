@@ -20,7 +20,7 @@ import {
   median,
   numeric,
   spread,
-  summarizeMicros,
+  summarizePerRunMicros,
   type BenchmarkResult,
   type Collected,
   type Deferred,
@@ -275,8 +275,8 @@ export function summarizeRuns(
   const runs = valid.length
   const enqueueRates = valid.map((outcome) => (outcome.enqueued / outcome.enqueueElapsed) * 1000)
   const drainRates = valid.map((outcome) => (outcome.completed / outcome.drainElapsed) * 1000)
-  const claimSamples = valid.flatMap((outcome) => outcome.claimSamples)
-  const completeSamples = valid.flatMap((outcome) => outcome.completeSamples)
+  const claim = summarizePerRunMicros(valid.map((outcome) => outcome.claimSamples))
+  const complete = summarizePerRunMicros(valid.map((outcome) => outcome.completeSamples))
   const completed = total(valid, (outcome) => outcome.completed)
   const claims = total(valid, (outcome) => outcome.claims)
   const errors = total(collected.outcomes, (outcome) => outcome.errors)
@@ -306,10 +306,10 @@ export function summarizeRuns(
       'spread (%)': spread(drainRates),
       'jobs/claim': claims === 0 ? 0 : completed / claims,
       'empty claims': runs === 0 ? 0 : total(valid, (outcome) => outcome.emptyClaims) / runs,
-      'claim p50 (µs)': summarizeMicros(claimSamples).p50,
-      'claim p95 (µs)': summarizeMicros(claimSamples).p95,
-      'claim p99 (µs)': summarizeMicros(claimSamples).p99,
-      'complete p95 (µs)': summarizeMicros(completeSamples).p95,
+      'claim p50 (µs)': claim.p50,
+      'claim p95 (µs)': claim.p95,
+      'claim p99 (µs)': claim.p99,
+      'complete p95 (µs)': complete.p95,
       'drain (ms)': median(valid.map((outcome) => outcome.drainElapsed)),
       // Diagnostic across every run, including the excluded ones.
       errors,

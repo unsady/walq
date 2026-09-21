@@ -1,25 +1,36 @@
 # walq benchmarks
 
-Five suites measure different things. All run through Vitest Bench with the custom provider in
+Four production-oriented suites plus one benchmark-only prototype experiment measure different
+things. All run through Vitest Bench with the custom provider in
 `benchmarks/vitest-provider.ts`. The provider drives the real integration workloads through
 `collectRuns()` from `benchmarks/harness.ts`, so every scenario still runs `warmup + repeats`
-times with the order alternating between passes, and it returns Tinybench-shaped rows so the
-standard Vitest table renders one row per scenario.
+times with the order alternating between passes, and it returns Tinybench-shaped rows only so
+Vitest accepts the results; the benchmark-only reporter in `benchmarks/vitest-reporter.ts` drops
+the built-in table.
 
 ```sh
-pnpm bench                 # all suites, quick grids
+pnpm bench                 # production suites, quick grids (complete-batch is excluded)
 pnpm bench:queue           # coordinator suite only
 pnpm bench:contention      # SQLite contention suite only
-pnpm bench:claim-grouping  # grouped claim paths only
+pnpm bench:claim-grouping  # shipped claim path only in the quick grid
 pnpm bench:complete-batch  # batched completion prototype only
 pnpm bench:retention       # history growth and cleanup only
-pnpm bench:full            # full matrices
+pnpm bench:full            # full matrices for the production suites
+pnpm bench:experiments     # prototype comparisons: full claim grouping + complete batch
 ```
 
-The scripts run `vitest bench --run --reporter=verbose`. The verbose reporter is used because the
-default reporter switches to the minimal renderer in CI/agent environments, which hides the
-benchmark table. `.bench.ts` files are only picked up by `vitest bench`; `pnpm test` still runs
-only `*.test.ts`, so the heavy workloads never run there.
+The scripts run `vitest bench --run --reporter=./benchmarks/vitest-reporter.ts` and list the suite
+files explicitly. `pnpm bench` therefore runs only the four production-oriented suites; the
+benchmark-only `complete-batch.bench.ts` prototype runs only through `pnpm bench:complete-batch`
+or `pnpm bench:experiments`. The custom reporter extends Vitest's verbose reporter and suppresses
+only the built-in benchmark table, so per-file and per-test status, failures, and the run summary
+are preserved; `pnpm test` keeps the default reporter. `.bench.ts` files are only picked up by
+`vitest bench`; `pnpm test` still runs only `*.test.ts`, so the heavy workloads never run there.
+
+Each suite prints one compact plain-text `domain summary` table to stdout, the only domain table
+in a normal bench run. It keeps the suite's key scenario parameters, the primary throughput, the
+repeat-to-repeat spread, and a handful of domain-specific metrics, and drops profile columns that
+carry no signal in any scenario.
 
 ## Selecting and tuning
 
@@ -42,16 +53,19 @@ The previous `--suite`, `--repeats`, `--warmup`, `--jobs`, `--only`, `--json`, `
 `--help` flags, and the `BENCH_SUITES` variable, are gone because `vitest bench` owns the CLI.
 Select a suite with the `pnpm bench:*` scripts or a Vitest file filter, for example
 `vitest bench --run benchmarks/coordinator.bench.ts`, and pass the remaining settings through the
-`BENCH_*` variables. Unrelated flags are forwarded to Vitest unchanged.
+`BENCH_*` variables. More than one file can be listed, for example
+`vitest bench --run benchmarks/coordinator.bench.ts benchmarks/retention.bench.ts`. Unrelated
+flags are forwarded to Vitest unchanged.
 
-The Vitest table shows the `hz` column (the primary rate), the latency min/max/mean/p75/p99/
-p995/p999 columns, `rme`, and the sample count. The primary rate is `jobs/sec` for coordinator,
-`drain jobs/sec` for contention, and `jobs/sec` for claim grouping and retention; the latency
-columns are the per-run elapsed, drain, or workload time in milliseconds. `BENCH_JSON=bench.json`
+With the default `BENCH_REPEATS=3`, the reported throughput is the median of the measured runs.
+Operation percentiles are computed within each run and then reduced to their median across runs,
+so every run gets one vote regardless of how many samples it collected; the compact domain summary
+and the JSON artifact report those medians. The primary rate is `jobs/sec` for coordinator,
+`drain jobs/sec` for contention, and `jobs/sec` for claim grouping and retention. `BENCH_JSON=bench.json`
 additionally writes one artifact per suite, such as `bench.coordinator.json`,
 `bench.contention.json`, `bench.claim-grouping.json`, and `bench.retention.json`, with the
-environment, resolved options, every domain metric, and raw per-run samples that the standard
-table cannot show.
+environment, resolved options, every domain metric, and raw per-run samples that the compact
+summary cannot show.
 
 The process exits with code 1 when any scenario reports a problem; the failing `expect` names the
 domain reason (incomplete work, lost lease, duplicate completion, storage error, or an abort).
@@ -85,7 +99,9 @@ Compares two ways to wire queues onto one connection:
 | `bursty`    | Workers start on empty queues, wait for the poller to go idle, then a burst of `queue.add()` calls arrives. |
 
 Grids: quick uses 1 and 8 queues, full uses 1, 4, 16, and 64. Scenarios are ordered so that the
-`shared` and `isolated` runs of one configuration sit next to each other.
+`shared` and `isolated` runs of one configuration sit next to each other. Degenerate variants are
+collapsed: a single queue shares one coordinator either way, and `sparse` cannot thin a one-queue
+workload, so quick keeps 8 distinct workloads and full keeps 20.
 
 Reported: `jobs/sec` (median), `spread (%)` (noise across repeats), `claims/job`,
 `empty claims` per run, claim/complete latencies, `grouped calls` and `requests/grouped call`, and
@@ -135,10 +151,10 @@ separate page caches, and more file descriptors, so the measured gap mixes all o
 Tail latency is end-to-end operation duration (including lock waits and thread scheduling), not a
 direct measurement of time spent waiting for a lock.
 
-## claim-grouping — multi-queue transaction prototype
+## claim-grouping — multi-queue claim paths
 
-Compares the grouped claim path with a benchmark-only prototype that predates the production
-`Storage.claimQueues` capability:
+Compares the shipped grouped claim path with benchmark-only prototypes that predate the
+production `Storage.claimQueues` capability:
 
 - `current` calls `claim()` separately for every queue, creating one immediate transaction per
   call.
@@ -146,26 +162,30 @@ Compares the grouped claim path with a benchmark-only prototype that predates th
   transactions sized by the `BENCH_CLAIM_CHUNKS` tier. It is a prototype: it keeps its own prepared
   statements so chunk sizes can be swept without touching adapter code.
 - `production` calls the shipped `Storage.claimQueues` once per round, so the adapter's own 512-job
-  chunk budget is what gets measured. The benchmark can only time the whole call, so its
-  transaction percentiles, commit count, and jobs/transaction describe the call rather than one
-  internal chunk; see [grouped-claim-chunk-size.md](reports/grouped-claim-chunk-size.md) for the
-  chunk tiers behind that budget.
+  chunk budget is what gets measured. The benchmark can only time the whole call, which may open
+  several transactions, so its latency is reported as a **claim call** (p50/p95/p99),
+  `jobs/claim call`, and `claim calls` rather than as a transaction; see
+  [grouped-claim-chunk-size.md](reports/grouped-claim-chunk-size.md) for the chunk tiers behind
+  that budget.
 
 The coordinator benchmark exercises the same production method end to end. This suite keeps its own
 prepared statements so the grouped and current paths can be compared under one grid; only the
 `production` mode imports adapter behaviour.
 
-The quick grid uses 1, 8, and 32 queues with limits 1 and 16. The full grid covers 1, 4, 8, and 32
-queues with limits 1, 4, and 16. Both compare `solo` against `competing`. A competing scenario
+The quick grid measures only the shipped `production` path: 1, 8, and 32 queues with limits 1 and
+16, `solo` and `competing`, 12 scenarios in total. The full grid covers 1, 4, 8, and 32 queues
+with limits 1, 4, and 16 and adds the `current` and `grouped` prototypes, 72 scenarios. Both
+compare `solo` against `competing`. A competing scenario
 opens a second connection in a worker thread against the same WAL file and repeatedly performs
 measured enqueue and complete writes against pre-created leases, alternating their order and
 yielding for one millisecond between cycles to avoid artificial writer starvation.
 
-Reported: claimed `jobs/sec`; individual transaction p50/p95/p99; average jobs per transaction;
-the commit count; event-loop p95/p99; and the competing connection's enqueue and complete
-p95/p99. Transaction latency intentionally has a different unit of work: one queue claim for
+Reported: claimed `jobs/sec`; claim-call or transaction p50/p95/p99; average jobs per call; the
+call or commit count; event-loop p95/p99; and the competing connection's enqueue and complete
+p95/p99. Latency intentionally has a different unit of work per mode: one queue claim for
 `current`, one grouped transaction for `grouped` (all queues by default, or a `chunk` of queues
-when the chunk tiers are configured), and one whole-round `claimQueues` call for `production`.
+when the chunk tiers are configured), and one whole-round `claimQueues` call for `production`,
+where the labels read `claim call`, `jobs/claim call`, and `claim calls`.
 Before each round the suite schedules a `setImmediate`; the time until that
 callback runs is the event-loop stall sample. It includes the whole claim round and scheduler
 latency, so use it as a responsiveness comparison rather than exact CPU time. Competing runs add
@@ -177,29 +197,33 @@ is invalid when work is incomplete, duplicated, or the competing writer reports 
 
 `BENCH_CLAIM_QUEUES`, `BENCH_CLAIM_LIMITS`, `BENCH_CLAIM_MODES` and `BENCH_CLAIM_CHUNKS`
 replace the queue, limit, mode and chunk tiers so a longer `BEGIN IMMEDIATE` can be probed without
-editing the grid. `chunk all` keeps the original behaviour of one transaction per round; smaller
-chunks split the round into several transactions:
+editing the grid. Because the quick grid ships only `production`, reproducing the chunk-size
+report requires an explicit `BENCH_CLAIM_MODES=grouped`. `chunk all` keeps the original behaviour
+of one transaction per round; smaller chunks split the round into several transactions:
 
 ```sh
 BENCH_CLAIM_QUEUES=128,256 BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
   BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench:claim-grouping
 ```
 
-## complete-batch — batched completion prototype
+## complete-batch — batched completion experiment
 
-Measures the headroom of completing several jobs inside one transaction instead of one autocommit
-`UPDATE` per job. Each run seeds live leases with benchmark-only SQL inside a single transaction,
-then measures only the completion phase. `complete batch 1` calls the production
-`Storage.complete` path, so every other tier is compared against the shipped code rather than a
-rewritten baseline; the larger tiers use a benchmark-only prototype that runs the same
-`UPDATE ... WHERE status = 'active' AND leaseToken = ... AND expiresAt > now` for the batch inside
-one immediate transaction.
+Benchmark-only experiment, not part of the default `pnpm bench`; run it with
+`pnpm bench:complete-batch` or `pnpm bench:experiments`. Measures the headroom of completing
+several jobs inside one transaction instead of one autocommit `UPDATE` per job. Each run seeds
+live leases with benchmark-only SQL inside a single transaction, then measures only the completion
+phase. `complete batch 1` calls the production asynchronous `Storage.complete` path, which issues
+one autocommit `UPDATE` through the adapter; the larger tiers run the same
+`UPDATE ... WHERE status = 'active' AND leaseToken = ... AND expiresAt > now` inside one immediate
+transaction over direct `better-sqlite3`. The measured gap therefore mixes two changes: batching
+many completions into one transaction, and the async adapter path versus direct synchronous
+prototype SQL. It is not an isolation of batching alone.
 
 Both grids use batch sizes 1, 4, and 16. Reported: `complete jobs/sec`; the commit p50/p95/p99;
-the commit count; and the mean per-job cost. Seeding and lease creation stay outside the measured
-phase, so the numbers isolate the completion commit. As with the claim prototype, the tier is a
-trade-off: a larger batch holds the writer lock longer, which matters more under
-`synchronous = FULL`.
+the commit count; and the per-job mean, computed per run and then reduced by median so a short
+last batch cannot inflate the cost. Seeding and lease creation stay outside the measured phase.
+As with the claim prototypes, the tier is a trade-off: a larger batch holds the writer lock
+longer, which matters more under `synchronous = FULL`.
 
 ## retention — completed/failed history growth and cleanup
 
@@ -214,10 +238,13 @@ claim in batches of 20, and complete every claimed job.
 
 | Dimension  | Quick                                 | Full                                                    |
 | ---------- | ------------------------------------- | ------------------------------------------------------- |
-| history    | 0, 1k, 25k                            | 0, 1k, 25k, 250k, 1M                                    |
+| history    | 0, 25k                                | 0, 1k, 25k, 250k, 1M                                    |
 | cleanup    | `retained`, `delete`, `delete-vacuum` | same                                                    |
 | batch      | 10k                                   | 10k; 50k compared at 250k                               |
 | connection | `warm`                                | `warm`; `reopened` at 25k/250k and after vacuum at 250k |
+
+The quick grid keeps only four scenarios: `0/retained`, `25k/retained`, `25k/delete`, and
+`25k/delete-vacuum`.
 
 - `retained` — no cleanup; the active workload runs against the full history.
 - `delete` — terminal rows are removed in batches with `DELETE ... RETURNING`; no VACUUM.
@@ -229,10 +256,8 @@ claim in batches of 20, and complete every claimed job.
 Reported: active `jobs/sec`; enqueue/claim/complete p50/p95/p99; event-loop p95/p99; cleanup
 duration; per-batch execution p50/p95/p99 and event-loop stall p95/p99; `vacuum` and `checkpoint`
 duration with the VACUUM stall; and database, WAL, and page counts before and after cleanup. Every
-claimed id must be unique, every claimed job must complete with `applied`, and an unmeasured probe
-checks `heartbeat`, `fail` with retry, terminal `fail`, and stale-lease rejection before the
-measured phase. A storage error, lost lease, duplicate, incomplete job, or failed probe
-invalidates the run.
+claimed id must be unique and every claimed job must complete with `applied`. A storage error,
+lost lease, duplicate, or incomplete job invalidates the run.
 
 `VACUUM` rewrites the database but does not shrink the on-disk file until a WAL checkpoint runs,
 so `delete-vacuum` measures `wal_checkpoint(TRUNCATE)` separately. Without `VACUUM`, `DELETE` does
@@ -268,8 +293,10 @@ page cache. `warm` reuses the seeding connection.
   warmup pass are printed to stderr, failures of a measured pass fail the scenario.
 - Threads report `performance.timeOrigin + performance.now()` timestamps, which share one
   process-wide origin, so phase windows are comparable across threads.
-- Rates are medians over the measured runs; percentiles pool the samples of every measured run
-  using the nearest-rank method. `BENCH_JSON` also stores the raw per-run values.
+- Rates are medians over the measured runs. Operation percentiles are computed within each run
+  and then reduced to the median across runs, so every run gets one vote regardless of how many
+  samples it collected; the compact domain summary and the JSON artifact report those medians.
+  `BENCH_JSON` also stores the raw per-run values.
 - Runs that did not confirm every job, lost a lease, completed a job twice, hit a storage error,
   or aborted are treated as invalid: they are described in the JSON notes, shown as zero rows in
   the table, and **excluded** from every rate and percentile. The `errors` metric deliberately

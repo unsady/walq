@@ -21,7 +21,7 @@ import {
   median,
   numeric,
   spread,
-  summarizeMicros,
+  summarizePerRunMicros,
   type BenchmarkResult,
   type Collected,
 } from './harness.js'
@@ -30,8 +30,19 @@ import { defineScenario, type ScenarioDefinition } from './scenario.js'
 export type ClaimGroupingMode = 'current' | 'grouped' | 'production'
 export type ClaimGroupingPlacement = 'solo' | 'competing'
 
-/** One `BEGIN IMMEDIATE ... COMMIT` executed by the Walq side, with how many jobs it claimed. */
-export type TransactionSample = { micros: number; jobs: number }
+/**
+ * One measured unit on the Walq side, with how many jobs it claimed: a single transaction for
+ * `current`/`grouped`, or one whole `claimQueues` call for `production`. The latter may open
+ * several transactions internally, so its sample covers the API call, not one transaction.
+ */
+export type CallSample = { duration: number; jobs: number }
+
+/**
+ * Minimum number of enqueue and complete samples the competing writer must produce before its
+ * latency percentiles are trustworthy. Every competitor operation emits one of each, so this is
+ * also the number of operations `executeRun` waits for.
+ */
+export const minimumCompetitorSamples = 20
 
 export type ClaimGroupingGrid = {
   queues: number[]
@@ -51,10 +62,15 @@ export type ClaimGroupingScenario = {
   chunksConfigured: boolean
 }
 
+/**
+ * Quick grid measures the shipped path only: `production` calls the real `claimQueues`.
+ * The `current` and `grouped` prototypes are reserved for the full grid or for an explicit
+ * `BENCH_CLAIM_MODES` selection when reproducing the chunk-size report.
+ */
 export const quickClaimGroupingGrid: ClaimGroupingGrid = {
   queues: [1, 8, 32],
   limits: [1, 16],
-  modes: ['current', 'grouped', 'production'],
+  modes: ['production'],
   placements: ['solo', 'competing'],
   chunks: [undefined],
 }
@@ -73,11 +89,11 @@ const runTimeout = 60_000
 
 type ClaimRequest = Pick<ClaimInput, 'queue' | 'limit' | 'now' | 'leaseDuration'>
 
-type ClaimGroupingOutcome = {
+export type ClaimGroupingOutcome = {
   elapsed: number
   claimed: number
   duplicates: number
-  transactions: TransactionSample[]
+  calls: CallSample[]
   eventLoopSamples: number[]
   competitor: ClaimCompetitorReport
 }
@@ -138,13 +154,13 @@ class GroupedClaimer {
   claim(
     requests: ClaimRequest[],
     chunkSize: number | undefined,
-    transactions: TransactionSample[],
+    calls: CallSample[],
   ): ClaimedJob[] {
     const claimed: ClaimedJob[] = []
     for (const chunk of chunkRequests(requests, chunkSize)) {
       const started = performance.now()
       const jobs = this.#transaction.immediate(chunk)
-      transactions.push({ micros: performance.now() - started, jobs: jobs.length })
+      calls.push({ duration: performance.now() - started, jobs: jobs.length })
       claimed.push(...jobs)
     }
     return claimed
@@ -306,13 +322,13 @@ function nextTurn(): Promise<number> {
 async function claimCurrent(
   storage: Storage,
   requests: ClaimRequest[],
-  transactions: TransactionSample[],
+  calls: CallSample[],
 ): Promise<ClaimedJob[]> {
   const claimed: ClaimedJob[] = []
   for (const request of requests) {
     const started = performance.now()
     const jobs = await storage.claim(request)
-    transactions.push({ micros: performance.now() - started, jobs: jobs.length })
+    calls.push({ duration: performance.now() - started, jobs: jobs.length })
     claimed.push(...jobs)
   }
   return claimed
@@ -322,27 +338,27 @@ function claimGrouped(
   claimer: GroupedClaimer,
   requests: ClaimRequest[],
   chunkSize: number | undefined,
-  transactions: TransactionSample[],
+  calls: CallSample[],
 ): ClaimedJob[] {
-  return claimer.claim(requests, chunkSize, transactions)
+  return claimer.claim(requests, chunkSize, calls)
 }
 
 /**
- * Shipped path: one `claimQueues` call per round, with the adapter's internal
- * chunking. Transaction samples cover the whole call, not one internal chunk,
- * so compare its transaction percentiles with care.
+ * Shipped path: one `claimQueues` call per round, with the adapter's internal chunking. The
+ * sample covers the whole call, which may open several transactions, so this is API call
+ * latency, not transaction latency; `summarizeRuns` labels it accordingly.
  */
 async function claimProduction(
   storage: Storage,
   requests: ClaimRequest[],
-  transactions: TransactionSample[],
+  calls: CallSample[],
 ): Promise<ClaimedJob[]> {
   const claimQueues = storage.claimQueues
   if (claimQueues === undefined) throw new Error('storage does not implement claimQueues')
   const started = performance.now()
   const results = await claimQueues.call(storage, { requests })
   const jobs = results.flat()
-  transactions.push({ micros: performance.now() - started, jobs: jobs.length })
+  calls.push({ duration: performance.now() - started, jobs: jobs.length })
   return jobs
 }
 
@@ -393,6 +409,7 @@ function startCompetitor(
       Atomics.notify(control, 0)
     },
     waitForSamples: async (minimum) => {
+      // Every competitor operation emits one enqueue and one complete sample.
       for (let attempt = 0; attempt < 40 && Atomics.load(control, 2) < minimum; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3))
       }
@@ -423,7 +440,7 @@ async function executeRun(
   const grouped = new GroupedClaimer(db)
   const competitor =
     scenario.placement === 'competing' ? startCompetitor(path, synchronous) : undefined
-  const transactions: TransactionSample[] = []
+  const calls: CallSample[] = []
   const eventLoopSamples: number[] = []
   const claimedIds = new Set<string>()
   let claimed = 0
@@ -447,10 +464,10 @@ async function executeRun(
       const roundStarted = performance.now()
       const jobsInRound =
         scenario.mode === 'current'
-          ? await claimCurrent(storage, requests, transactions)
+          ? await claimCurrent(storage, requests, calls)
           : scenario.mode === 'production'
-            ? await claimProduction(storage, requests, transactions)
-            : claimGrouped(grouped, requests, scenario.chunkSize, transactions)
+            ? await claimProduction(storage, requests, calls)
+            : claimGrouped(grouped, requests, scenario.chunkSize, calls)
       elapsed += performance.now() - roundStarted
       eventLoopSamples.push(await turn)
       for (const job of jobsInRound) claimedIds.add(job.id)
@@ -462,7 +479,7 @@ async function executeRun(
         await new Promise((resolve) => setTimeout(resolve, 3))
       }
     }
-    if (competitor !== undefined) await competitor.waitForSamples(20)
+    if (competitor !== undefined) await competitor.waitForSamples(minimumCompetitorSamples)
     const competitorReport =
       competitor === undefined
         ? emptyCompetitor()
@@ -472,7 +489,7 @@ async function executeRun(
       elapsed,
       claimed,
       duplicates: claimed - claimedIds.size,
-      transactions,
+      calls,
       eventLoopSamples,
       competitor: competitorReport,
     }
@@ -484,47 +501,71 @@ async function executeRun(
   }
 }
 
-function invalidReason(outcome: ClaimGroupingOutcome, jobs: number): string | undefined {
+/** Reason why a run must stay out of the metrics, or undefined when it is trustworthy. */
+export function invalidReason(
+  outcome: ClaimGroupingOutcome,
+  jobs: number,
+  placement: ClaimGroupingPlacement,
+): string | undefined {
   if (outcome.claimed !== jobs) return `claimed ${outcome.claimed} of ${jobs} jobs`
   if (outcome.duplicates !== 0) return `${outcome.duplicates} duplicate claims`
   if (outcome.competitor.errors !== 0) {
     return `${outcome.competitor.errors} competitor errors: ${outcome.competitor.firstError ?? 'unknown'}`
   }
+  if (placement === 'competing') {
+    const enqueue = outcome.competitor.enqueueSamples.length
+    const complete = outcome.competitor.completeSamples.length
+    if (enqueue < minimumCompetitorSamples || complete < minimumCompetitorSamples) {
+      return `competitor produced ${enqueue} enqueue and ${complete} complete samples, need ${minimumCompetitorSamples} of each`
+    }
+  }
+
   return undefined
 }
 
-function summarizeRuns(
+/**
+ * Latency labels for the measured unit. `production` times one whole `claimQueues` call, which
+ * may contain several transactions, so it must not be reported as a transaction. The prototype
+ * modes time the single immediate transaction they open and keep the transaction labels the
+ * chunk-size report relies on.
+ */
+function claimLatencyLabels(mode: ClaimGroupingMode): {
+  duration: string
+  jobsPerCall: string
+  calls: string
+} {
+  if (mode === 'production') {
+    return { duration: 'claim call', jobsPerCall: 'jobs/claim call', calls: 'claim calls' }
+  }
+
+  return { duration: 'transaction', jobsPerCall: 'jobs/transaction', calls: 'commits' }
+}
+
+export function summarizeRuns(
   scenario: ClaimGroupingScenario,
   jobs: number,
   collected: Collected<ClaimGroupingOutcome>,
 ): BenchmarkResult {
-  const valid = collected.outcomes.filter((outcome) => invalidReason(outcome, jobs) === undefined)
+  const valid = collected.outcomes.filter(
+    (outcome) => invalidReason(outcome, jobs, scenario.placement) === undefined,
+  )
   const invalid = collected.outcomes
-    .map((outcome) => invalidReason(outcome, jobs))
+    .map((outcome) => invalidReason(outcome, jobs, scenario.placement))
     .filter((reason): reason is string => reason !== undefined)
   const rates = valid.map((outcome) => (outcome.claimed / outcome.elapsed) * 1000)
-  const transaction = summarizeMicros(
-    valid.flatMap((outcome) => outcome.transactions.map((sample) => sample.micros)),
+  const callSummary = summarizePerRunMicros(
+    valid.map((outcome) => outcome.calls.map((sample) => sample.duration)),
   )
-  const transactionJobs = valid.flatMap((outcome) =>
-    outcome.transactions.map((sample) => sample.jobs),
-  )
-  const commits = valid.map((outcome) => outcome.transactions.length)
-  const jobsPerTransaction =
-    transactionJobs.length === 0
-      ? 0
-      : transactionJobs.reduce((total, jobs) => total + jobs, 0) / transactionJobs.length
-  const eventLoop = summarizeMicros(valid.flatMap((outcome) => outcome.eventLoopSamples))
-  const enqueue = summarizeMicros(valid.flatMap((outcome) => outcome.competitor.enqueueSamples))
-  const complete = summarizeMicros(valid.flatMap((outcome) => outcome.competitor.completeSamples))
+  const callJobs = valid.flatMap((outcome) => outcome.calls.map((sample) => sample.jobs))
+  const callCounts = valid.map((outcome) => outcome.calls.length)
+  const jobsPerCall =
+    callJobs.length === 0 ? 0 : callJobs.reduce((total, jobs) => total + jobs, 0) / callJobs.length
+  const eventLoop = summarizePerRunMicros(valid.map((outcome) => outcome.eventLoopSamples))
+  const enqueue = summarizePerRunMicros(valid.map((outcome) => outcome.competitor.enqueueSamples))
+  const complete = summarizePerRunMicros(valid.map((outcome) => outcome.competitor.completeSamples))
+  const labels = claimLatencyLabels(scenario.mode)
   const notes = [...collected.failures]
   if (invalid.length > 0) notes.push(...invalid)
-  if (
-    scenario.placement === 'competing' &&
-    valid.some((outcome) => outcome.competitor.operations === 0)
-  ) {
-    notes.push('competitor completed no operations')
-  }
 
   return {
     suite: 'claim-grouping',
@@ -540,11 +581,11 @@ function summarizeRuns(
     metrics: {
       'jobs/sec': median(rates),
       'spread (%)': spread(rates),
-      'transaction p50 (µs)': transaction.p50,
-      'transaction p95 (µs)': transaction.p95,
-      'transaction p99 (µs)': transaction.p99,
-      'jobs/transaction': jobsPerTransaction,
-      commits: median(commits),
+      [`${labels.duration} p50 (µs)`]: callSummary.p50,
+      [`${labels.duration} p95 (µs)`]: callSummary.p95,
+      [`${labels.duration} p99 (µs)`]: callSummary.p99,
+      [labels.jobsPerCall]: jobsPerCall,
+      [labels.calls]: median(callCounts),
       'event loop p95 (µs)': eventLoop.p95,
       'event loop p99 (µs)': eventLoop.p99,
       'enqueue p95 (µs)': enqueue.p95,
@@ -558,7 +599,7 @@ function summarizeRuns(
       'elapsed (ms)': outcome.elapsed,
       claimed: outcome.claimed,
       duplicates: outcome.duplicates,
-      commits: outcome.transactions.length,
+      calls: outcome.calls.length,
       'competitor ops': outcome.competitor.operations,
     })),
     notes,

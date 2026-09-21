@@ -14,7 +14,7 @@ import {
   median,
   numeric,
   spread,
-  summarizeMicros,
+  summarizePerRunMicros,
   type BenchmarkResult,
   type Collected,
 } from './harness.js'
@@ -45,9 +45,9 @@ export type RetentionScenario = {
 export const quickRetentionGrid: RetentionGrid = {
   tiers: [
     { history: [0], cleanup: ['retained'], batches: [10_000], connections: ['warm'] },
-    { history: [1_000, 25_000], cleanup: ['retained'], batches: [10_000], connections: ['warm'] },
+    { history: [25_000], cleanup: ['retained'], batches: [10_000], connections: ['warm'] },
     {
-      history: [1_000, 25_000],
+      history: [25_000],
       cleanup: ['delete', 'delete-vacuum'],
       batches: [10_000],
       connections: ['warm'],
@@ -98,7 +98,6 @@ export const fullRetentionGrid: RetentionGrid = {
 }
 
 const queue = 'retention'
-const probeQueue = 'retention-probe'
 const warmupQueue = 'retention-warmup'
 const activeClaimLimit = 20
 const activeLeaseDuration = 60_000
@@ -136,7 +135,6 @@ export type RetentionActiveOutcome = {
 export type RetentionOutcome = RetentionActiveOutcome &
   RetentionCleanupOutcome & {
     activeJobs: number
-    leaseProbe: string | undefined
     before: SizeSnapshot
     after: SizeSnapshot
   }
@@ -349,78 +347,6 @@ async function runCleanup(
   }
 }
 
-/** Exercise heartbeat, fail+retry, terminal fail and lease invalidation before measuring. */
-async function validateLeaseMutations(storage: Storage): Promise<string | undefined> {
-  try {
-    const created = await storage.enqueue({
-      queue: probeQueue,
-      name: 'probe',
-      data: '{}',
-      now: Date.now(),
-      availableAt: Date.now(),
-      attempts: 2,
-    })
-    const first = await storage.claim({
-      queue: probeQueue,
-      limit: 1,
-      now: Date.now(),
-      leaseDuration: activeLeaseDuration,
-    })
-    const lease = first[0]
-    if (first.length !== 1 || lease === undefined || lease.id !== created.id) {
-      return 'probe claim did not return the enqueued job'
-    }
-    const heartbeat = await storage.heartbeat({
-      id: lease.id,
-      leaseToken: lease.leaseToken,
-      now: Date.now(),
-      leaseDuration: activeLeaseDuration,
-    })
-    if (heartbeat !== 'applied') return 'probe heartbeat was not applied'
-
-    const retry = await storage.fail({
-      id: lease.id,
-      leaseToken: lease.leaseToken,
-      now: Date.now(),
-      error: 'probe retry',
-      retryAt: Date.now(),
-    })
-    if (retry !== 'applied') return 'probe fail with retry was not applied'
-
-    const second = await storage.claim({
-      queue: probeQueue,
-      limit: 1,
-      now: Date.now(),
-      leaseDuration: activeLeaseDuration,
-    })
-    const retryLease = second[0]
-    if (second.length !== 1 || retryLease === undefined || retryLease.id !== created.id) {
-      return 'probe retry was not re-claimed'
-    }
-    if (retryLease.leaseToken === lease.leaseToken) return 'probe reused a lease token'
-
-    const terminal = await storage.fail({
-      id: retryLease.id,
-      leaseToken: retryLease.leaseToken,
-      now: Date.now(),
-      error: 'probe terminal',
-      retryAt: null,
-    })
-    if (terminal !== 'applied') return 'probe terminal fail was not applied'
-
-    const stale = await storage.complete({
-      id: retryLease.id,
-      leaseToken: retryLease.leaseToken,
-      now: Date.now(),
-    })
-    if (stale !== 'lease_lost') return 'probe completed a job whose lease was already gone'
-
-    return undefined
-  } catch (error) {
-    return `probe error: ${errorMessage(error)}`
-  }
-}
-
 /** Warm prepared statements and the page cache without touching the measured queue. */
 async function warmConnection(storage: Storage): Promise<void> {
   for (let index = 0; index < warmupJobs; index += 1) {
@@ -550,7 +476,6 @@ async function executeRun(
     const before = snapshot(path, db)
     const cleanup = await runCleanup(db, scenario)
     const after = snapshot(path, db)
-    const leaseProbe = await validateLeaseMutations(storage)
 
     if (scenario.connection === 'reopened') {
       db.close()
@@ -565,7 +490,6 @@ async function executeRun(
       ...active,
       ...cleanup,
       activeJobs: jobs,
-      leaseProbe,
       before,
       after,
     }
@@ -587,7 +511,6 @@ export function retentionInvalidReason(
   if (outcome.completed !== jobs) return `completed ${outcome.completed} of ${jobs} jobs`
   if (outcome.duplicates !== 0) return `${outcome.duplicates} duplicate claims`
   if (outcome.lostLeases !== 0) return `${outcome.lostLeases} lost leases`
-  if (outcome.leaseProbe !== undefined) return outcome.leaseProbe
   if (outcome.errors.length > 0) return outcome.errors[0]
   return undefined
 }
@@ -611,12 +534,12 @@ export function summarizeRetentionRuns(
   if (invalid.length > 0) notes.push(...invalid)
 
   const rates = valid.map((outcome) => (jobs / outcome.workloadDuration) * 1000)
-  const enqueue = summarizeMicros(valid.flatMap((outcome) => outcome.enqueueSamples))
-  const claim = summarizeMicros(valid.flatMap((outcome) => outcome.claimSamples))
-  const complete = summarizeMicros(valid.flatMap((outcome) => outcome.completeSamples))
-  const eventLoop = summarizeMicros(valid.flatMap((outcome) => outcome.eventLoopSamples))
-  const batch = summarizeMicros(valid.flatMap((outcome) => outcome.cleanupBatchSamples))
-  const stall = summarizeMicros(valid.flatMap((outcome) => outcome.cleanupStallSamples))
+  const enqueue = summarizePerRunMicros(valid.map((outcome) => outcome.enqueueSamples))
+  const claim = summarizePerRunMicros(valid.map((outcome) => outcome.claimSamples))
+  const complete = summarizePerRunMicros(valid.map((outcome) => outcome.completeSamples))
+  const eventLoop = summarizePerRunMicros(valid.map((outcome) => outcome.eventLoopSamples))
+  const batch = summarizePerRunMicros(valid.map((outcome) => outcome.cleanupBatchSamples))
+  const stall = summarizePerRunMicros(valid.map((outcome) => outcome.cleanupStallSamples))
   const vacuumStalls = valid.map((outcome) => outcome.vacuumStall * 1000)
 
   return {

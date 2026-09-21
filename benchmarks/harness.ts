@@ -257,6 +257,29 @@ export function summarizeMicros(samples: number[]): LatencySummary {
   }
 }
 
+/**
+ * Fair latency summary across measured repeats: every run gets one vote. Each run's mean and
+ * percentiles are computed first, then the median of every statistic is taken across runs, so a
+ * run that happens to collect more samples cannot outweigh the others. Runs without samples are
+ * ignored, and `count` stays the total number of samples across all runs. Input is milliseconds,
+ * output is microseconds, matching {@link summarizeMicros}.
+ */
+export function summarizePerRunMicros(runs: number[][]): LatencySummary {
+  const perRun = runs.filter((run) => run.length > 0).map((run) => summarize(run))
+  if (perRun.length === 0) {
+    return { count: 0, mean: 0, p50: 0, p95: 0, p99: 0, max: 0 }
+  }
+
+  return {
+    count: runs.reduce((total, run) => total + run.length, 0),
+    mean: median(perRun.map((summary) => summary.mean)) * 1000,
+    p50: median(perRun.map((summary) => summary.p50)) * 1000,
+    p95: median(perRun.map((summary) => summary.p95)) * 1000,
+    p99: median(perRun.map((summary) => summary.p99)) * 1000,
+    max: median(perRun.map((summary) => summary.max)) * 1000,
+  }
+}
+
 /** Read a metric as a number, treating strings and missing values as zero. */
 export function numeric(value: MetricValue | undefined): number {
   return typeof value === 'number' ? value : 0
@@ -288,6 +311,66 @@ function collectColumns(results: BenchmarkResult[], key: 'params' | 'metrics'): 
 
 function isNumeric(results: BenchmarkResult[], key: 'params' | 'metrics', column: string): boolean {
   return results.every((result) => typeof result[key][column] === 'number')
+}
+
+/** A column is numeric when it has at least one value and every present value is a number. */
+function isNumericColumn(
+  results: BenchmarkResult[],
+  key: 'params' | 'metrics',
+  column: string,
+): boolean {
+  let seen = false
+  for (const result of results) {
+    const value = result[key][column]
+    if (value === undefined || value === '') continue
+    if (typeof value !== 'number') return false
+    seen = true
+  }
+
+  return seen
+}
+
+/** Visible width in code points, so surrogate pairs count as one cell. */
+function displayWidth(value: string): number {
+  return [...value].length
+}
+
+/** Collapse line breaks and tabs so a value cannot break the surrounding table layout. */
+function flattenCell(value: string): string {
+  return value.replaceAll(/\r\n|[\r\n\t]/g, ' ')
+}
+
+/**
+ * Render a plain-text table with computed column widths: two-space gutters, text
+ * left-aligned and numbers right-aligned, and no Markdown markers.
+ */
+function renderTerminalTable(
+  headers: string[],
+  alignments: Array<'left' | 'right'>,
+  rows: string[][],
+): string {
+  const widths = headers.map((header, column) => {
+    let width = displayWidth(header)
+    for (const row of rows) width = Math.max(width, displayWidth(row[column] ?? ''))
+
+    return width
+  })
+  const formatRow = (cells: string[]): string =>
+    cells
+      .map((cell, column) => {
+        const width = widths[column] ?? 0
+        const padding = ' '.repeat(Math.max(0, width - displayWidth(cell)))
+
+        return alignments[column] === 'right' ? `${padding}${cell}` : `${cell}${padding}`
+      })
+      .join('  ')
+      .trimEnd()
+
+  return [
+    formatRow(headers),
+    widths.map((width) => '-'.repeat(width)).join('  '),
+    ...rows.map((row) => formatRow(row)),
+  ].join('\n')
 }
 
 function renderGroup(suite: string, results: BenchmarkResult[]): string {
@@ -333,6 +416,137 @@ export function renderMarkdown(results: BenchmarkResult[]): string {
   for (const [suite, group] of suites) sections.push(renderGroup(suite, group))
 
   return sections.join('\n\n')
+}
+
+/** Which metrics best describe each suite, so the compact summary stays narrow. */
+export type DomainSummaryProfile = {
+  throughput: string
+  spread: string
+  highlights: string[]
+  /** Parameters not already encoded in the scenario name. */
+  params: string[]
+}
+
+const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
+  coordinator: {
+    throughput: 'jobs/sec',
+    spread: 'spread (%)',
+    highlights: ['claims/job', 'empty claims', 'claim p95 (µs)', 'first handler (ms)'],
+    params: [],
+  },
+  contention: {
+    throughput: 'drain jobs/sec',
+    spread: 'spread (%)',
+    highlights: ['enqueue jobs/sec', 'jobs/claim', 'claim p95 (µs)', 'complete p95 (µs)'],
+    params: [],
+  },
+  'claim-grouping': {
+    throughput: 'jobs/sec',
+    spread: 'spread (%)',
+    // Production reports one `claimQueues` call, the prototype reports one transaction, so both
+    // label sets must stay visible instead of silently dropping production latency.
+    highlights: [
+      'jobs/claim call',
+      'claim calls',
+      'claim call p95 (µs)',
+      'jobs/transaction',
+      'commits',
+      'transaction p95 (µs)',
+      'event loop p95 (µs)',
+    ],
+    params: [],
+  },
+  'complete-batch': {
+    throughput: 'complete jobs/sec',
+    spread: 'spread (%)',
+    highlights: ['commits', 'commit p95 (µs)', 'per-job mean (µs)'],
+    params: [],
+  },
+  retention: {
+    throughput: 'active jobs/sec',
+    spread: 'spread (%)',
+    highlights: ['cleanup (ms)', 'delete batches', 'delete batch p95 (µs)', 'db after (MiB)'],
+    params: [],
+  },
+}
+
+/** A value is worth a column only when at least one scenario carries a real signal. */
+function hasSignal(results: BenchmarkResult[], key: 'params' | 'metrics', column: string): boolean {
+  return results.some((result) => {
+    const value = result[key][column]
+    if (value === undefined) return false
+    if (typeof value === 'string') return value.length > 0
+
+    return value !== 0
+  })
+}
+
+function domainProfile(results: BenchmarkResult[], metrics: string[]): DomainSummaryProfile {
+  const suite = results[0]?.suite ?? ''
+  const known = domainSummaryProfiles[suite]
+  if (known !== undefined) return known
+
+  const throughput =
+    metrics.find((metric) => metric.endsWith('jobs/sec') || metric.endsWith('/sec')) ?? ''
+  const spread = metrics.includes('spread (%)') ? 'spread (%)' : ''
+  const highlights = metrics
+    .filter((metric) => metric !== throughput && metric !== spread)
+    .filter((metric) => hasSignal(results, 'metrics', metric))
+    .slice(0, 4)
+
+  return { throughput, spread, highlights, params: collectColumns(results, 'params') }
+}
+
+/**
+ * Compact per-suite rendering for the console: the suite's key parameters, its
+ * primary throughput, the repeat-to-repeat spread, and a handful of domain
+ * metrics. Profile columns that carry no signal in any scenario are dropped, so
+ * inapplicable zeros never widen the table.
+ */
+export function renderDomainSummary(
+  title: string,
+  environment: Environment,
+  settings: Record<string, MetricValue>,
+  results: BenchmarkResult[],
+): string {
+  if (results.length === 0) return ''
+
+  const profile = domainProfile(results, collectColumns(results, 'metrics'))
+  const metricColumns = [profile.throughput, profile.spread, ...profile.highlights].filter(
+    (column) => column.length > 0 && hasSignal(results, 'metrics', column),
+  )
+  const params = profile.params.filter((column) => hasSignal(results, 'params', column))
+  const headers = ['scenario', ...params, ...metricColumns]
+  const alignments: Array<'left' | 'right'> = [
+    'left',
+    ...params.map((column): 'left' | 'right' =>
+      isNumericColumn(results, 'params', column) ? 'right' : 'left',
+    ),
+    ...metricColumns.map((column): 'left' | 'right' =>
+      isNumericColumn(results, 'metrics', column) ? 'right' : 'left',
+    ),
+  ]
+  const rows = results.map((result) => [
+    flattenCell(result.scenario),
+    ...params.map((column) => flattenCell(formatValue(result.params[column] ?? ''))),
+    ...metricColumns.map((column) => flattenCell(formatValue(result.metrics[column] ?? ''))),
+  ])
+  const settingsLine = Object.entries(settings)
+    .map(([key, value]) => `${key}=${flattenCell(formatValue(value))}`)
+    .join(' ')
+
+  return [
+    `domain summary — ${flattenCell(title)}`,
+    '',
+    `env  ${flattenCell(`${environment.node} ${environment.platform}/${environment.arch} · ${environment.cpu} · ${environment.cores} cores`)}`,
+    settingsLine.length > 0 ? `opts ${settingsLine}` : 'opts',
+    '',
+    renderTerminalTable(
+      headers.map((header) => flattenCell(header)),
+      alignments,
+      rows,
+    ),
+  ].join('\n')
 }
 
 export function renderJson(
