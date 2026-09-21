@@ -17,10 +17,6 @@ jobs:
   publish:
     environment: npm
     runs-on: ubuntu-latest
-    env:
-      # Needed only to bootstrap packages that do not exist on npm yet. Remove
-      # the secret after configuring trusted publishing for both packages.
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,7 +24,6 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          registry-url: https://registry.npmjs.org
       - run: npm install --global npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
@@ -42,15 +37,21 @@ jobs:
               throw new Error('Tag and package versions must match');
             }
           "
-      - name: Publish core
+      - name: Stage core
         run: |
           VERSION=$(node -p "require('./packages/core/package.json').version")
-          npm view "@walq/core@$VERSION" version >/dev/null 2>&1 || pnpm --filter @walq/core publish --access public --provenance --no-git-checks
-      - name: Publish better-sqlite3 adapter
+          if ! npm view "@walq/core@$VERSION" version >/dev/null 2>&1; then
+            pnpm --filter @walq/core pack --pack-destination "$RUNNER_TEMP"
+            npm stage publish "$RUNNER_TEMP/walq-core-$VERSION.tgz" --access public --provenance
+          fi
+      - name: Stage better-sqlite3 adapter
         run: |
           VERSION=$(node -p "require('./packages/better-sqlite3/package.json').version")
-          npm view "@walq/better-sqlite3@$VERSION" version >/dev/null 2>&1 || pnpm --filter @walq/better-sqlite3 publish --access public --provenance --no-git-checks
-      - name: Create GitHub release
+          if ! npm view "@walq/better-sqlite3@$VERSION" version >/dev/null 2>&1; then
+            pnpm --filter @walq/better-sqlite3 pack --pack-destination "$RUNNER_TEMP"
+            npm stage publish "$RUNNER_TEMP/walq-better-sqlite3-$VERSION.tgz" --access public --provenance
+          fi
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --generate-notes
+        run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --draft --generate-notes

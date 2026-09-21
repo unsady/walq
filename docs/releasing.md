@@ -8,10 +8,9 @@ The two public packages are released together with the same version:
 ## One-time setup
 
 1. Create or obtain publish access to the public `@walq` npm scope.
-2. For the first publication, add a short-lived or granular automation token as the `NPM_TOKEN` secret in the `npm` GitHub environment. npm cannot configure a trusted publisher for a package that does not exist yet.
-3. After both packages exist, configure them in npm to trust `.github/workflows/release.yml` in `unsady/walq`, using the `npm` GitHub environment.
-4. Remove `NPM_TOKEN`; subsequent releases use GitHub OIDC and npm provenance without a long-lived token.
-5. Protect the `npm` environment and the `v*` tag pattern as appropriate.
+2. Configure both packages in npm to trust `.github/workflows/release.yml` in `unsady/walq`, using the `npm` GitHub environment.
+3. Leave direct `npm publish` disabled so releases must use staged publishing.
+4. Protect the `npm` environment and the `v*` tag pattern as appropriate.
 
 ## Prepare a version
 
@@ -32,6 +31,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow validates the tag, tests packed artifacts in a clean consumer project, publishes `@walq/core` first, publishes the adapter second, and creates a GitHub release. Publishing is retryable if only the first package succeeds.
+The workflow validates the tag, tests packed artifacts in a clean consumer project, stages both packages through npm Trusted Publishing, and creates a draft GitHub release.
 
-Afterward, install both packages by exact version in a separate project and run the README example against a file-backed database.
+After the workflow succeeds:
+
+1. Review the staged packages in npm.
+2. Approve `@walq/core` first and `@walq/better-sqlite3` second, confirming each action with 2FA.
+3. Publish the draft GitHub release.
+4. Install both packages by exact version in a separate project and run the README example against a file-backed database.
