@@ -1,4 +1,4 @@
-import type { RetentionPolicy, Storage } from '@walq/core/storage'
+import type { RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage'
 
 import { getCoordinator } from './coordinator.js'
 import type {
@@ -7,6 +7,7 @@ import type {
   ProcessOptions,
   Processor,
   QueueOptions,
+  RetentionStatus,
   WorkerHandle,
 } from './types.js'
 import { QueueWorker } from './worker.js'
@@ -20,7 +21,7 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
-function retentionValue(
+function retentionCount(
   value: number | null | undefined,
   fallback: number,
   name: string,
@@ -32,6 +33,35 @@ function retentionValue(
   }
 
   return value
+}
+
+function retentionMaxAge(value: number | null | undefined, name: string): number | null {
+  if (value === undefined || value === null) return null
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be null or a nonnegative safe integer`)
+  }
+
+  return value
+}
+
+/** Normalize the public shorthand and rule object into the strict core shape. */
+function normalizeRetention(
+  value: RetentionStatus | undefined,
+  fallbackCount: number,
+  name: string,
+): RetentionRule {
+  if (value === undefined) return { count: fallbackCount, maxAge: null }
+  if (value === null) return { count: null, maxAge: null }
+  if (typeof value === 'number')
+    return { count: retentionCount(value, fallbackCount, name), maxAge: null }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be a number, null, or a retention rule`)
+  }
+
+  return {
+    count: retentionCount(value.count, fallbackCount, `${name}.count`),
+    maxAge: retentionMaxAge(value.maxAge, `${name}.maxAge`),
+  }
 }
 
 export class Queue<Data> {
@@ -56,7 +86,10 @@ export class Queue<Data> {
     }
 
     const retention = options.retention
-    if (retention !== undefined && (typeof retention !== 'object' || retention === null)) {
+    if (
+      retention !== undefined &&
+      (typeof retention !== 'object' || retention === null || Array.isArray(retention))
+    ) {
       throw new TypeError('retention must be an object')
     }
 
@@ -65,12 +98,12 @@ export class Queue<Data> {
     this.#attempts = attempts
     this.#onError = onError
     this.#retention = {
-      completed: retentionValue(
+      completed: normalizeRetention(
         retention?.completed,
         defaultCompletedRetention,
         'retention.completed',
       ),
-      failed: retentionValue(retention?.failed, defaultFailedRetention, 'retention.failed'),
+      failed: normalizeRetention(retention?.failed, defaultFailedRetention, 'retention.failed'),
     }
   }
 

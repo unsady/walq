@@ -260,7 +260,11 @@ describe('StorageCoordinator', () => {
       coordinator.heartbeat({ id: 'job-1', leaseToken: 'lease-1', now, leaseDuration: 30_000 }),
       coordinator.cleanup({
         queue: 'email',
-        retention: { completed: 0, failed: 10 },
+        retention: {
+          completed: { count: 0, maxAge: null },
+          failed: { count: 10, maxAge: null },
+        },
+        now,
         limit: 500,
       }),
     ]

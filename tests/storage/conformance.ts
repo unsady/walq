@@ -7,6 +7,7 @@ import type {
   CleanupResult,
   EnqueueInput,
   LeaseMutationResult,
+  RetentionRule,
   Storage,
 } from '@walq/core/storage'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -599,6 +600,7 @@ export function runCleanupConformance(
 ): void {
   describe('cleanup conformance', () => {
     let storage: Storage
+    const cleanupNow = 1_000_000
 
     beforeEach(async () => {
       storage = await createStorage()
@@ -608,12 +610,22 @@ export function runCleanupConformance(
       await cleanup()
     })
 
+    function rule(count: number | null, maxAge: number | null = null): RetentionRule {
+      return { count, maxAge }
+    }
+
     function runCleanup(input: CleanupInput): Promise<CleanupResult> {
       return storage.cleanup(input)
     }
 
     function cleanupInput(overrides: Partial<CleanupInput> = {}): CleanupInput {
-      return { queue, retention: { completed: 0, failed: 0 }, limit: 10, ...overrides }
+      return {
+        queue,
+        retention: { completed: rule(0), failed: rule(0) },
+        now: cleanupNow,
+        limit: 10,
+        ...overrides,
+      }
     }
 
     /** Create one terminal job for `queue` whose finish time is `finishedAt`. */
@@ -667,11 +679,12 @@ export function runCleanupConformance(
       const pending = await storage.enqueue(enqueueInput({ queue, now: 401, availableAt: 401 }))
 
       // Four completed and three failed rows are eligible: keep 2 and 1.
-      expect(await runCleanup(cleanupInput({ retention: { completed: 2, failed: 1 } }))).toEqual({
+      const keepTwoAndOne = { completed: rule(2), failed: rule(1) }
+      expect(await runCleanup(cleanupInput({ retention: keepTwoAndOne }))).toEqual({
         removed: 4,
         more: false,
       })
-      expect(await runCleanup(cleanupInput({ retention: { completed: 2, failed: 1 } }))).toEqual({
+      expect(await runCleanup(cleanupInput({ retention: keepTwoAndOne }))).toEqual({
         removed: 0,
         more: false,
       })
@@ -707,25 +720,120 @@ export function runCleanupConformance(
       expect(await runCleanup(cleanupInput({ limit: 2 }))).toEqual({ removed: 0, more: false })
     })
 
-    it('keeps every terminal row for a null retention count', async () => {
-      await finish('completed', 100)
-      await finish('failed', 101)
+    it('keeps every terminal row when both bounds are disabled', async () => {
+      await finish('completed', cleanupNow - 100)
+      await finish('failed', cleanupNow - 101)
 
-      expect(
-        await runCleanup(cleanupInput({ retention: { completed: null, failed: null } })),
-      ).toEqual({ removed: 0, more: false })
+      const disabled = { completed: rule(null, null), failed: rule(null, null) }
+      expect(await runCleanup(cleanupInput({ retention: disabled }))).toEqual({
+        removed: 0,
+        more: false,
+      })
       expect(await runCleanup(cleanupInput())).toEqual({ removed: 2, more: false })
     })
 
+    it('removes only rows strictly older than the max-age cutoff', async () => {
+      await finish('completed', cleanupNow - 102)
+      await finish('completed', cleanupNow - 101)
+      await finish('completed', cleanupNow - 100)
+      await finish('failed', cleanupNow - 200)
+      await finish('completed', cleanupNow - 400, otherQueue)
+
+      // Rows strictly older than now - 100 are eligible; the exact-cutoff row is
+      // retained.
+      const ageHundred = { completed: rule(null, 100), failed: rule(null, 100) }
+      expect(await runCleanup(cleanupInput({ retention: ageHundred }))).toEqual({
+        removed: 3,
+        more: false,
+      })
+      expect(await runCleanup(cleanupInput({ retention: ageHundred }))).toEqual({
+        removed: 0,
+        more: false,
+      })
+
+      // A smaller maxAge moves the cutoff inside the retained row.
+      const ageNinetyNine = { completed: rule(null, 99), failed: rule(null, 99) }
+      expect(await runCleanup(cleanupInput({ retention: ageNinetyNine }))).toEqual({
+        removed: 1,
+        more: false,
+      })
+
+      // Age cleanup never crosses queue boundaries.
+      expect(await runCleanup(cleanupInput({ queue: otherQueue }))).toEqual({
+        removed: 1,
+        more: false,
+      })
+    })
+
+    it('bounds age cleanup per call and deletes from the oldest end', async () => {
+      const finishedAt = [
+        cleanupNow - 5,
+        cleanupNow - 4,
+        cleanupNow - 3,
+        cleanupNow - 2,
+        cleanupNow - 1,
+      ]
+      for (const time of finishedAt) await finish('completed', time)
+
+      // maxAge 0 removes every row finished strictly before now.
+      const retention = { completed: rule(null, 0), failed: rule(0) }
+      expect(await runCleanup(cleanupInput({ retention, limit: 2 }))).toEqual({
+        removed: 2,
+        more: true,
+      })
+      expect(await runCleanup(cleanupInput({ retention, limit: 2 }))).toEqual({
+        removed: 2,
+        more: true,
+      })
+      expect(await runCleanup(cleanupInput({ retention, limit: 2 }))).toEqual({
+        removed: 1,
+        more: false,
+      })
+      expect(await runCleanup(cleanupInput({ retention, limit: 2 }))).toEqual({
+        removed: 0,
+        more: false,
+      })
+    })
+
+    it('applies the count bound while an age bound is configured', async () => {
+      for (const time of [cleanupNow - 400, cleanupNow - 300, cleanupNow - 200, cleanupNow - 100]) {
+        await finish('completed', time)
+      }
+
+      // The huge maxAge makes the age bound ineffective, so the count keeps only
+      // the newest row.
+      const retention = { completed: rule(1, 1_000_000), failed: rule(0) }
+      expect(await runCleanup(cleanupInput({ retention }))).toEqual({ removed: 3, more: false })
+    })
+
+    it('applies the age bound while a count bound is configured', async () => {
+      for (const time of [cleanupNow - 500, cleanupNow - 400, cleanupNow - 200, cleanupNow - 100]) {
+        await finish('completed', time)
+      }
+
+      // The count keeps everything, so only rows older than now - 200 are removed.
+      const retention = { completed: rule(100, 200), failed: rule(0) }
+      expect(await runCleanup(cleanupInput({ retention }))).toEqual({ removed: 2, more: false })
+    })
+
     it('rejects invalid inputs without mutating terminal rows', async () => {
-      await finish('completed', 100)
+      await finish('completed', cleanupNow - 100)
 
       const patches: Partial<CleanupInput>[] = [
         { queue: '' },
         { limit: 0 },
         { limit: 1.5 },
-        { retention: { completed: -1, failed: 0 } },
-        { retention: { completed: 0, failed: 1.5 } },
+        { now: -1 },
+        { now: 1.5 },
+        { now: Number.NaN },
+        { now: Number.POSITIVE_INFINITY },
+        { retention: { completed: rule(-1), failed: rule(0) } },
+        { retention: { completed: rule(0, -1), failed: rule(0) } },
+        { retention: { completed: rule(1.5, 0), failed: rule(0) } },
+        { retention: { completed: rule(0), failed: rule(0, 1.5) } },
+        { retention: { completed: null, failed: rule(0) } as never },
+        { retention: { completed: rule(0), failed: undefined } as never },
+        { retention: null as never },
       ]
       for (const patch of patches) {
         await expect(runCleanup({ ...cleanupInput(), ...patch })).rejects.toThrow(/.+/)

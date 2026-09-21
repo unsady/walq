@@ -30,8 +30,8 @@ capability; see [Grouped claim](#grouped-claim) and [Cleanup](#cleanup).
 - Callers provide `now`. Each operation uses that value consistently. Distributed
   callers must use sufficiently synchronized clocks; storage does not establish
   a shared clock or substitute its own time.
-- `limit` and `attempts` are positive safe integers. Retention counts are `null`
-  or nonnegative safe integers.
+- `limit` and `attempts` are positive safe integers. Each retention bound is
+  `null` or a nonnegative safe integer; `maxAge` is measured in milliseconds.
 - Queue and job names are nonempty strings. Queue names are matched exactly.
 - Data is a serialized JSON value. Serialization belongs above storage.
 - IDs and lease tokens are opaque strings. Storage generates unique job IDs and
@@ -157,10 +157,20 @@ it. The method removes only terminal jobs of one queue and never touches pending
 or active rows. The input carries:
 
 - `queue` — the exact queue name to clean;
-- `retention.completed` and `retention.failed` — how many jobs of each status to
-  keep, where `0` makes every terminal job of that status eligible and `null`
-  keeps all of them;
+- `retention.completed` and `retention.failed` — one `RetentionRule` per status,
+  each with independent `count` and `maxAge` bounds;
+- `now` — the finite, nonnegative safe-integer time used for the age bound;
 - `limit` — a positive bound on rows deleted by this call.
+
+A `count` is the number of newest rows of that status to keep; `0` makes every
+terminal row of the status eligible and `null` disables the bound. A `maxAge` is
+a maximum terminal age in milliseconds and `null` disables that bound. A row is
+eligible when it is older than the newest `count` rows of its status OR finished
+before `now - maxAge`; both bounds are upper limits and their union is the
+eligible set. The comparison is strict: a row with
+`finishedAt === now - maxAge` is retained and only `finishedAt < now - maxAge` is
+removed. If the subtraction would underflow, the cutoff is clamped at zero. When
+both bounds of a status are null, every row of that status is kept.
 
 Within one call the adapter must:
 
@@ -168,16 +178,16 @@ Within one call the adapter must:
    statuses.
 2. Order each status by the time the job finished, newest first, with a stable
    tie-breaker.
-3. Delete only rows beyond the first `retention[status]` rows of that order.
-   A bounded call deletes from the oldest eligible rows first, so repeated calls
-   converge on the newest retained rows.
+3. Delete only rows beyond the eligible frontier of that status. A bounded call
+   deletes from the oldest eligible rows first, so repeated calls converge on the
+   newest retained rows.
 4. Delete at most `limit` rows across both statuses as one atomic mutation.
 
 The result is `{ removed, more }`. `removed` is the number of rows deleted by
 this call. `more` reports that another call may still find eligible rows; it may
 be `true` even when nothing remains, so a caller repeats until it sees `false`.
 
-One call must stay proportional to `limit` and the retention counts rather than
+One call must stay proportional to `limit` and the retention bounds rather than
 to the size of the terminal history, so draining a large backlog remains linear
 in the number of deleted rows.
 

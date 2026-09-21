@@ -14,7 +14,7 @@ Walq provides reliable at-least-once processing without Redis or a separate queu
 - multiple logical queues on one database
 - grouped claims across queues
 - shared, queue-aware polling
-- bounded terminal-job retention
+- bounded count- and age-based terminal-job retention
 
 ## Example
 
@@ -55,7 +55,7 @@ const queue = new Queue<{ name: string }>('greetings', {
 
 Jobs move from `pending` to `active` when claimed. Completing a live lease makes the job `completed`; failures retry while attempts remain, and expired leases are recovered automatically. Delivery is at least once, so handlers should be idempotent when side effects cannot safely be repeated.
 
-Terminal jobs are cleaned up asynchronously. By default completed jobs are removed and the newest 100 failures per queue are kept; pass `retention` to `new Queue` to change that.
+Terminal jobs are cleaned up asynchronously. By default completed jobs are removed and the newest 100 failures per queue are kept. Pass `retention` to `new Queue` to change the count or set a `maxAge` in milliseconds; a job is removed when it exceeds either bound. For example, `retention: { completed: 0, failed: { count: 1_000, maxAge: 7 * 24 * 60 * 60 * 1_000 } }` keeps at most the newest 1,000 failures and none older than a week.
 
 Queues using the same `Storage` instance share one coordinator. Supported adapters can group claims from several queues into one database transaction.
 

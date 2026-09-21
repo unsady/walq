@@ -80,7 +80,10 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     this.#concurrency = options.concurrency
     this.#onError = options.onError
     this.#retention = options.retention
-    this.#cleanupEnabled = options.retention.completed !== null || options.retention.failed !== null
+    this.#cleanupEnabled = (['completed', 'failed'] as const).some((status) => {
+      const rule = options.retention[status]
+      return rule.count !== null || rule.maxAge !== null
+    })
   }
 
   /** Start maintenance after the worker is registered with the coordinator. */
@@ -321,6 +324,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       return await this.#coordinator.cleanup({
         queue: this.#queue,
         retention: this.#retention,
+        now: Date.now(),
         limit: cleanupBatch,
       })
     } catch (error) {

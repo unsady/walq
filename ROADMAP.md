@@ -2,10 +2,10 @@
 
 ## Terminal-job retention follow-ups
 
-Count-based retention is implemented: queues clean terminal jobs asynchronously in
-bounded batches through the storage `cleanup` operation. Remaining work:
+Count- and age-based retention is implemented: queues clean terminal jobs
+asynchronously in bounded batches through the storage `cleanup` operation.
+Remaining work:
 
-- Add age-based retention using the recorded terminal finish time.
 - Extend the retention benchmark from raw `DELETE`/`VACUUM` SQL to production
   `cleanup` runs with different batch sizes, event-loop stalls, warm or
   reopened databases, and confirm that per-call work does not grow with the

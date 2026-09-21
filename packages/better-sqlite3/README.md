@@ -88,24 +88,34 @@ completed and failed jobs per queue and deletes the rest, oldest first:
 ```ts
 const result = await storage.cleanup({
   queue: 'email',
-  retention: { completed: 0, failed: 100 },
+  retention: {
+    completed: { count: 0, maxAge: null },
+    failed: { count: 100, maxAge: 7 * 24 * 60 * 60 * 1_000 },
+  },
+  now: Date.now(),
   limit: 500,
 })
 ```
 
-`retention` is per queue and per status: `0` deletes every terminal job of that
-status, `null` keeps all of them. `limit` bounds rows deleted by one call; the
-result reports how many rows were removed and whether more eligible rows remain,
-so a caller can drain in batches. Rows are deleted inside one immediate
-transaction, and only terminal rows of the requested queue are eligible, so
-pending and active jobs are never removed. Rows beyond the retention counts are
-kept in a partial index ordered by finish time.
+`retention` is per queue and per status. A `count` keeps the newest that many
+rows of the status (`0` deletes every terminal row of the status, `null`
+disables the bound). A `maxAge` is milliseconds and deletes rows finished before
+`now - maxAge` (`null` disables the bound). A row is eligible when it exceeds
+either bound, and the cutoff is strict, so a row finished exactly at
+`now - maxAge` is retained. `now` is the finite, nonnegative safe-integer time
+used for the age bound; callers supply it so age behavior is deterministic.
 
-Each call is bounded by `limit` and the retention counts rather than by the size
-of the terminal history: the retained boundary is located with one index lookup
-that walks at most `keep` index entries, deletion stops at `limit`, and `more`
-is decided by index existence checks. Draining a large backlog therefore costs
-one pass per deleted row, not a full recount per batch.
+`limit` bounds rows deleted by one call; the result reports how many rows were
+removed and whether more eligible rows remain, so a caller can drain in batches.
+Rows are deleted inside one immediate transaction, and only terminal rows of the
+requested queue are eligible, so pending and active jobs are never removed.
+Eligible rows are kept in a partial index ordered by finish time.
+
+Each call is bounded by `limit` and the retention bounds rather than by the size
+of the terminal history: the newest eligible row (the union frontier) is located
+with at most one index lookup per configured bound, deletion stops at `limit`,
+and `more` is decided by index existence checks. Draining a large backlog
+therefore costs one pass per deleted row, not a full recount per batch.
 
 Cleanup never runs `VACUUM`: deleted pages stay available for reuse, and the
 database file does not necessarily shrink. The adapter does not schedule cleanup;

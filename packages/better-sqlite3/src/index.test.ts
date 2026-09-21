@@ -152,7 +152,14 @@ describe('SQLite job columns', () => {
 })
 
 describe('SQLite retention', () => {
-  const cleanupInput = { queue: 'email', retention: { completed: 0, failed: 0 }, limit: 10 }
+  const cleanupNow = 1_000_000
+  const rule = (count: number | null, maxAge: number | null = null) => ({ count, maxAge })
+  const cleanupInput = {
+    queue: 'email',
+    retention: { completed: rule(0), failed: rule(0) },
+    now: cleanupNow,
+    limit: 10,
+  }
 
   it('records finishedAt on terminal transitions and clears it on retry', async () => {
     const { db, storage } = open()
@@ -219,7 +226,8 @@ describe('SQLite retention', () => {
     expect(
       await storage.cleanup({
         queue: 'email',
-        retention: { completed: 2, failed: 1 },
+        retention: { completed: rule(2), failed: rule(1) },
+        now: cleanupNow,
         limit: 10,
       }),
     ).toEqual({ removed: 3, more: false })
@@ -247,7 +255,11 @@ describe('SQLite retention', () => {
 
     const remaining = (): unknown[] =>
       db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all()
-    const batch = { ...cleanupInput, retention: { completed: 2, failed: 0 }, limit: 1 }
+    const batch = {
+      ...cleanupInput,
+      retention: { completed: rule(2), failed: rule(0) },
+      limit: 1,
+    }
 
     // Only the two oldest rows are eligible; the oldest goes first.
     expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
@@ -273,7 +285,12 @@ describe('SQLite retention', () => {
       await storage.fail({ ...job!, now, error: 'terminal', retryAt: null })
       failed.push(stored.id)
     }
-    const batch = { queue: 'email', retention: { completed: 0, failed: 1 }, limit: 1 }
+    const batch = {
+      queue: 'email',
+      retention: { completed: rule(0), failed: rule(1) },
+      now: cleanupNow,
+      limit: 1,
+    }
 
     // Delete the oldest completed rows first; only the failed verdict remains.
     expect(await storage.cleanup(batch)).toEqual({ removed: 1, more: true })
@@ -298,7 +315,7 @@ describe('SQLite retention', () => {
     expect(
       await storage.cleanup({
         ...cleanupInput,
-        retention: { completed: 2, failed: 0 },
+        retention: { completed: rule(2), failed: rule(0) },
       }),
     ).toEqual({ removed: 2, more: false })
 
@@ -306,37 +323,117 @@ describe('SQLite retention', () => {
     expect(remaining.map((row) => row.id).sort()).toEqual([...ids].sort().slice(-2))
   })
 
+  it('removes only rows strictly older than the max-age cutoff', async () => {
+    const { db, storage } = open()
+    const seeded: string[] = []
+    for (const finishedAt of [cleanupNow - 102, cleanupNow - 101, cleanupNow - 100]) {
+      const stored = await storage.enqueue({
+        ...input,
+        now: finishedAt,
+        availableAt: finishedAt,
+        attempts: 1,
+      })
+      const [job] = await storage.claim({ ...claimInput, now: finishedAt })
+      await storage.complete({ ...job!, now: finishedAt })
+      seeded.push(stored.id)
+    }
+
+    const ageHundred = { completed: rule(null, 100), failed: rule(0) }
+    expect(await storage.cleanup({ ...cleanupInput, retention: ageHundred })).toEqual({
+      removed: 2,
+      more: false,
+    })
+    // The row finished exactly at the cutoff survives a repeated pass.
+    expect(await storage.cleanup({ ...cleanupInput, retention: ageHundred })).toEqual({
+      removed: 0,
+      more: false,
+    })
+    expect(db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all()).toEqual([
+      { id: seeded[2] },
+    ])
+
+    const ageNinetyNine = { completed: rule(null, 99), failed: rule(0) }
+    expect(await storage.cleanup({ ...cleanupInput, retention: ageNinetyNine })).toEqual({
+      removed: 1,
+      more: false,
+    })
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 0 })
+  })
+
+  it('combines count and age as the union of the two oldest tails', async () => {
+    const { db, storage } = open()
+    for (const finishedAt of [
+      cleanupNow - 500,
+      cleanupNow - 400,
+      cleanupNow - 200,
+      cleanupNow - 100,
+    ]) {
+      await storage.enqueue({ ...input, now: finishedAt, availableAt: finishedAt, attempts: 1 })
+      const [job] = await storage.claim({ ...claimInput, now: finishedAt })
+      await storage.complete({ ...job!, now: finishedAt })
+    }
+
+    // The age bound reaches further than the count bound, so it wins the union.
+    const ageBound = { completed: rule(100, 200), failed: rule(0) }
+    expect(await storage.cleanup({ ...cleanupInput, retention: ageBound })).toEqual({
+      removed: 2,
+      more: false,
+    })
+    expect(db.prepare('SELECT finishedAt FROM walq_jobs ORDER BY finishedAt').all()).toEqual([
+      { finishedAt: cleanupNow - 200 },
+      { finishedAt: cleanupNow - 100 },
+    ])
+
+    // A small count bound reaches further than an ineffective age bound.
+    const countBound = { completed: rule(1, 10_000_000), failed: rule(0) }
+    expect(await storage.cleanup({ ...cleanupInput, retention: countBound })).toEqual({
+      removed: 1,
+      more: false,
+    })
+    expect(db.prepare('SELECT finishedAt FROM walq_jobs ORDER BY finishedAt').all()).toEqual([
+      { finishedAt: cleanupNow - 100 },
+    ])
+  })
+
   it('decides retention through bounded index queries', () => {
     const { db } = open()
     const queries = [
       `
-        SELECT finishedAt, id FROM walq_jobs
-        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+        SELECT finishedAt, id FROM (
+          SELECT finishedAt, id FROM walq_jobs
+          WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          ORDER BY finishedAt DESC, id DESC
+          LIMIT 1 OFFSET @offset
+        )
+        UNION ALL
+        SELECT finishedAt, id FROM (
+          SELECT finishedAt, id FROM walq_jobs
+          WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+            AND finishedAt < @cutoff
+          ORDER BY finishedAt DESC, id DESC
+          LIMIT 1
+        )
         ORDER BY finishedAt DESC, id DESC
-        LIMIT 1 OFFSET @offset
-      `,
-      `
-        SELECT rowid FROM walq_jobs
-        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
-        ORDER BY finishedAt, id
-        LIMIT @limit
-      `,
-      `
-        SELECT rowid FROM walq_jobs
-        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
-          AND (finishedAt, id) < (@finishedAt, @id)
-        ORDER BY finishedAt, id
-        LIMIT @limit
-      `,
-      `
-        SELECT 1 AS found FROM walq_jobs
-        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
         LIMIT 1
       `,
       `
+        SELECT finishedAt, id FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          AND finishedAt < @cutoff
+        ORDER BY finishedAt DESC, id DESC
+        LIMIT 1
+      `,
+      `
+        SELECT rowid FROM walq_jobs
+        WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
+          AND (finishedAt, id) <= (@finishedAt, @id)
+        ORDER BY finishedAt, id
+        LIMIT @limit
+      `,
+      `
         SELECT 1 AS found FROM walq_jobs
         WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
-          AND (finishedAt, id) < (@finishedAt, @id)
+          AND (finishedAt, id) <= (@finishedAt, @id)
         LIMIT 1
       `,
     ]
@@ -347,6 +444,7 @@ describe('SQLite retention', () => {
         status: 'completed',
         limit: 10,
         offset: 0,
+        cutoff: 5,
         finishedAt: 5,
         id: 'x',
       }) as { detail: string }[]
@@ -367,12 +465,27 @@ describe('SQLite retention', () => {
     db.exec('ROLLBACK')
 
     await expect(storage.cleanup({ ...cleanupInput, limit: 0 })).rejects.toThrow('limit')
+    await expect(storage.cleanup({ ...cleanupInput, now: -1 })).rejects.toThrow('now')
+    await expect(storage.cleanup({ ...cleanupInput, now: 1.5 })).rejects.toThrow('now')
+    await expect(storage.cleanup({ ...cleanupInput, now: Number.NaN })).rejects.toThrow('now')
     await expect(
-      storage.cleanup({ ...cleanupInput, retention: { completed: -1, failed: 0 } }),
+      storage.cleanup({ ...cleanupInput, retention: { completed: rule(-1), failed: rule(0) } }),
     ).rejects.toThrow('retention.completed')
     await expect(
-      storage.cleanup({ ...cleanupInput, retention: { completed: 0, failed: 1.5 } }),
-    ).rejects.toThrow('retention.failed')
+      storage.cleanup({ ...cleanupInput, retention: { completed: rule(0, -1), failed: rule(0) } }),
+    ).rejects.toThrow('retention.completed.maxAge')
+    await expect(
+      storage.cleanup({ ...cleanupInput, retention: { completed: rule(0), failed: rule(0, 1.5) } }),
+    ).rejects.toThrow('retention.failed.maxAge')
+    await expect(
+      storage.cleanup({
+        ...cleanupInput,
+        retention: { completed: null, failed: rule(0) } as never,
+      }),
+    ).rejects.toThrow('retention.completed')
+    await expect(storage.cleanup({ ...cleanupInput, retention: null as never })).rejects.toThrow(
+      'retention',
+    )
   })
 })
 

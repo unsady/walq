@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3'
 
 import { TerminalCleanup } from './cleanup.js'
 import { initialize } from './schema.js'
-import { expiry, integer, lease, retentionCount, text } from './validation.js'
+import { expiry, integer, lease, retentionRule, text } from './validation.js'
 
 const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
@@ -191,11 +191,12 @@ class BetterSqlite3Storage implements Storage {
     this.assertAutocommit()
     text(input.queue, 'queue')
     integer(input.limit, 'limit', 1)
+    integer(input.now, 'now')
     if (input.retention === null || typeof input.retention !== 'object') {
       throw new TypeError('retention must be an object')
     }
-    retentionCount(input.retention.completed, 'retention.completed')
-    retentionCount(input.retention.failed, 'retention.failed')
+    retentionRule(input.retention.completed, 'retention.completed')
+    retentionRule(input.retention.failed, 'retention.failed')
     return this.terminalCleanup.run(input)
   }
 }

@@ -1,7 +1,25 @@
-import type { RetentionPolicy, Storage } from '@walq/core/storage'
+import type { Storage } from '@walq/core/storage'
+
+/**
+ * Public retention rule for one terminal status. A `number` is the count
+ * shorthand, `null` keeps every job of that status, and an object sets either
+ * bound independently.
+ */
+export type RetentionStatus =
+  | number
+  | null
+  | {
+      /** Newest rows to keep; omitted uses the status default, null disables it. */
+      count?: number | null
+      /** Maximum age in milliseconds; omitted or null disables the age bound. */
+      maxAge?: number | null
+    }
 
 /** Queue retention overrides; omitted statuses use the queue defaults. */
-export type RetentionOptions = Partial<RetentionPolicy>
+export interface RetentionOptions {
+  completed?: RetentionStatus
+  failed?: RetentionStatus
+}
 
 export interface QueueOptions {
   storage: Storage
@@ -14,10 +32,12 @@ export interface QueueOptions {
    */
   onError?: ProcessErrorHandler
   /**
-   * Terminal-job retention for this queue. Defaults to
+   * Terminal-job retention for this queue, per status. Defaults to
    * `{ completed: 0, failed: 100 }`: completed jobs are removed as soon as a
-   * cleanup pass runs, while the newest 100 failures are kept. Null keeps every
-   * job of that status.
+   * cleanup pass runs, while the newest 100 failures are kept. A number keeps
+   * that many newest rows, null keeps every row of that status, and an object
+   * sets `count` and/or `maxAge` independently. `maxAge` is milliseconds; a row
+   * is eligible when it exceeds either bound.
    */
   retention?: RetentionOptions
 }

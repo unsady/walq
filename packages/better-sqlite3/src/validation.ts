@@ -1,4 +1,4 @@
-import type { CompleteInput } from '@walq/core/storage'
+import type { CompleteInput, RetentionRule } from '@walq/core/storage'
 
 export function integer(value: number, name: string, minimum = 0): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
@@ -20,9 +20,17 @@ export function expiry(now: number, duration: number): number {
   return result
 }
 
-export function retentionCount(value: number | null, name: string): void {
+function retentionBound(value: number | null, name: string): void {
   if (value === null) return
   integer(value, name, 0)
+}
+
+export function retentionRule(value: RetentionRule, name: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be a retention rule object`)
+  }
+  retentionBound(value.count, `${name}.count`)
+  retentionBound(value.maxAge, `${name}.maxAge`)
 }
 
 export function lease(input: CompleteInput): void {

@@ -73,16 +73,30 @@ export interface FailInput {
   retryAt: number | null
 }
 
-/** How many terminal jobs of each status one queue keeps. Null keeps all. */
+/**
+ * Retention bounds for one terminal status. A row is eligible when it is older
+ * than the newest `count` rows or finished before `now - maxAge`; the two bounds
+ * are combined as a union. A null bound is disabled.
+ */
+export interface RetentionRule {
+  /** Newest terminal rows to keep; null disables the count bound. */
+  count: number | null
+  /** Maximum terminal age in milliseconds; null disables the age bound. */
+  maxAge: number | null
+}
+
+/** Retention bounds for both terminal statuses. */
 export interface RetentionPolicy {
-  completed: number | null
-  failed: number | null
+  completed: RetentionRule
+  failed: RetentionRule
 }
 
 /** Bounded removal of terminal jobs that exceed a queue's retention policy. */
 export interface CleanupInput {
   queue: QueueName
   retention: RetentionPolicy
+  /** Current time for age bounds; finite nonnegative safe-integer milliseconds. */
+  now: number
   /** Maximum number of rows this call may delete. */
   limit: number
 }

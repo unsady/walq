@@ -651,7 +651,15 @@ describe('terminal-job retention', () => {
     expect(storage.cleanups).toEqual([])
     await vi.advanceTimersByTimeAsync(1)
     expect(storage.cleanups).toEqual([
-      { queue: 'email', retention: { completed: 0, failed: 100 }, limit: expect.any(Number) },
+      {
+        queue: 'email',
+        retention: {
+          completed: { count: 0, maxAge: null },
+          failed: { count: 100, maxAge: null },
+        },
+        now,
+        limit: expect.any(Number),
+      },
     ])
 
     storage.jobs.push(claimedJob('1'), claimedJob('2'))
@@ -678,7 +686,11 @@ describe('terminal-job retention', () => {
     const worker = queue.process(async () => {})
 
     await vi.advanceTimersByTimeAsync(1)
-    expect(storage.cleanups[0]!.retention).toEqual({ completed: 3, failed: null })
+    expect(storage.cleanups[0]!.retention).toEqual({
+      completed: { count: 3, maxAge: null },
+      failed: { count: null, maxAge: null },
+    })
+    expect(storage.cleanups[0]!.now).toBe(now)
     await worker.close()
 
     const disabled = new CleanupTestStorage()
@@ -690,6 +702,59 @@ describe('terminal-job retention', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(disabled.cleanups).toEqual([])
     await secondWorker.close()
+  })
+
+  it('normalizes rule objects with defaults and age bounds', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', {
+      storage,
+      retention: { completed: { maxAge: 500 }, failed: { count: 5, maxAge: 1_000 } },
+    })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(1)
+    // An omitted count falls back to the status default and an omitted maxAge
+    // disables the age bound.
+    expect(storage.cleanups[0]!.retention).toEqual({
+      completed: { count: 0, maxAge: 500 },
+      failed: { count: 5, maxAge: 1_000 },
+    })
+    await worker.close()
+  })
+
+  it('keeps running cleanup for an age-only policy', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', {
+      storage,
+      retention: { completed: { count: null, maxAge: 1_000 }, failed: null },
+    })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toHaveLength(1)
+    await worker.close()
+  })
+
+  it('disables cleanup when both bounds are null in rule objects', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new CleanupTestStorage()
+    const queue = new Queue('email', {
+      storage,
+      retention: {
+        completed: { count: null, maxAge: null },
+        failed: { count: null, maxAge: null },
+      },
+    })
+    const worker = queue.process(async () => {})
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(storage.cleanups).toEqual([])
+    await worker.close()
   })
 
   it('cleans after claim passes that may have recovered expired jobs', async () => {
@@ -819,6 +884,28 @@ describe('terminal-job retention', () => {
     )
     expect(() => new Queue('email', { storage, retention: 'all' as never })).toThrow(
       'retention must be an object',
+    )
+    expect(() => new Queue('email', { storage, retention: [] as never })).toThrow(
+      'retention must be an object',
+    )
+    expect(() => new Queue('email', { storage, retention: { completed: { count: -1 } } })).toThrow(
+      'retention.completed.count',
+    )
+    expect(() => new Queue('email', { storage, retention: { failed: { maxAge: 1.5 } } })).toThrow(
+      'retention.failed.maxAge',
+    )
+    expect(
+      () =>
+        new Queue('email', {
+          storage,
+          retention: { completed: { maxAge: 'soon' as never } },
+        }),
+    ).toThrow('retention.completed.maxAge')
+    expect(() => new Queue('email', { storage, retention: { completed: [] as never } })).toThrow(
+      'retention.completed',
+    )
+    expect(() => new Queue('email', { storage, retention: { failed: true as never } })).toThrow(
+      'retention.failed',
     )
   })
 })

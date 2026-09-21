@@ -13,5 +13,6 @@ export type {
   Processor,
   QueueOptions,
   RetentionOptions,
+  RetentionStatus,
   WorkerHandle,
 } from './types.js'

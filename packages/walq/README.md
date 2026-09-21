@@ -5,7 +5,7 @@ Typed queue API for walq storage adapters.
 ## API
 
 - `new Queue(name, { storage, attempts?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
-- `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Omitted statuses default to `completed: 0` and `failed: 100`; `null` keeps every job of that status.
+- `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Each status is a count, `null` to keep every job of that status, or a rule object `{ count?, maxAge? }` where `maxAge` is milliseconds. Omitted statuses default to `completed: 0` and `failed: 100`.
 - `queue.add(data)` serializes the data and enqueues a job.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
@@ -27,12 +27,35 @@ Pass `retention` to keep more or fewer:
 ```ts
 const queue = new Queue('email', {
   storage,
+  // Count shorthand: keep the newest 10 completed jobs and 1,000 failures.
   retention: { completed: 10, failed: 1_000 },
 })
 ```
 
-A `null` count keeps every job of that status, for example
-`retention: { completed: null, failed: null }` to disable cleanup entirely.
+A status can also be a rule object with independent `count` and `maxAge` bounds,
+where `maxAge` is milliseconds:
+
+```ts
+const queue = new Queue('email', {
+  storage,
+  retention: {
+    completed: 0,
+    failed: { count: 1_000, maxAge: 7 * 24 * 60 * 60 * 1_000 },
+  },
+})
+```
+
+`count` keeps that many newest rows; an omitted `count` uses the status default
+(completed `0`, failed `100`) and `count: null` disables the count bound. `maxAge`
+removes rows finished before `now - maxAge`; an omitted or null `maxAge` disables
+the age bound. A row is eligible when it exceeds either bound, so both are upper
+limits and the stricter one wins. The cutoff is strict: a row finished exactly at
+`now - maxAge` is retained. Cleanup passes the worker's current time as `now`, so
+every age bound in a pass is evaluated against one clock reading.
+
+A `null` status (or `count: null, maxAge: null`) keeps every job of that status,
+for example `retention: { completed: null, failed: null }` to disable cleanup
+entirely.
 
 Cleanup runs in bounded batches, at most one pass per second per queue, and
 yields to queue work between batches while eligible rows remain. A deferred task
