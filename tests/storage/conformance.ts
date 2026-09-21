@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer'
 
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type {
   ClaimedJob,
   ClaimInput,
@@ -9,8 +10,7 @@ import type {
   LeaseMutationResult,
   RetentionRule,
   Storage,
-} from '@walq/core/storage'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+} from 'walq/storage'
 
 export type StorageFactory = () => Storage | Promise<Storage>
 export type StorageCleanup = () => void | Promise<void>

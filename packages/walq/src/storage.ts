@@ -11,13 +11,13 @@ import type {
   HeartbeatInput,
   LeaseMutationResult,
   StoredJob,
-} from './types.js'
+} from './storage-types.js'
 
-export type * from './types.js'
+export type * from './storage-types.js'
 
 /**
- * Asynchronous adapter contract exposed through @walq/core/storage.
- * Behavioral guarantees and input requirements: docs/storage-contract.md.
+ * Asynchronous adapter contract exposed through `walq/storage`.
+ * See https://github.com/unsady/walq/blob/main/docs/storage-contract.md.
  */
 export interface Storage {
   /** Insert a pending job with a generated ID and zero attempts made. */

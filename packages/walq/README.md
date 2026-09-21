@@ -1,6 +1,31 @@
 # walq
 
-Typed queue API for walq storage adapters.
+Typed queue API for walq storage adapters. Walq is ESM-only and requires Node.js 22 or newer.
+
+```sh
+pnpm add walq @walq/better-sqlite3 better-sqlite3
+```
+
+```ts
+import Database from 'better-sqlite3'
+import { betterSqlite3 } from '@walq/better-sqlite3'
+import { Queue } from 'walq'
+
+const db = new Database('queue.sqlite')
+const queue = new Queue<{ name: string }>('greetings', {
+  storage: betterSqlite3(db),
+})
+
+const worker = queue.process(async ({ name }) => {
+  console.log(`Hello, ${name}!`)
+})
+
+await queue.add({ name: 'Ada' })
+await worker.close()
+db.close()
+```
+
+Storage adapter authors can import the public contract from `walq/storage`.
 
 ## API
 

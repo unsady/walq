@@ -10,7 +10,12 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "walq": ["./packages/walq/src/index.ts"],
+      "walq/storage": ["./packages/walq/src/storage.ts"],
+      "@walq/better-sqlite3": ["./packages/better-sqlite3/src/index.ts"]
+    }
   },
   "include": ["*.config.ts", "packages/*/src/**/*.ts", "tests/**/*.ts", "benchmarks/**/*.ts"],
   "exclude": ["node_modules", "dist", "coverage"]

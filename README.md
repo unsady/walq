@@ -4,7 +4,17 @@
 
 Walq provides reliable at-least-once processing without Redis or a separate queue service. It is written in TypeScript and designed to support different SQLite runtimes through storage adapters.
 
-> **Early stage:** Walq is under active development and is not ready for production use. The API and storage schema may change before the first release.
+> **Early stage:** Walq is under active development. During the `0.x` series, the API and storage schema may change between minor versions; incompatible schema changes are called out in the changelog.
+
+## Installation
+
+Walq is ESM-only and requires Node.js 22 or newer.
+
+```sh
+pnpm add walq @walq/better-sqlite3 better-sqlite3
+```
+
+`better-sqlite3` uses a native addon and requires either a supported prebuilt binary or native build tools.
 
 ## Features
 
@@ -69,6 +79,10 @@ planned.
 - [`better-sqlite3` adapter](packages/better-sqlite3/README.md)
 - [Benchmarks](benchmarks/README.md)
 - [Roadmap](ROADMAP.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Release process](docs/releasing.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

@@ -1,19 +1,52 @@
 {
   "name": "walq",
-  "version": "0.0.0",
-  "private": true,
-  "description": "A small typed job queue.",
-  "license": "Apache-2.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
+  "version": "0.1.0",
+  "description": "A small, typed, lease-based job queue for SQLite.",
+  "keywords": [
+    "job-queue",
+    "queue",
+    "sqlite",
+    "typescript"
+  ],
+  "homepage": "https://github.com/unsady/walq#readme",
+  "bugs": {
+    "url": "https://github.com/unsady/walq/issues"
   },
-  "dependencies": {
-    "@walq/core": "workspace:*"
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unsady/walq.git",
+    "directory": "packages/walq"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "prepack": "pnpm build"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
-    "@walq/better-sqlite3": "workspace:*",
-    "better-sqlite3": "^13.0.3"
+    "@types/node": "^22.20.3",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

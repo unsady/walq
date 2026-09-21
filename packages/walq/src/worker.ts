@@ -1,4 +1,4 @@
-import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/storage'
+import type { ClaimedJob, CleanupResult, RetentionPolicy } from 'walq/storage'
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
 import { deferred, delay, type Delay } from './delay.js'

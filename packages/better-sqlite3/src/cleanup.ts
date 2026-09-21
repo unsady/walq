@@ -1,5 +1,5 @@
-import type { CleanupInput, CleanupResult, RetentionRule } from '@walq/core/storage'
 import type Database from 'better-sqlite3'
+import type { CleanupInput, CleanupResult, RetentionRule } from 'walq/storage'
 
 const terminalStatuses = ['completed', 'failed'] as const
 

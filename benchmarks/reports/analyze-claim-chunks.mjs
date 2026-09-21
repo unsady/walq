@@ -51,7 +51,8 @@ const table = (headers, rows) => {
   const widths = headers.map((header, index) =>
     Math.max(3, header.length, ...rows.map((row) => row[index].length)),
   )
-  const line = (cells) => `| ${cells.map((cell, index) => cell.padEnd(widths[index])).join(' | ')} |`
+  const line = (cells) =>
+    `| ${cells.map((cell, index) => cell.padEnd(widths[index])).join(' | ')} |`
   return [line(headers), line(widths.map((width) => '-'.repeat(width))), ...rows.map(line)]
 }
 
@@ -248,15 +249,7 @@ for (const mode of ['normal', 'full']) {
   }
   lines.push(
     ...table(
-      [
-        'queues',
-        'chunk',
-        'competitor enqueue p95',
-        'p99',
-        'competitor complete p95',
-        'p99',
-        'ops',
-      ],
+      ['queues', 'chunk', 'competitor enqueue p95', 'p99', 'competitor complete p95', 'p99', 'ops'],
       rows,
     ),
   )
@@ -267,7 +260,14 @@ lines.push('## Trade-off summary (256 queues, limit 16)')
 lines.push('')
 lines.push(
   ...table(
-    ['chunk', 'jobs/transaction', 'lock hold p95', 'competitor p95', 'throughput vs all', 'verdict'],
+    [
+      'chunk',
+      'jobs/transaction',
+      'lock hold p95',
+      'competitor p95',
+      'throughput vs all',
+      'verdict',
+    ],
     [
       ['all', '4096', '~100 ms', '~63–68 ms', '100%', 'fastest, holds the writer lock too long'],
       ['64', '1024', '~29 ms', '~23–40 ms', '~93–94%', 'throughput-leaning alternative'],

@@ -1,9 +1,9 @@
 import { performance } from 'node:perf_hooks'
 
 import { betterSqlite3 } from '@walq/better-sqlite3'
-import type { LeaseMutationResult, Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 import { Queue, type WorkerHandle } from 'walq'
+import type { LeaseMutationResult, Storage } from 'walq/storage'
 
 import {
   deferred,

@@ -1,4 +1,4 @@
-import type { RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage'
+import type { RetentionPolicy, RetentionRule, Storage } from 'walq/storage'
 
 import { getCoordinator } from './coordinator.js'
 import type {

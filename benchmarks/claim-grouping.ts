@@ -6,8 +6,8 @@ import { performance } from 'node:perf_hooks'
 import { Worker } from 'node:worker_threads'
 
 import { betterSqlite3 } from '@walq/better-sqlite3'
-import type { ClaimedJob, ClaimInput, Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
+import type { ClaimedJob, ClaimInput, Storage } from 'walq/storage'
 
 import { synchronousPragma, type SynchronousMode } from './bench-options.js'
 import type {

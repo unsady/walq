@@ -1,5 +1,5 @@
-import type { Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
+import type { Storage } from 'walq/storage'
 
 import {
   runCleanupConformance,

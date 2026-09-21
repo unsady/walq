@@ -1,8 +1,11 @@
 # @walq/better-sqlite3
 
 A `Storage` implementation for walq using a caller-owned `better-sqlite3`
-connection. Install `better-sqlite3` alongside this package; it is a peer dependency
-and requires a native addon (a supported prebuilt binary or native build tools).
+connection. It is ESM-only and requires Node.js 22 or newer. Install its peer dependencies alongside it; `better-sqlite3` uses a native addon and requires a supported prebuilt binary or native build tools.
+
+```sh
+pnpm add walq @walq/better-sqlite3 better-sqlite3
+```
 
 ```ts
 import Database from 'better-sqlite3'
@@ -53,7 +56,7 @@ storage instance can serve multiple queues, isolated by their exact queue names.
 
 ## Behavior
 
-Methods return promises to implement `@walq/core/storage`, but database work is
+Methods return promises to implement `walq/storage`, but database work is
 **synchronous and blocks the event loop**. No background worker, polling loop,
 retry policy, or cleanup scheduler is provided.
 
@@ -85,9 +88,7 @@ the storage contract does not promise cross-request atomicity. The
 `StorageCoordinator` uses this method when present and otherwise falls back to
 one `claim` call per request.
 
-See [the storage contract](../../docs/storage-contract.md) for delivery semantics,
-attempt accounting, expiry boundaries, and lease protection. Tokens protect queue
-state, not handler side effects.
+See [the storage contract](https://github.com/unsady/walq/blob/main/docs/storage-contract.md) for delivery semantics, attempt accounting, expiry boundaries, and lease protection. Tokens protect queue state, not handler side effects.
 
 ## Cleanup
 

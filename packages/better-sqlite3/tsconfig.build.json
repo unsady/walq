@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "inlineSources": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true,
+    "tsBuildInfoFile": "../../.cache/better-sqlite3.tsbuildinfo",
+    "types": ["node"]
+  },
+  "references": [{ "path": "../walq/tsconfig.build.json" }],
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/fixtures/**"]
+}

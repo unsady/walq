@@ -2,8 +2,8 @@ import { registerHooks } from 'node:module'
 import { performance } from 'node:perf_hooks'
 import { parentPort, workerData } from 'node:worker_threads'
 
-import type { ClaimedJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
+import type { ClaimedJob } from 'walq/storage'
 
 import type { SynchronousMode } from '../bench-options.js'
 
@@ -17,7 +17,9 @@ registerHooks({
   },
 })
 
-const { betterSqlite3 } = await import('@walq/better-sqlite3')
+const { betterSqlite3 } = await import(
+  new URL('../../packages/better-sqlite3/src/index.ts', import.meta.url).href
+)
 
 export type ContentionWorkerInput = {
   path: string

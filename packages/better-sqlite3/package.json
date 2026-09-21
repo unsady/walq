@@ -1,21 +1,58 @@
 {
   "name": "@walq/better-sqlite3",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "better-sqlite3 storage adapter for walq.",
+  "keywords": [
+    "better-sqlite3",
+    "job-queue",
+    "queue",
+    "sqlite",
+    "walq"
+  ],
+  "homepage": "https://github.com/unsady/walq/tree/main/packages/better-sqlite3#readme",
+  "bugs": {
+    "url": "https://github.com/unsady/walq/issues"
+  },
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unsady/walq.git",
+    "directory": "packages/better-sqlite3"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "type": "module",
+  "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "prepack": "pnpm build"
   },
   "dependencies": {
-    "@walq/core": "workspace:*"
+    "@types/better-sqlite3": "^9.6.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
-    "better-sqlite3": "^13.0.3"
+    "@types/node": "^22.20.3",
+    "better-sqlite3": "^13.0.3",
+    "typescript": "^7.0.2",
+    "walq": "workspace:*"
   },
   "peerDependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "walq": "^0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

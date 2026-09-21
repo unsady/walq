@@ -10,7 +10,7 @@ import type {
   LeaseMutationResult,
   Storage,
   StoredJob,
-} from '@walq/core/storage'
+} from 'walq/storage'
 
 import { delay, type Delay } from './delay.js'
 
