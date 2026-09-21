@@ -16,14 +16,14 @@ describe('claim grouping scenarios', () => {
   it('builds the quick matrix', () => {
     const scenarios = claimGroupingScenarios(quickClaimGroupingGrid)
 
-    expect(scenarios).toHaveLength(24)
-    expect(new Set(scenarios.map(claimGroupingScenarioName)).size).toBe(24)
+    expect(scenarios).toHaveLength(36)
+    expect(new Set(scenarios.map(claimGroupingScenarioName)).size).toBe(36)
   })
 
   it('covers every requested queue count and limit in the full matrix', () => {
     const scenarios = claimGroupingScenarios(fullClaimGroupingGrid)
 
-    expect(scenarios).toHaveLength(48)
+    expect(scenarios).toHaveLength(72)
     expect(new Set(scenarios.map((scenario) => scenario.queues))).toEqual(new Set([1, 4, 8, 32]))
     expect(new Set(scenarios.map((scenario) => scenario.limit))).toEqual(new Set([1, 4, 16]))
   })
@@ -45,7 +45,11 @@ describe('claim grouping tier overrides', () => {
 
   it('parses claim modes', () => {
     expect(claimModeOverride('grouped')).toEqual(['grouped'])
-    expect(claimModeOverride('current,grouped')).toEqual(['current', 'grouped'])
+    expect(claimModeOverride('current,grouped,production')).toEqual([
+      'current',
+      'grouped',
+      'production',
+    ])
     expect(claimModeOverride('')).toBeUndefined()
   })
 
@@ -67,7 +71,21 @@ describe('claim grouping tier overrides', () => {
     expect(grid.limits).toEqual([16])
     expect(grid.modes).toEqual(quickClaimGroupingGrid.modes)
     expect(grid.placements).toEqual(quickClaimGroupingGrid.placements)
-    expect(claimGroupingScenarios(grid)).toHaveLength(12)
+    expect(claimGroupingScenarios(grid)).toHaveLength(18)
+  })
+
+  it('keeps chunk tiers out of the current and production modes', () => {
+    const grid = withClaimGroupingTiers(quickClaimGroupingGrid, {
+      queues: [32],
+      limits: [16],
+      modes: ['production'],
+      chunks: [undefined, 16],
+    })
+
+    expect(claimGroupingScenarios(grid).map(claimGroupingScenarioName)).toEqual([
+      'production / solo / 32 queues / limit 16',
+      'production / competing / 32 queues / limit 16',
+    ])
   })
 
   it('keeps the base name until chunks are configured, then labels every chunk tier', () => {

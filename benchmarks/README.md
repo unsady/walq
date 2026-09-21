@@ -10,7 +10,7 @@ standard Vitest table renders one row per scenario.
 pnpm bench                 # all suites, quick grids
 pnpm bench:queue           # coordinator suite only
 pnpm bench:contention      # SQLite contention suite only
-pnpm bench:claim-grouping  # grouped claim prototype only
+pnpm bench:claim-grouping  # grouped claim paths only
 pnpm bench:complete-batch  # batched completion prototype only
 pnpm bench:retention       # history growth and cleanup only
 pnpm bench:full            # full matrices
@@ -35,8 +35,8 @@ only `*.test.ts`, so the heavy workloads never run there.
 | `BENCH_RETENTION_BATCH` |           | Replaces every retention cleanup batch size with one value                                                 |
 | `BENCH_CLAIM_QUEUES`    | grid      | Replaces the claim-grouping queue tiers, for example `32,64,128`                                           |
 | `BENCH_CLAIM_LIMITS`    | grid      | Replaces the claim-grouping claim limits, for example `16`                                                 |
-| `BENCH_CLAIM_MODES`     | grid      | Replaces the claim-grouping modes, for example `grouped`                                                   |
-| `BENCH_CLAIM_CHUNKS`    | `all`     | Queues per grouped transaction; `all` or positive integers, for example `all,16,32,64`                     |
+| `BENCH_CLAIM_MODES`     | grid      | Replaces the claim-grouping modes (`current`/`grouped`/`production`), for example `grouped`                |
+| `BENCH_CLAIM_CHUNKS`    | `all`     | Queues per `grouped` prototype transaction; `all` or positive integers, for example `all,16,32,64`         |
 
 The previous `--suite`, `--repeats`, `--warmup`, `--jobs`, `--only`, `--json`, `--full` and
 `--help` flags, and the `BENCH_SUITES` variable, are gone because `vitest bench` owns the CLI.
@@ -55,6 +55,18 @@ table cannot show.
 
 The process exits with code 1 when any scenario reports a problem; the failing `expect` names the
 domain reason (incomplete work, lost lease, duplicate completion, storage error, or an abort).
+
+## Reports
+
+`benchmarks/reports/` keeps the tuning evidence behind shipped defaults. Each report is generated
+from `BENCH_JSON` artifacts, so a run can be re-rendered or re-checked against current code:
+
+- [grouped-claim-chunk-size.md](reports/grouped-claim-chunk-size.md) — why grouped claims use a
+  512-job chunk budget (`floor(512 / limit)` queues at a uniform limit) and what 16/32/64 cost in
+  lock hold, throughput, and competitor latency.
+
+Run `node benchmarks/reports/analyze-claim-chunks.mjs <artifactsDir>` after the commands listed in
+the report to reproduce it; the script writes a formatter-clean markdown file.
 
 ## coordinator — runtime and poller topology
 
@@ -125,17 +137,23 @@ direct measurement of time spent waiting for a lock.
 
 ## claim-grouping — multi-queue transaction prototype
 
-Compares the per-queue adapter path with a benchmark-only prototype that predates the production
+Compares the grouped claim path with a benchmark-only prototype that predates the production
 `Storage.claimQueues` capability:
 
 - `current` calls `claim()` separately for every queue, creating one immediate transaction per
   call.
-- `grouped` runs the same recover/select/acquire sequence for every queue inside one immediate
-  transaction. It is one writer-lock acquisition, not one SQL statement.
+- `grouped` runs the same recover/select/acquire sequence for every queue inside immediate
+  transactions sized by the `BENCH_CLAIM_CHUNKS` tier. It is a prototype: it keeps its own prepared
+  statements so chunk sizes can be swept without touching adapter code.
+- `production` calls the shipped `Storage.claimQueues` once per round, so the adapter's own 512-job
+  chunk budget is what gets measured. The benchmark can only time the whole call, so its
+  transaction percentiles, commit count, and jobs/transaction describe the call rather than one
+  internal chunk; see [grouped-claim-chunk-size.md](reports/grouped-claim-chunk-size.md) for the
+  chunk tiers behind that budget.
 
-The production adapter now exposes the same grouping as the optional `claimQueues` method, and
-the coordinator benchmark exercises it end to end. This suite keeps its own prepared statements so
-the grouped and current paths can be compared under one grid; it does not import adapter code.
+The coordinator benchmark exercises the same production method end to end. This suite keeps its own
+prepared statements so the grouped and current paths can be compared under one grid; only the
+`production` mode imports adapter behaviour.
 
 The quick grid uses 1, 8, and 32 queues with limits 1 and 16. The full grid covers 1, 4, 8, and 32
 queues with limits 1, 4, and 16. Both compare `solo` against `competing`. A competing scenario
@@ -146,17 +164,16 @@ yielding for one millisecond between cycles to avoid artificial writer starvatio
 Reported: claimed `jobs/sec`; individual transaction p50/p95/p99; average jobs per transaction;
 the commit count; event-loop p95/p99; and the competing connection's enqueue and complete
 p95/p99. Transaction latency intentionally has a different unit of work: one queue claim for
-`current`, versus one grouped transaction for `grouped` (all queues by default, or a `chunk` of
-queues when the chunk tiers are configured). Before each all-queue round the suite schedules a `setImmediate`; the time until that
+`current`, one grouped transaction for `grouped` (all queues by default, or a `chunk` of queues
+when the chunk tiers are configured), and one whole-round `claimQueues` call for `production`.
+Before each round the suite schedules a `setImmediate`; the time until that
 callback runs is the event-loop stall sample. It includes the whole claim round and scheduler
 latency, so use it as a responsiveness comparison rather than exact CPU time. Competing runs add
 short, unmeasured pauses between selected rounds so the second connection produces enough latency
 samples instead of being starved for the entire run; `jobs/sec` uses only summed claim-round time.
 
 Jobs are distributed evenly across queues. Every claimed id is checked for uniqueness and a run
-is invalid when work is incomplete, duplicated, or the competing writer reports an error. The
-prototype keeps its own prepared statements so it can compare `current` and `grouped` in one grid
-without depending on adapter internals; production code lives behind `Storage.claimQueues`.
+is invalid when work is incomplete, duplicated, or the competing writer reports an error.
 
 `BENCH_CLAIM_QUEUES`, `BENCH_CLAIM_LIMITS`, `BENCH_CLAIM_MODES` and `BENCH_CLAIM_CHUNKS`
 replace the queue, limit, mode and chunk tiers so a longer `BEGIN IMMEDIATE` can be probed without

@@ -27,7 +27,7 @@ import {
 } from './harness.js'
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
-export type ClaimGroupingMode = 'current' | 'grouped'
+export type ClaimGroupingMode = 'current' | 'grouped' | 'production'
 export type ClaimGroupingPlacement = 'solo' | 'competing'
 
 /** One `BEGIN IMMEDIATE ... COMMIT` executed by the Walq side, with how many jobs it claimed. */
@@ -54,7 +54,7 @@ export type ClaimGroupingScenario = {
 export const quickClaimGroupingGrid: ClaimGroupingGrid = {
   queues: [1, 8, 32],
   limits: [1, 16],
-  modes: ['current', 'grouped'],
+  modes: ['current', 'grouped', 'production'],
   placements: ['solo', 'competing'],
   chunks: [undefined],
 }
@@ -62,7 +62,7 @@ export const quickClaimGroupingGrid: ClaimGroupingGrid = {
 export const fullClaimGroupingGrid: ClaimGroupingGrid = {
   queues: [1, 4, 8, 32],
   limits: [1, 4, 16],
-  modes: ['current', 'grouped'],
+  modes: ['current', 'grouped', 'production'],
   placements: ['solo', 'competing'],
   chunks: [undefined],
 }
@@ -226,9 +226,9 @@ export function claimModeOverride(value: string | undefined): ClaimGroupingMode[
 
   return value.split(',').map((part) => {
     const token = part.trim()
-    if (token !== 'current' && token !== 'grouped') {
+    if (token !== 'current' && token !== 'grouped' && token !== 'production') {
       throw new Error(
-        `BENCH_CLAIM_MODES must be a comma-separated list of current/grouped, received "${value}"`,
+        `BENCH_CLAIM_MODES must be a comma-separated list of current/grouped/production, received "${value}"`,
       )
     }
     return token
@@ -272,6 +272,12 @@ export function claimGroupingScenarioName(scenario: ClaimGroupingScenario): stri
   const base = `${scenario.mode} / ${scenario.placement} / ${scenario.queues} queues / limit ${scenario.limit}`
   if (!scenario.chunksConfigured) return base
   return `${base} / chunk ${scenario.chunkSize ?? 'all'}`
+}
+
+function claimChunkLabel(scenario: ClaimGroupingScenario): string | number {
+  if (scenario.mode === 'current') return 'none'
+  if (scenario.mode === 'production') return 'internal'
+  return scenario.chunkSize ?? 'all'
 }
 
 function prepareJobs(db: Database.Database, queues: string[], jobs: number): void {
@@ -319,6 +325,25 @@ function claimGrouped(
   transactions: TransactionSample[],
 ): ClaimedJob[] {
   return claimer.claim(requests, chunkSize, transactions)
+}
+
+/**
+ * Shipped path: one `claimQueues` call per round, with the adapter's internal
+ * chunking. Transaction samples cover the whole call, not one internal chunk,
+ * so compare its transaction percentiles with care.
+ */
+async function claimProduction(
+  storage: Storage,
+  requests: ClaimRequest[],
+  transactions: TransactionSample[],
+): Promise<ClaimedJob[]> {
+  const claimQueues = storage.claimQueues
+  if (claimQueues === undefined) throw new Error('storage does not implement claimQueues')
+  const started = performance.now()
+  const results = await claimQueues.call(storage, { requests })
+  const jobs = results.flat()
+  transactions.push({ micros: performance.now() - started, jobs: jobs.length })
+  return jobs
 }
 
 function startCompetitor(
@@ -423,7 +448,9 @@ async function executeRun(
       const jobsInRound =
         scenario.mode === 'current'
           ? await claimCurrent(storage, requests, transactions)
-          : claimGrouped(grouped, requests, scenario.chunkSize, transactions)
+          : scenario.mode === 'production'
+            ? await claimProduction(storage, requests, transactions)
+            : claimGrouped(grouped, requests, scenario.chunkSize, transactions)
       elapsed += performance.now() - roundStarted
       eventLoopSamples.push(await turn)
       for (const job of jobsInRound) claimedIds.add(job.id)
@@ -507,7 +534,7 @@ function summarizeRuns(
       placement: scenario.placement,
       queues: scenario.queues,
       limit: scenario.limit,
-      chunk: scenario.chunkSize ?? 'all',
+      chunk: claimChunkLabel(scenario),
       jobs,
     },
     metrics: {
