@@ -6,10 +6,13 @@ const terminalStatuses = ['completed', 'failed'] as const
 type TerminalStatus = (typeof terminalStatuses)[number]
 
 /** The newest eligible row of one status, in `(finishedAt, id)` order. */
-type RetentionBoundary = { finishedAt: number; id: string }
+interface RetentionBoundary {
+  finishedAt: number
+  id: string
+}
 
 /** Eligibility and deletion for one status, derived from its retention rule. */
-type StatusPlan = {
+interface StatusPlan {
   hasMore(): boolean
   deleteEligible(limit: number): number
 }

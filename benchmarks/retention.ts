@@ -24,18 +24,18 @@ export type RetentionCleanup = 'retained' | 'delete' | 'delete-vacuum'
 export type RetentionConnection = 'warm' | 'reopened'
 
 /** One explicit corner of the matrix, expanded independently to avoid a full Cartesian product. */
-export type RetentionTier = {
+export interface RetentionTier {
   history: number[]
   cleanup: RetentionCleanup[]
   batches: number[]
   connections: RetentionConnection[]
 }
 
-export type RetentionGrid = {
+export interface RetentionGrid {
   tiers: RetentionTier[]
 }
 
-export type RetentionScenario = {
+export interface RetentionScenario {
   history: number
   cleanup: RetentionCleanup
   batch: number
@@ -103,13 +103,13 @@ const activeClaimLimit = 20
 const activeLeaseDuration = 60_000
 const warmupJobs = 25
 
-type SizeSnapshot = {
+interface SizeSnapshot {
   db: number
   wal: number
   pages: number
 }
 
-export type RetentionCleanupOutcome = {
+export interface RetentionCleanupOutcome {
   cleanup: number
   cleanupBatches: number
   cleanupBatchSamples: number[]
@@ -119,7 +119,7 @@ export type RetentionCleanupOutcome = {
   checkpoint: number
 }
 
-export type RetentionActiveOutcome = {
+export interface RetentionActiveOutcome {
   claimed: number
   completed: number
   duplicates: number
@@ -143,7 +143,7 @@ export type RetentionOutcome = RetentionActiveOutcome &
 export function retentionScenarios(grid: RetentionGrid): RetentionScenario[] {
   const scenarios: RetentionScenario[] = []
   const seen = new Set<string>()
-  const add = (scenario: RetentionScenario): void => {
+  function add(scenario: RetentionScenario): void {
     const key = `${scenario.history}|${scenario.cleanup}|${scenario.batch}|${scenario.connection}`
     if (seen.has(key)) return
     seen.add(key)

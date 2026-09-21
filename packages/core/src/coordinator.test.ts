@@ -35,13 +35,13 @@ const storedJob: StoredJob = {
   error: null,
 }
 
-type GatedStorage = {
+interface GatedStorage {
   storage: Storage
   started: string[]
   release(): void
 }
 
-type GroupedStorage = {
+interface GroupedStorage {
   storage: Storage
   calls: ClaimInput[][]
 }
@@ -162,13 +162,15 @@ describe('StorageCoordinator', () => {
     const gate = deferred()
     const started: string[] = []
     let blocking = false
-    const worker = (name: string): CoordinatedWorker => ({
-      poll: async () => {
-        started.push(name)
-        if (blocking) await gate.promise
-        return 0
-      },
-    })
+    function worker(name: string): CoordinatedWorker {
+      return {
+        poll: async () => {
+          started.push(name)
+          if (blocking) await gate.promise
+          return 0
+        },
+      }
+    }
 
     const first = worker('a')
     const second = worker('b')
@@ -193,12 +195,14 @@ describe('StorageCoordinator', () => {
     const { storage } = gatedStorage()
     const coordinator = getCoordinator(storage)
     const order: string[] = []
-    const worker = (name: string): CoordinatedWorker => ({
-      poll: async () => {
-        order.push(name)
-        return 0
-      },
-    })
+    function worker(name: string): CoordinatedWorker {
+      return {
+        poll: async () => {
+          order.push(name)
+          return 0
+        },
+      }
+    }
 
     coordinator.register('a', worker('a'))
     coordinator.register('b', worker('b'))
@@ -279,13 +283,15 @@ describe('StorageCoordinator', () => {
     const { storage, calls } = groupedStorage()
     const coordinator = getCoordinator(storage)
     const polled: string[] = []
-    const worker = (queue: string): CoordinatedWorker => ({
-      poll: async () => {
-        polled.push(queue)
-        await coordinator.claim({ queue, limit: 1, now, leaseDuration: 30_000 })
-        return 0
-      },
-    })
+    function worker(queue: string): CoordinatedWorker {
+      return {
+        poll: async () => {
+          polled.push(queue)
+          await coordinator.claim({ queue, limit: 1, now, leaseDuration: 30_000 })
+          return 0
+        },
+      }
+    }
 
     const first = worker('a')
     const second = worker('b')

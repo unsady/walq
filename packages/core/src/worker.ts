@@ -9,7 +9,7 @@ const heartbeatInterval = 10_000
 const cleanupInterval = 1_000
 const cleanupBatch = 500
 
-export type WorkerOptions = {
+export interface WorkerOptions {
   concurrency: number
   retention: RetentionPolicy
   onError: ProcessErrorHandler | undefined

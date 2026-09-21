@@ -93,7 +93,9 @@ describe('vitest provider', () => {
   })
 
   it('rejects registrations that were not created by defineScenario', async () => {
-    const untagged = async (): Promise<unknown> => 'outcome'
+    async function untagged(): Promise<unknown> {
+      return 'outcome'
+    }
     const input: BenchmarkGroup = {
       test: {} as BenchmarkGroup['test'],
       config: {} as BenchmarkGroup['config'],

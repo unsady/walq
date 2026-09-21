@@ -26,7 +26,10 @@ const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 
-type ClaimStep = { input: ClaimInput; expiresAt: number }
+interface ClaimStep {
+  input: ClaimInput
+  expiresAt: number
+}
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)

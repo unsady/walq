@@ -13,7 +13,7 @@ const descriptorKey = Symbol.for('walq.benchmark.scenario')
  * into the report row that also carries the domain metrics and the validation
  * verdict.
  */
-export type ScenarioDescriptor = {
+export interface ScenarioDescriptor {
   suite: string
   scenario: string
   jobs: number
@@ -29,13 +29,13 @@ export type ScenarioFunction = (() => Promise<unknown>) & {
   [descriptorKey]?: ScenarioDescriptor
 }
 
-export type ScenarioDefinition = {
+export interface ScenarioDefinition {
   name: string
   fn: ScenarioFunction
   descriptor: ScenarioDescriptor
 }
 
-export type ScenarioInput<Outcome> = {
+export interface ScenarioInput<Outcome> {
   suite: string
   scenario: string
   jobs: number

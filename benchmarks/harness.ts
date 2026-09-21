@@ -6,7 +6,7 @@ export type MetricValue = number | string
 export type RunSample = Record<string, number>
 
 /** One scenario, aggregated across measured repeats. */
-export type BenchmarkResult = {
+export interface BenchmarkResult {
   suite: string
   scenario: string
   params: Record<string, MetricValue>
@@ -17,12 +17,12 @@ export type BenchmarkResult = {
   ok: boolean
 }
 
-export type SuiteResult = {
+export interface SuiteResult {
   results: BenchmarkResult[]
   abortReason: string | undefined
 }
 
-export type LatencySummary = {
+export interface LatencySummary {
   count: number
   mean: number
   p50: number
@@ -31,7 +31,7 @@ export type LatencySummary = {
   max: number
 }
 
-export type Environment = {
+export interface Environment {
   node: string
   platform: string
   arch: string
@@ -39,7 +39,7 @@ export type Environment = {
   cores: number
 }
 
-export type RunOptions = {
+export interface RunOptions {
   repeats: number
   warmup: number
   jobs: number
@@ -47,27 +47,27 @@ export type RunOptions = {
   report: (message: string) => void
 }
 
-export type Deferred<Value> = {
+export interface Deferred<Value> {
   promise: Promise<Value>
   resolve: (value: Value) => void
   reject: (error: unknown) => void
 }
 
 /** Rejects with `message` once `duration` elapses, so callers can bound their awaits. */
-export type Guard = {
+export interface Guard {
   promise: Promise<never>
   dispose: () => void
 }
 
 /** Measured runs and failed attempts of one scenario. */
-export type Collected<Outcome> = {
+export interface Collected<Outcome> {
   outcomes: Outcome[]
   failures: string[]
 }
 
 export function deferred<Value>(): Deferred<Value> {
-  let resolve: (value: Value) => void = () => {}
-  let reject: (error: unknown) => void = () => {}
+  let resolve!: (value: Value) => void
+  let reject!: (error: unknown) => void
   const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise
     reject = rejectPromise
@@ -355,8 +355,8 @@ function renderTerminalTable(
 
     return width
   })
-  const formatRow = (cells: string[]): string =>
-    cells
+  function formatRow(cells: string[]): string {
+    return cells
       .map((cell, column) => {
         const width = widths[column] ?? 0
         const padding = ' '.repeat(Math.max(0, width - displayWidth(cell)))
@@ -365,6 +365,7 @@ function renderTerminalTable(
       })
       .join('  ')
       .trimEnd()
+  }
 
   return [
     formatRow(headers),
@@ -419,7 +420,7 @@ export function renderMarkdown(results: BenchmarkResult[]): string {
 }
 
 /** Which metrics best describe each suite, so the compact summary stays narrow. */
-export type DomainSummaryProfile = {
+export interface DomainSummaryProfile {
   throughput: string
   spread: string
   highlights: string[]

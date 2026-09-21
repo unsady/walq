@@ -24,13 +24,13 @@ import { defineScenario, type ScenarioDefinition } from './scenario.js'
 export type CoordinatorMode = 'shared' | 'isolated'
 export type CoordinatorProfile = 'saturated' | 'sparse' | 'bursty'
 
-export type CoordinatorGrid = {
+export interface CoordinatorGrid {
   modes: CoordinatorMode[]
   queues: number[]
   profiles: CoordinatorProfile[]
 }
 
-export type CoordinatorScenario = {
+export interface CoordinatorScenario {
   mode: CoordinatorMode
   queues: number
   profile: CoordinatorProfile
@@ -52,7 +52,7 @@ const runTimeout = 60_000
 const closeGrace = 1_000
 
 /** Storage traffic of one run, observed around the adapter. */
-type Tracker = {
+interface Tracker {
   claims: number
   emptyClaims: number
   confirmed: number
@@ -68,7 +68,7 @@ type Tracker = {
   onSettled: (failure?: unknown) => void
 }
 
-export type CoordinatorRunOutcome = {
+export interface CoordinatorRunOutcome {
   elapsed: number
   firstHandler: number | undefined
   claims: number
@@ -282,13 +282,13 @@ async function executeRun(
         drained.reject(new Error(`confirmed ${tracker.confirmed} of ${jobs} jobs`))
       }
     }
-    const processor = async (): Promise<void> => {
+    async function processor(): Promise<void> {
       firstHandler ??= performance.now()
       handled += 1
     }
 
     let startedAt = 0
-    const closeWorkers = async (): Promise<void> => {
+    async function closeWorkers(): Promise<void> {
       try {
         const stopped = await settledWithin(
           Promise.all(workers.map((worker) => worker.close())),
@@ -391,8 +391,9 @@ export function summarizeRuns(
   const firstHandlers = valid.flatMap((outcome) =>
     outcome.firstHandler === undefined ? [] : [outcome.firstHandler],
   )
-  const sum = (pick: (outcome: CoordinatorRunOutcome) => number): number =>
-    valid.reduce((total, outcome) => total + pick(outcome), 0)
+  function sum(pick: (outcome: CoordinatorRunOutcome) => number): number {
+    return valid.reduce((total, outcome) => total + pick(outcome), 0)
+  }
   const metrics: Record<string, number> = {
     'jobs/sec': median(rates),
     'spread (%)': spread(rates),

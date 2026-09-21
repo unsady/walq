@@ -23,7 +23,9 @@ import { join } from 'node:path'
 const root = process.argv[2] ?? 'artifacts'
 const output = process.argv[3] ?? join(root, 'REPORT.md')
 
-const readJson = (path) => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : undefined)
+function readJson(path) {
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : undefined
+}
 
 const main = {
   normal: readJson(join(root, 'normal', 'bench.claim-grouping.json')),
@@ -35,24 +37,29 @@ const confirm = {
 }
 
 const chunkOrder = ['all', '16', '32', '64']
-const find = (artifact, queues, chunk, placement) =>
-  (artifact?.results ?? []).find(
+function find(artifact, queues, chunk, placement) {
+  return (artifact?.results ?? []).find(
     (result) =>
       result.scenario.includes(`/ ${queues} queues /`) &&
       String(result.params.chunk) === String(chunk) &&
       result.scenario.includes(`/ ${placement} /`),
   )
-const f = (value, digits = 0) =>
-  value === undefined || value === null ? '—' : Number(value).toFixed(digits)
-const pct = (value, base) => (base === 0 ? '—' : `${((value / base) * 100).toFixed(0)}%`)
+}
+function f(value, digits = 0) {
+  return value === undefined || value === null ? '—' : Number(value).toFixed(digits)
+}
+function pct(value, base) {
+  return base === 0 ? '—' : `${((value / base) * 100).toFixed(0)}%`
+}
 // Pads every column to its widest cell so the generated markdown matches the
 // repository formatter and a regeneration only changes the values.
-const table = (headers, rows) => {
+function table(headers, rows) {
   const widths = headers.map((header, index) =>
     Math.max(3, header.length, ...rows.map((row) => row[index].length)),
   )
-  const line = (cells) =>
-    `| ${cells.map((cell, index) => cell.padEnd(widths[index])).join(' | ')} |`
+  function line(cells) {
+    return `| ${cells.map((cell, index) => cell.padEnd(widths[index])).join(' | ')} |`
+  }
   return [line(headers), line(widths.map((width) => '-'.repeat(width))), ...rows.map(line)]
 }
 

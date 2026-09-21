@@ -153,7 +153,9 @@ describe('SQLite job columns', () => {
 
 describe('SQLite retention', () => {
   const cleanupNow = 1_000_000
-  const rule = (count: number | null, maxAge: number | null = null) => ({ count, maxAge })
+  function rule(count: number | null, maxAge: number | null = null) {
+    return { count, maxAge }
+  }
   const cleanupInput = {
     queue: 'email',
     retention: { completed: rule(0), failed: rule(0) },
@@ -253,8 +255,9 @@ describe('SQLite retention', () => {
       completed.push(stored.id)
     }
 
-    const remaining = (): unknown[] =>
-      db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all()
+    function remaining(): unknown[] {
+      return db.prepare('SELECT id FROM walq_jobs ORDER BY finishedAt').all()
+    }
     const batch = {
       ...cleanupInput,
       retention: { completed: rule(2), failed: rule(0) },

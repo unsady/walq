@@ -1,4 +1,4 @@
-export type Delay = {
+export interface Delay {
   promise: Promise<void>
   finish(): void
 }
@@ -21,7 +21,7 @@ export function delay(duration: number): Delay {
   return { promise, finish }
 }
 
-export type Deferred = {
+export interface Deferred {
   promise: Promise<void>
   resolve(): void
 }

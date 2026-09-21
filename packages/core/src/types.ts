@@ -51,7 +51,7 @@ export interface AddedJob {
   id: string
 }
 
-export type ProcessContext = {
+export interface ProcessContext {
   readonly signal: AbortSignal
   readonly jobId: string
   /** Current execution number, starting at 1. */

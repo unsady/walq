@@ -5,5 +5,9 @@ export default defineConfig({
   categories: {
     correctness: 'error',
   },
+  rules: {
+    'func-style': ['error', 'declaration'],
+    'typescript/consistent-type-definitions': ['error', 'interface'],
+  },
   ignorePatterns: ['dist/**', 'coverage/**', '.vitest/**'],
 })

@@ -17,17 +17,17 @@ import { delay, type Delay } from './delay.js'
 const pollInterval = 1_000
 
 /** A queue worker that the coordinator polls for new jobs. */
-export type CoordinatedWorker = {
+export interface CoordinatedWorker {
   poll(): Promise<number>
 }
 
-type WorkerState = {
+interface WorkerState {
   queue: string
   nextPollAt: number
 }
 
 /** One claim waiting for the current microtask batch to flush. */
-type PendingClaim = {
+interface PendingClaim {
   input: ClaimInput
   resolve: (jobs: ClaimedJob[]) => void
   reject: (error: unknown) => void

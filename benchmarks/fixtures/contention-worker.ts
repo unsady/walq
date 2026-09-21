@@ -21,7 +21,7 @@ const { betterSqlite3 } = await import(
   new URL('../../packages/better-sqlite3/src/index.ts', import.meta.url).href
 )
 
-export type ContentionWorkerInput = {
+export interface ContentionWorkerInput {
   path: string
   queue: string
   jobs: number
@@ -31,7 +31,7 @@ export type ContentionWorkerInput = {
   synchronous: SynchronousMode
 }
 
-export type EnqueueReport = {
+export interface EnqueueReport {
   phase: 'enqueue'
   startedAt: number
   finishedAt: number
@@ -41,7 +41,7 @@ export type EnqueueReport = {
   firstError: string | null
 }
 
-export type DrainReport = {
+export interface DrainReport {
   phase: 'drain'
   startedAt: number
   finishedAt: number

@@ -57,7 +57,7 @@ normal protocol outcome and is never reported.
 ```ts
 const queue = new Queue<{ name: string }>('greetings', {
   storage: betterSqlite3(db),
-  onError(err, ctx) {
+  onError: (err, ctx) => {
     console.error(`[${ctx.queue}] ${ctx.operation} failed`, err, ctx)
   },
 })

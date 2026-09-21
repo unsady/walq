@@ -35,7 +35,10 @@ export type ClaimGroupingPlacement = 'solo' | 'competing'
  * `current`/`grouped`, or one whole `claimQueues` call for `production`. The latter may open
  * several transactions internally, so its sample covers the API call, not one transaction.
  */
-export type CallSample = { duration: number; jobs: number }
+export interface CallSample {
+  duration: number
+  jobs: number
+}
 
 /**
  * Minimum number of enqueue and complete samples the competing writer must produce before its
@@ -44,7 +47,7 @@ export type CallSample = { duration: number; jobs: number }
  */
 export const minimumCompetitorSamples = 20
 
-export type ClaimGroupingGrid = {
+export interface ClaimGroupingGrid {
   queues: number[]
   limits: number[]
   modes: ClaimGroupingMode[]
@@ -53,7 +56,7 @@ export type ClaimGroupingGrid = {
   chunks: (number | undefined)[]
 }
 
-export type ClaimGroupingScenario = {
+export interface ClaimGroupingScenario {
   queues: number
   limit: number
   mode: ClaimGroupingMode
@@ -89,7 +92,7 @@ const runTimeout = 60_000
 
 type ClaimRequest = Pick<ClaimInput, 'queue' | 'limit' | 'now' | 'leaseDuration'>
 
-export type ClaimGroupingOutcome = {
+export interface ClaimGroupingOutcome {
   elapsed: number
   claimed: number
   duplicates: number

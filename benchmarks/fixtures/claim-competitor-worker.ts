@@ -6,13 +6,13 @@ import Database from 'better-sqlite3'
 
 import type { SynchronousMode } from '../bench-options.js'
 
-export type ClaimCompetitorInput = {
+export interface ClaimCompetitorInput {
   path: string
   control: SharedArrayBuffer
   synchronous: SynchronousMode
 }
 
-export type ClaimCompetitorReport = {
+export interface ClaimCompetitorReport {
   enqueueSamples: number[]
   completeSamples: number[]
   operations: number
@@ -20,7 +20,10 @@ export type ClaimCompetitorReport = {
   firstError: string | null
 }
 
-type Lease = { id: string; leaseToken: string }
+interface Lease {
+  id: string
+  leaseToken: string
+}
 
 const preparedLeases = 512
 
@@ -78,12 +81,12 @@ async function main(): Promise<void> {
       try {
         const lease = leases[operations]
         if (lease === undefined) throw new Error('competitor exhausted its prepared leases')
-        const enqueue = (): void => {
+        function enqueue(): void {
           const started = performance.now()
           insert.run({ id: randomUUID(), now: Date.now() })
           enqueueSamples.push(performance.now() - started)
         }
-        const completeLease = (): void => {
+        function completeLease(): void {
           const started = performance.now()
           const result = complete.run({ ...lease, now: Date.now() })
           completeSamples.push(performance.now() - started)

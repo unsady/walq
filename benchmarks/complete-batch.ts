@@ -19,9 +19,13 @@ import {
 } from './harness.js'
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
-export type CompleteBatchGrid = { batches: number[] }
+export interface CompleteBatchGrid {
+  batches: number[]
+}
 
-export type CompleteBatchScenario = { batch: number }
+export interface CompleteBatchScenario {
+  batch: number
+}
 
 export const quickCompleteBatchGrid: CompleteBatchGrid = { batches: [1, 4, 16] }
 export const fullCompleteBatchGrid: CompleteBatchGrid = { batches: [1, 4, 16] }
@@ -29,7 +33,7 @@ export const fullCompleteBatchGrid: CompleteBatchGrid = { batches: [1, 4, 16] }
 const queue = 'complete-batch'
 const leaseDuration = 30_000
 
-export type CompleteBatchOutcome = {
+export interface CompleteBatchOutcome {
   applied: number
   commitSamples: number[]
   workloadDuration: number
@@ -44,7 +48,10 @@ export function completeBatchScenarios(grid: CompleteBatchGrid): CompleteBatchSc
   return grid.batches.map((batch) => ({ batch }))
 }
 
-type Lease = { id: string; leaseToken: string }
+interface Lease {
+  id: string
+  leaseToken: string
+}
 
 /**
  * Benchmark-only prototype: apply several completions inside one immediate transaction.

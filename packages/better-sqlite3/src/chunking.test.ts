@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import { claimBudget, claimChunkSize, chunkClaims } from './chunking.js'
 
-type Request = { limit: number }
+interface Request {
+  limit: number
+}
 
-const limits = (chunks: Request[][]): number[][] =>
-  chunks.map((chunk) => chunk.map(({ limit }) => limit))
+function limits(chunks: Request[][]): number[][] {
+  return chunks.map((chunk) => chunk.map(({ limit }) => limit))
+}
 
 describe('claim chunk size', () => {
   it('derives the queue count from the job budget', () => {

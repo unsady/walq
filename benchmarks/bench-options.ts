@@ -4,7 +4,7 @@ export type GridName = 'quick' | 'full'
 export type SynchronousMode = 'normal' | 'full'
 
 /** Settings shared by the benchmark files and the custom provider. */
-export type BenchEnvironment = {
+export interface BenchEnvironment {
   grid: GridName
   repeats: number
   warmup: number

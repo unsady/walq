@@ -29,13 +29,13 @@ import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
 export type ContentionPlacement = 'shared' | 'per-thread'
 
-export type ContentionGrid = {
+export interface ContentionGrid {
   threads: number[]
   batches: number[]
   placements: ContentionPlacement[]
 }
 
-export type ContentionScenario = {
+export interface ContentionScenario {
   threads: number
   batch: number
   placement: ContentionPlacement
@@ -55,7 +55,7 @@ export const fullContentionGrid: ContentionGrid = {
 
 const runTimeout = 60_000
 
-type Channel = {
+interface Channel {
   worker: Worker
   ready: Deferred<void>
   enqueue: Deferred<EnqueueReport>
@@ -63,7 +63,7 @@ type Channel = {
   exited: Deferred<number>
 }
 
-export type ContentionRunOutcome = {
+export interface ContentionRunOutcome {
   enqueueElapsed: number
   drainElapsed: number
   enqueued: number
@@ -120,7 +120,7 @@ function startWorker(input: ContentionWorkerInput): Channel {
   const enqueue = deferred<EnqueueReport>()
   const drain = deferred<DrainReport>()
   const exited = deferred<number>()
-  const fail = (error: unknown): void => {
+  function fail(error: unknown): void {
     ready.reject(error)
     enqueue.reject(error)
     drain.reject(error)
