@@ -19,7 +19,7 @@ const jobs = environment.jobs ?? 2000
 function selectedScenarios(): ScenarioDefinition[] {
   return contentionScenarios(grid)
     .filter((scenario) => matches(scenarioName(scenario), environment.only))
-    .map((scenario) => defineContentionScenario(scenario, jobs))
+    .map((scenario) => defineContentionScenario(scenario, jobs, environment.synchronous))
 }
 
 // The provider owns every measured run and guards each one; this only bounds a

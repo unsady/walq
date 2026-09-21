@@ -30,6 +30,7 @@ only `*.test.ts`, so the heavy workloads never run there.
 | `BENCH_JOBS`            | per suite | Jobs per run (1000 coordinator, 2000 contention, 4096 claim grouping, 1000 retention) |
 | `BENCH_ONLY`            |           | Run scenarios whose name contains the text                                            |
 | `BENCH_JSON`            |           | Base path for the per-suite domain JSON artifacts                                     |
+| `BENCH_SYNCHRONOUS`     | `normal`  | SQLite `synchronous` mode for the file-backed suites (`normal` or `full`)             |
 | `BENCH_RETENTION_BATCH` |           | Replaces every retention cleanup batch size with one value                            |
 
 The previous `--suite`, `--repeats`, `--warmup`, `--jobs`, `--only`, `--json`, `--full` and
@@ -202,6 +203,10 @@ page cache. `warm` reuses the seeding connection.
 ## Methodology
 
 - SQLite settings: `journal_mode = WAL`, `synchronous = NORMAL`, `busy_timeout = 2000`.
+  `BENCH_SYNCHRONOUS=full` switches every file-backed connection to `synchronous = FULL`, so the
+  durability trade-off can be measured with the same scenarios. The coordinator suite runs on an
+  in-memory database, where the setting has no effect and stays a control condition.
+- A run records its effective `synchronous` mode in the JSON artifact metadata.
 - The schema and WAL mode are created in the parent before workers start, so startup never races
   and never lands inside a measurement.
 - Every contention-suite worker thread warms its own JIT with 50 enqueue/claim/complete cycles on
@@ -238,7 +243,8 @@ page cache. `warm` reuses the seeding connection.
   drawing conclusions.
 - The machine must be idle; background load dominates the absolute numbers.
 - WAL with `synchronous = NORMAL` matches common production tuning. With `synchronous = FULL`
-  every commit would fsync and all absolute numbers would change.
+  every commit would fsync and all absolute numbers would change; run both modes with
+  `BENCH_SYNCHRONOUS` to quantify the difference instead of guessing.
 - Benchmarks themselves are excluded from `pnpm test` and never run in CI. The harness unit tests
   (`benchmarks/*.test.ts`) are pure and do run with `pnpm test`.
 

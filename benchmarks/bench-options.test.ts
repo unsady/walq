@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { artifactPath, readBenchEnvironment } from './bench-options.js'
+import { artifactPath, readBenchEnvironment, synchronousPragma } from './bench-options.js'
 
 const empty: NodeJS.ProcessEnv = {}
 
@@ -13,6 +13,7 @@ describe('readBenchEnvironment', () => {
       jobs: undefined,
       only: undefined,
       json: undefined,
+      synchronous: 'normal',
     })
   })
 
@@ -25,6 +26,7 @@ describe('readBenchEnvironment', () => {
         BENCH_JOBS: '50',
         BENCH_ONLY: 'shared',
         BENCH_JSON: 'reports/bench.json',
+        BENCH_SYNCHRONOUS: 'full',
       }),
     ).toEqual({
       grid: 'full',
@@ -33,7 +35,13 @@ describe('readBenchEnvironment', () => {
       jobs: 50,
       only: 'shared',
       json: 'reports/bench.json',
+      synchronous: 'full',
     })
+  })
+
+  it('treats an empty synchronous value as the NORMAL default', () => {
+    expect(readBenchEnvironment({ BENCH_SYNCHRONOUS: '' }).synchronous).toBe('normal')
+    expect(readBenchEnvironment({ BENCH_SYNCHRONOUS: 'normal' }).synchronous).toBe('normal')
   })
 
   it('treats empty optional values as unset', () => {
@@ -50,6 +58,15 @@ describe('readBenchEnvironment', () => {
     expect(() => readBenchEnvironment({ BENCH_WARMUP: '1.5' })).toThrow('BENCH_WARMUP')
     expect(() => readBenchEnvironment({ BENCH_JOBS: '0' })).toThrow('BENCH_JOBS')
     expect(() => readBenchEnvironment({ BENCH_JOBS: '-10' })).toThrow('BENCH_JOBS')
+    expect(() => readBenchEnvironment({ BENCH_SYNCHRONOUS: 'FULL' })).toThrow('BENCH_SYNCHRONOUS')
+    expect(() => readBenchEnvironment({ BENCH_SYNCHRONOUS: 'off' })).toThrow('BENCH_SYNCHRONOUS')
+  })
+})
+
+describe('synchronousPragma', () => {
+  it('renders the PRAGMA statement for both durability modes', () => {
+    expect(synchronousPragma('normal')).toBe('synchronous = NORMAL')
+    expect(synchronousPragma('full')).toBe('synchronous = FULL')
   })
 })
 

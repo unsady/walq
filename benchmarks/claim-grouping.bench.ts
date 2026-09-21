@@ -19,7 +19,7 @@ const jobs = environment.jobs ?? 4096
 function selectedScenarios(): ScenarioDefinition[] {
   return claimGroupingScenarios(grid)
     .filter((scenario) => matches(claimGroupingScenarioName(scenario), environment.only))
-    .map((scenario) => defineClaimGroupingScenario(scenario, jobs))
+    .map((scenario) => defineClaimGroupingScenario(scenario, jobs, environment.synchronous))
 }
 
 test('claim grouping scenarios', { timeout: 60 * 60_000 }, async ({ bench, skip }) => {

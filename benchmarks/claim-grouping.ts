@@ -9,6 +9,7 @@ import { betterSqlite3 } from '@walq/better-sqlite3'
 import type { ClaimedJob, ClaimInput, Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
+import { synchronousPragma, type SynchronousMode } from './bench-options.js'
 import type {
   ClaimCompetitorInput,
   ClaimCompetitorReport,
@@ -199,7 +200,10 @@ function claimGrouped(
   return claimed
 }
 
-function startCompetitor(path: string): {
+function startCompetitor(
+  path: string,
+  synchronous: SynchronousMode,
+): {
   start: () => Promise<void>
   waitForSamples: (minimum: number) => Promise<void>
   stop: () => Promise<ClaimCompetitorReport>
@@ -207,7 +211,7 @@ function startCompetitor(path: string): {
 } {
   const controlBuffer = new SharedArrayBuffer(12)
   const control = new Int32Array(controlBuffer)
-  const input: ClaimCompetitorInput = { path, control: controlBuffer }
+  const input: ClaimCompetitorInput = { path, control: controlBuffer, synchronous }
   const worker = new Worker(new URL('./fixtures/claim-competitor-worker.ts', import.meta.url), {
     workerData: input,
   })
@@ -259,18 +263,20 @@ function startCompetitor(path: string): {
 async function executeRun(
   scenario: ClaimGroupingScenario,
   jobs: number,
+  synchronous: SynchronousMode,
 ): Promise<ClaimGroupingOutcome> {
   const directory = mkdtempSync(join(tmpdir(), 'walq-claim-grouping-'))
   const path = join(directory, 'walq.sqlite')
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
-  db.pragma('synchronous = NORMAL')
+  db.pragma(synchronousPragma(synchronous))
   db.pragma('busy_timeout = 2000')
   const storage = betterSqlite3(db)
   const queues = Array.from({ length: scenario.queues }, (_, index) => `queue-${index}`)
   prepareJobs(db, queues, jobs)
   const grouped = new GroupedClaimer(db)
-  const competitor = scenario.placement === 'competing' ? startCompetitor(path) : undefined
+  const competitor =
+    scenario.placement === 'competing' ? startCompetitor(path, synchronous) : undefined
   const transactionSamples: number[] = []
   const eventLoopSamples: number[] = []
   const claimedIds = new Set<string>()
@@ -401,12 +407,13 @@ function summarizeRuns(
 export function defineClaimGroupingScenario(
   scenario: ClaimGroupingScenario,
   jobs: number,
+  synchronous: SynchronousMode,
 ): ScenarioDefinition {
   return defineScenario({
     suite: 'claim-grouping',
     scenario: claimGroupingScenarioName(scenario),
     jobs,
-    run: () => executeRun(scenario, jobs),
+    run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRuns(scenario, jobs, collected),
     throughput: (result) => numeric(result.metrics['jobs/sec']),
     latency: (result) => result.samples.map((sample) => numeric(sample['elapsed (ms)'])),

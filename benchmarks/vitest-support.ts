@@ -60,6 +60,7 @@ export function writeArtifact(results: BenchmarkResult[], suite: string): string
         warmup: environment.warmup,
         jobs: environment.jobs ?? 0,
         only: environment.only ?? '',
+        synchronous: environment.synchronous,
       },
       results,
     ),

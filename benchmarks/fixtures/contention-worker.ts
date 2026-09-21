@@ -5,6 +5,8 @@ import { parentPort, workerData } from 'node:worker_threads'
 import type { ClaimedJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
+import type { SynchronousMode } from '../bench-options.js'
+
 // Native Node type stripping does not remap the source's NodeNext .js imports.
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -24,6 +26,7 @@ export type ContentionWorkerInput = {
   batch: number
   timeout: number
   gate: SharedArrayBuffer
+  synchronous: SynchronousMode
 }
 
 export type EnqueueReport = {
@@ -72,7 +75,7 @@ const input = workerData as ContentionWorkerInput
 const gate = new Int32Array(input.gate)
 const db = new Database(input.path)
 db.pragma('journal_mode = WAL')
-db.pragma('synchronous = NORMAL')
+db.pragma(`synchronous = ${input.synchronous.toUpperCase()}`)
 db.pragma('busy_timeout = 2000')
 const storage = betterSqlite3(db)
 

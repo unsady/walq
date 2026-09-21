@@ -4,9 +4,12 @@ import { parentPort, workerData } from 'node:worker_threads'
 
 import Database from 'better-sqlite3'
 
+import type { SynchronousMode } from '../bench-options.js'
+
 export type ClaimCompetitorInput = {
   path: string
   control: SharedArrayBuffer
+  synchronous: SynchronousMode
 }
 
 export type ClaimCompetitorReport = {
@@ -30,7 +33,7 @@ async function main(): Promise<void> {
   const control = new Int32Array(input.control)
   const db = new Database(input.path)
   db.pragma('journal_mode = WAL')
-  db.pragma('synchronous = NORMAL')
+  db.pragma(`synchronous = ${input.synchronous.toUpperCase()}`)
   db.pragma('busy_timeout = 2000')
   const insert = db.prepare(`
     INSERT INTO walq_jobs (

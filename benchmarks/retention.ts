@@ -8,6 +8,7 @@ import { betterSqlite3 } from '@walq/better-sqlite3'
 import type { Storage } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
+import { synchronousPragma, type SynchronousMode } from './bench-options.js'
 import {
   errorMessage,
   median,
@@ -218,10 +219,10 @@ function nextTurn(): Promise<number> {
   return new Promise((resolve) => setImmediate(() => resolve(performance.now() - started)))
 }
 
-function openDatabase(path: string): Database.Database {
+function openDatabase(path: string, synchronous: SynchronousMode): Database.Database {
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
-  db.pragma('synchronous = NORMAL')
+  db.pragma(synchronousPragma(synchronous))
   db.pragma('busy_timeout = 2000')
 
   return db
@@ -533,13 +534,17 @@ async function runActive(storage: Storage, jobs: number): Promise<RetentionActiv
   }
 }
 
-async function executeRun(scenario: RetentionScenario, jobs: number): Promise<RetentionOutcome> {
+async function executeRun(
+  scenario: RetentionScenario,
+  jobs: number,
+  synchronous: SynchronousMode,
+): Promise<RetentionOutcome> {
   const directory = mkdtempSync(join(tmpdir(), 'walq-retention-'))
   const path = join(directory, 'walq.sqlite')
   let db: Database.Database | undefined
 
   try {
-    db = openDatabase(path)
+    db = openDatabase(path, synchronous)
     let storage = betterSqlite3(db)
     seedHistory(db, scenario.history)
     const before = snapshot(path, db)
@@ -549,7 +554,7 @@ async function executeRun(scenario: RetentionScenario, jobs: number): Promise<Re
 
     if (scenario.connection === 'reopened') {
       db.close()
-      db = openDatabase(path)
+      db = openDatabase(path, synchronous)
       storage = betterSqlite3(db)
     }
 
@@ -673,12 +678,13 @@ export function summarizeRetentionRuns(
 export function defineRetentionScenario(
   scenario: RetentionScenario,
   jobs: number,
+  synchronous: SynchronousMode,
 ): ScenarioDefinition {
   return defineScenario({
     suite: 'retention',
     scenario: retentionScenarioName(scenario),
     jobs,
-    run: () => executeRun(scenario, jobs),
+    run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRetentionRuns(scenario, jobs, collected),
     throughput: (result) => numeric(result.metrics['active jobs/sec']),
     latency: (result) => result.samples.map((sample) => numeric(sample['workload (ms)'])),

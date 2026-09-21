@@ -1,5 +1,8 @@
 export type GridName = 'quick' | 'full'
 
+/** SQLite `PRAGMA synchronous` durability mode used by every benchmark connection. */
+export type SynchronousMode = 'normal' | 'full'
+
 /** Settings shared by the benchmark files and the custom provider. */
 export type BenchEnvironment = {
   grid: GridName
@@ -8,6 +11,7 @@ export type BenchEnvironment = {
   jobs: number | undefined
   only: string | undefined
   json: string | undefined
+  synchronous: SynchronousMode
 }
 
 function count(value: string, label: string): number {
@@ -37,6 +41,18 @@ function optional(value: string | undefined): string | undefined {
   return value === undefined || value === '' ? undefined : value
 }
 
+function synchronous(value: string | undefined): SynchronousMode {
+  if (value === undefined || value === '' || value === 'normal') return 'normal'
+  if (value === 'full') return 'full'
+
+  throw new Error(`BENCH_SYNCHRONOUS must be "normal" or "full", received "${value}"`)
+}
+
+/** `PRAGMA synchronous` statement for the selected durability mode. */
+export function synchronousPragma(mode: SynchronousMode): string {
+  return `synchronous = ${mode.toUpperCase()}`
+}
+
 /** Read the `BENCH_*` settings. Unknown values fail fast instead of silently defaulting. */
 export function readBenchEnvironment(env: NodeJS.ProcessEnv): BenchEnvironment {
   return {
@@ -46,6 +62,7 @@ export function readBenchEnvironment(env: NodeJS.ProcessEnv): BenchEnvironment {
     jobs: env.BENCH_JOBS === undefined ? undefined : positive(env.BENCH_JOBS, 'BENCH_JOBS'),
     only: optional(env.BENCH_ONLY),
     json: optional(env.BENCH_JSON),
+    synchronous: synchronous(env.BENCH_SYNCHRONOUS),
   }
 }
 

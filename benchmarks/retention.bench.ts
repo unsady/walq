@@ -24,7 +24,7 @@ const jobs = environment.jobs ?? 1000
 function selectedScenarios(): ScenarioDefinition[] {
   return retentionScenarios(grid)
     .filter((scenario) => matches(retentionScenarioName(scenario), environment.only))
-    .map((scenario) => defineRetentionScenario(scenario, jobs))
+    .map((scenario) => defineRetentionScenario(scenario, jobs, environment.synchronous))
 }
 
 test('retention scenarios', { timeout: 60 * 60_000 }, async ({ bench, skip }) => {

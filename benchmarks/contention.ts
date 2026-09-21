@@ -6,6 +6,7 @@ import { Worker } from 'node:worker_threads'
 import { betterSqlite3 } from '@walq/better-sqlite3'
 import Database from 'better-sqlite3'
 
+import { synchronousPragma, type SynchronousMode } from './bench-options.js'
 import type {
   ContentionWorkerInput,
   DrainReport,
@@ -99,11 +100,11 @@ export function contentionScenarios(grid: ContentionGrid): ContentionScenario[] 
 }
 
 /** Create the schema once so that workers never race during startup. */
-function prepareDatabase(path: string): void {
+function prepareDatabase(path: string, synchronous: SynchronousMode): void {
   const db = new Database(path)
   try {
     db.pragma('journal_mode = WAL')
-    db.pragma('synchronous = NORMAL')
+    db.pragma(synchronousPragma(synchronous))
     db.pragma('busy_timeout = 2000')
     betterSqlite3(db)
   } finally {
@@ -191,6 +192,7 @@ export function aggregateReports(
 async function executeRun(
   scenario: ContentionScenario,
   jobs: number,
+  synchronous: SynchronousMode,
 ): Promise<ContentionRunOutcome> {
   const directory = mkdtempSync(join(tmpdir(), 'walq-bench-'))
   const gate = new SharedArrayBuffer(4)
@@ -202,7 +204,7 @@ async function executeRun(
   const channels: Channel[] = []
 
   try {
-    for (const path of new Set(paths)) prepareDatabase(path)
+    for (const path of new Set(paths)) prepareDatabase(path, synchronous)
     for (const [index, path] of paths.entries()) {
       channels.push(
         startWorker({
@@ -212,6 +214,7 @@ async function executeRun(
           batch: scenario.batch,
           timeout: runTimeout,
           gate,
+          synchronous,
         }),
       )
     }
@@ -327,12 +330,13 @@ export function summarizeRuns(
 export function defineContentionScenario(
   scenario: ContentionScenario,
   jobs: number,
+  synchronous: SynchronousMode,
 ): ScenarioDefinition {
   return defineScenario({
     suite: 'contention',
     scenario: scenarioName(scenario),
     jobs,
-    run: () => executeRun(scenario, jobs),
+    run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRuns(scenario, jobs, collected),
     throughput: (result) => numeric(result.metrics['drain jobs/sec']),
     latency: (result) => result.samples.map((sample) => numeric(sample['drain (ms)'])),
