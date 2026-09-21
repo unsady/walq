@@ -147,6 +147,42 @@ export function claimGroupingScenarios(grid: ClaimGroupingGrid): ClaimGroupingSc
   return scenarios
 }
 
+/** Optional override that replaces the queue tiers, for example `BENCH_CLAIM_QUEUES=32,64,128`. */
+export function claimQueueOverride(value: string | undefined): number[] | undefined {
+  return csvNumbers(value, 'BENCH_CLAIM_QUEUES')
+}
+
+/** Optional override that replaces the claim limits, for example `BENCH_CLAIM_LIMITS=16`. */
+export function claimLimitOverride(value: string | undefined): number[] | undefined {
+  return csvNumbers(value, 'BENCH_CLAIM_LIMITS')
+}
+
+function csvNumbers(value: string | undefined, label: string): number[] | undefined {
+  if (value === undefined || value === '') return undefined
+
+  return value.split(',').map((part) => {
+    const parsed = Number(part.trim())
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(
+        `${label} must be a comma-separated list of positive integers, received "${value}"`,
+      )
+    }
+    return parsed
+  })
+}
+
+/** Apply the queue/limit overrides without mutating the source grid. */
+export function withClaimGroupingTiers(
+  grid: ClaimGroupingGrid,
+  overrides: { queues: number[] | undefined; limits: number[] | undefined },
+): ClaimGroupingGrid {
+  return {
+    ...grid,
+    queues: overrides.queues ?? grid.queues,
+    limits: overrides.limits ?? grid.limits,
+  }
+}
+
 export function claimGroupingScenarioName(scenario: ClaimGroupingScenario): string {
   return `${scenario.mode} / ${scenario.placement} / ${scenario.queues} queues / limit ${scenario.limit}`
 }

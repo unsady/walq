@@ -1,6 +1,6 @@
 # walq benchmarks
 
-Four suites measure different things. All run through Vitest Bench with the custom provider in
+Five suites measure different things. All run through Vitest Bench with the custom provider in
 `benchmarks/vitest-provider.ts`. The provider drives the real integration workloads through
 `collectRuns()` from `benchmarks/harness.ts`, so every scenario still runs `warmup + repeats`
 times with the order alternating between passes, and it returns Tinybench-shaped rows so the
@@ -11,6 +11,7 @@ pnpm bench                 # all suites, quick grids
 pnpm bench:queue           # coordinator suite only
 pnpm bench:contention      # SQLite contention suite only
 pnpm bench:claim-grouping  # grouped claim prototype only
+pnpm bench:complete-batch  # batched completion prototype only
 pnpm bench:retention       # history growth and cleanup only
 pnpm bench:full            # full matrices
 ```
@@ -22,16 +23,18 @@ only `*.test.ts`, so the heavy workloads never run there.
 
 ## Selecting and tuning
 
-| Setting                 | Default   | Meaning                                                                               |
-| ----------------------- | --------- | ------------------------------------------------------------------------------------- |
-| `BENCH_GRID`            | `quick`   | `quick` or `full` matrices (`bench:full` sets `full`)                                 |
-| `BENCH_REPEATS`         | 3         | Measured runs per scenario                                                            |
-| `BENCH_WARMUP`          | 1         | Discarded runs per scenario                                                           |
-| `BENCH_JOBS`            | per suite | Jobs per run (1000 coordinator, 2000 contention, 4096 claim grouping, 1000 retention) |
-| `BENCH_ONLY`            |           | Run scenarios whose name contains the text                                            |
-| `BENCH_JSON`            |           | Base path for the per-suite domain JSON artifacts                                     |
-| `BENCH_SYNCHRONOUS`     | `normal`  | SQLite `synchronous` mode for the file-backed suites (`normal` or `full`)             |
-| `BENCH_RETENTION_BATCH` |           | Replaces every retention cleanup batch size with one value                            |
+| Setting                 | Default   | Meaning                                                                                                    |
+| ----------------------- | --------- | ---------------------------------------------------------------------------------------------------------- |
+| `BENCH_GRID`            | `quick`   | `quick` or `full` matrices (`bench:full` sets `full`)                                                      |
+| `BENCH_REPEATS`         | 3         | Measured runs per scenario                                                                                 |
+| `BENCH_WARMUP`          | 1         | Discarded runs per scenario                                                                                |
+| `BENCH_JOBS`            | per suite | Jobs per run (1000 coordinator, 2000 contention, 4096 claim grouping, 4096 complete batch, 1000 retention) |
+| `BENCH_ONLY`            |           | Run scenarios whose name contains the text                                                                 |
+| `BENCH_JSON`            |           | Base path for the per-suite domain JSON artifacts                                                          |
+| `BENCH_SYNCHRONOUS`     | `normal`  | SQLite `synchronous` mode for the file-backed suites (`normal` or `full`)                                  |
+| `BENCH_RETENTION_BATCH` |           | Replaces every retention cleanup batch size with one value                                                 |
+| `BENCH_CLAIM_QUEUES`    | grid      | Replaces the claim-grouping queue tiers, for example `32,64,128`                                           |
+| `BENCH_CLAIM_LIMITS`    | grid      | Replaces the claim-grouping claim limits, for example `16`                                                 |
 
 The previous `--suite`, `--repeats`, `--warmup`, `--jobs`, `--only`, `--json`, `--full` and
 `--help` flags, and the `BENCH_SUITES` variable, are gone because `vitest bench` owns the CLI.
@@ -151,6 +154,29 @@ Jobs are distributed evenly across queues. Every claimed id is checked for uniqu
 is invalid when work is incomplete, duplicated, or the competing writer reports an error. The
 prototype keeps its own prepared statements so it can compare `current` and `grouped` in one grid
 without depending on adapter internals; production code lives behind `Storage.claimQueues`.
+
+`BENCH_CLAIM_QUEUES` and `BENCH_CLAIM_LIMITS` replace the queue and limit tiers so a longer
+`BEGIN IMMEDIATE` can be probed without editing the grid:
+
+```sh
+BENCH_CLAIM_QUEUES=32,64,128 BENCH_CLAIM_LIMITS=16 pnpm bench:claim-grouping
+```
+
+## complete-batch — batched completion prototype
+
+Measures the headroom of completing several jobs inside one transaction instead of one autocommit
+`UPDATE` per job. Each run seeds live leases with benchmark-only SQL inside a single transaction,
+then measures only the completion phase. `complete batch 1` calls the production
+`Storage.complete` path, so every other tier is compared against the shipped code rather than a
+rewritten baseline; the larger tiers use a benchmark-only prototype that runs the same
+`UPDATE ... WHERE status = 'active' AND leaseToken = ... AND expiresAt > now` for the batch inside
+one immediate transaction.
+
+Both grids use batch sizes 1, 4, and 16. Reported: `complete jobs/sec`; the commit p50/p95/p99;
+the commit count; and the mean per-job cost. Seeding and lease creation stay outside the measured
+phase, so the numbers isolate the completion commit. As with the claim prototype, the tier is a
+trade-off: a larger batch holds the writer lock longer, which matters more under
+`synchronous = FULL`.
 
 ## retention — completed/failed history growth and cleanup
 

@@ -4,16 +4,25 @@ import { readBenchEnvironment } from './bench-options.js'
 import {
   claimGroupingScenarioName,
   claimGroupingScenarios,
+  claimLimitOverride,
+  claimQueueOverride,
   defineClaimGroupingScenario,
   fullClaimGroupingGrid,
   quickClaimGroupingGrid,
+  withClaimGroupingTiers,
 } from './claim-grouping.js'
 import { matches } from './harness.js'
 import type { ScenarioDefinition } from './scenario.js'
 import { executeDefinitions, writeArtifact } from './vitest-support.js'
 
 const environment = readBenchEnvironment(process.env)
-const grid = environment.grid === 'full' ? fullClaimGroupingGrid : quickClaimGroupingGrid
+const grid = withClaimGroupingTiers(
+  environment.grid === 'full' ? fullClaimGroupingGrid : quickClaimGroupingGrid,
+  {
+    queues: claimQueueOverride(process.env.BENCH_CLAIM_QUEUES),
+    limits: claimLimitOverride(process.env.BENCH_CLAIM_LIMITS),
+  },
+)
 const jobs = environment.jobs ?? 4096
 
 function selectedScenarios(): ScenarioDefinition[] {
