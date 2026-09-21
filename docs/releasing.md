@@ -20,8 +20,6 @@ The two public packages are released together with the same version:
 4. Run `pnpm clean && pnpm check` from a fresh install.
 5. Merge the version changes into `main`.
 
-During `0.x`, document every incompatible API or SQLite schema change. If no migration is provided, explicitly tell users that they must drain or recreate the database before upgrading.
-
 ## Publish
 
 Create and push a version tag matching both manifests:

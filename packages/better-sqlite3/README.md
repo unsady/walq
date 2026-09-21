@@ -37,10 +37,7 @@ storage instance can serve multiple queues, isolated by their exact queue names.
 
 - The factory synchronously initializes versioned `walq_schema` and `walq_jobs`
   tables in an immediate transaction, then prepares statements. Repeated
-  initialization is supported; unknown or older schema versions are rejected.
-  Because the project is pre-release, outdated development databases are
-  recreated by deleting the file instead of migrated. These table names are
-  reserved for the adapter.
+  initialization is supported. These table names are reserved for the adapter.
 - The caller owns and closes the connection. The adapter neither closes it nor
   changes connection pragmas. It requires a writable connection.
 - Configure WAL, `synchronous = FULL`, and a suitable busy timeout as shown above

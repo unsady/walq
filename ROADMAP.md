@@ -35,7 +35,6 @@ Goal: provide explicit, queue-oriented database defaults while preserving caller
 ### Initialization and errors
 
 - Reject schema-time settings after tables have been initialized instead of attempting a migration or silently running `VACUUM`.
-- During the `0.x` series, incompatible schema changes are documented in the changelog and may require recreating the database rather than migrating it.
 - Reject configuration from inside a caller-managed transaction when SQLite cannot apply it safely.
 - Keep network-filesystem and single-writer limitations explicit in the adapter documentation.
 - Ensure repeated configuration is idempotent.

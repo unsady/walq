@@ -4,8 +4,6 @@
 
 Walq provides reliable at-least-once processing without Redis or a separate queue service. It is written in TypeScript and designed to support different SQLite runtimes through storage adapters.
 
-> **Early stage:** Walq is under active development. During the `0.x` series, the API and storage schema may change between minor versions; incompatible schema changes are called out in the changelog.
-
 ## Installation
 
 Walq is ESM-only and requires Node.js 22 or newer.
