@@ -22,7 +22,6 @@ const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 
-/** One validated queue request together with its computed lease expiry. */
 type ClaimStep = { input: ClaimInput; expiresAt: number }
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
@@ -107,7 +106,6 @@ class BetterSqlite3Storage implements Storage {
     )
   }
 
-  /** Validate one request and compute its expiry before any transaction opens. */
   private prepareClaim(input: ClaimInput): ClaimStep {
     text(input.queue, 'queue')
     integer(input.limit, 'limit', 1)
@@ -115,8 +113,8 @@ class BetterSqlite3Storage implements Storage {
   }
 
   /**
-   * Recover, select, and acquire for one queue. Callers run this inside the
-   * shared immediate transaction so the sequence stays atomic per request.
+   * Must run inside the shared immediate transaction so the sequence stays
+   * atomic per request.
    */
   private claimStep(input: ClaimInput, expiresAt: number): ClaimedJob[] {
     this.recover.run(input)

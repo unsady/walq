@@ -19,10 +19,6 @@ export type CoordinatedWorker = {
   poll(): Promise<number>
 }
 
-/**
- * Single poller and single storage path for every worker of one Storage.
- * Workers register on process() and unregister on close().
- */
 type WorkerState = {
   queue: string
   nextPollAt: number
@@ -35,6 +31,10 @@ type PendingClaim = {
   reject: (error: unknown) => void
 }
 
+/**
+ * Single poller and single storage path for every worker of one Storage.
+ * Workers register on process() and unregister on close().
+ */
 export class StorageCoordinator {
   readonly #storage: Storage
   readonly #workers = new Map<CoordinatedWorker, WorkerState>()
@@ -104,7 +104,6 @@ export class StorageCoordinator {
     })
   }
 
-  /** Run one grouped storage call and map results back to request order. */
   async #flushClaims(): Promise<void> {
     const batch = this.#pendingClaims
     this.#pendingClaims = undefined

@@ -68,7 +68,6 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     this.#onError = onError
   }
 
-  /** Claim jobs for free slots and start their handlers. Returns their count. */
   async poll(): Promise<number> {
     if (this.#closing || this.#polling) return 0
 
