@@ -10,7 +10,6 @@ import {
   percentile,
   renderDomainSummary,
   renderJson,
-  renderMarkdown,
   settledWithin,
   spread,
   SuiteAbortError,
@@ -258,28 +257,6 @@ describe('collectRuns', () => {
       failures: ['suite aborted: workers did not stop'],
     })
     expect(collected.scenarios.get('a')?.outcomes).toEqual(['a'])
-  })
-})
-
-describe('renderMarkdown', () => {
-  it('adds a notes column only when a scenario has notes', () => {
-    const clean = renderMarkdown([result({ metrics: { 'jobs/sec': 10 } })])
-    expect(clean).toContain('| scenario | jobs/sec |')
-    expect(clean).not.toContain('notes')
-
-    const broken = renderMarkdown([result({ notes: ['completed 1 of 2 | jobs'] })])
-    expect(broken).toContain('| notes |')
-    expect(broken).toContain('completed 1 of 2 \\| jobs')
-  })
-
-  it('groups scenarios by suite', () => {
-    const markdown = renderMarkdown([
-      result({ suite: 'one', scenario: 'a' }),
-      result({ suite: 'two', scenario: 'b' }),
-    ])
-
-    expect(markdown).toContain('### one')
-    expect(markdown).toContain('### two')
   })
 })
 

@@ -1,5 +1,3 @@
-import { expect, test } from 'vitest'
-
 import { readBenchEnvironment } from './bench-options.js'
 import { matches } from './harness.js'
 import {
@@ -12,7 +10,7 @@ import {
   withRetentionBatch,
 } from './retention.js'
 import type { ScenarioDefinition } from './scenario.js'
-import { executeDefinitions, writeArtifact } from './vitest-support.js'
+import { registerSuite } from './vitest-support.js'
 
 const environment = readBenchEnvironment(process.env)
 const grid = withRetentionBatch(
@@ -27,18 +25,4 @@ function selectedScenarios(): ScenarioDefinition[] {
     .map((scenario) => defineRetentionScenario(scenario, jobs, environment.synchronous))
 }
 
-test('retention scenarios', { timeout: 60 * 60_000 }, async ({ bench, skip }) => {
-  const definitions = selectedScenarios()
-  if (definitions.length === 0)
-    skip(`no retention scenario matches BENCH_ONLY=${environment.only ?? ''}`)
-
-  const results = await executeDefinitions(bench, definitions, `retention (${environment.grid})`)
-  const path = writeArtifact(results, 'retention')
-  if (path !== undefined) process.stdout.write(`wrote ${path}\n`)
-
-  for (const result of results) {
-    expect
-      .soft(result.ok, `${result.scenario}: ${result.notes.join('; ') || 'invalid run'}`)
-      .toBe(true)
-  }
-})
+registerSuite('retention', 'retention', selectedScenarios)

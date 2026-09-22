@@ -309,10 +309,6 @@ function collectColumns(results: BenchmarkResult[], key: 'params' | 'metrics'): 
   return columns
 }
 
-function isNumeric(results: BenchmarkResult[], key: 'params' | 'metrics', column: string): boolean {
-  return results.every((result) => typeof result[key][column] === 'number')
-}
-
 /** A column is numeric when it has at least one value and every present value is a number. */
 function isNumericColumn(
   results: BenchmarkResult[],
@@ -372,51 +368,6 @@ function renderTerminalTable(
     widths.map((width) => '-'.repeat(width)).join('  '),
     ...rows.map((row) => formatRow(row)),
   ].join('\n')
-}
-
-function renderGroup(suite: string, results: BenchmarkResult[]): string {
-  const params = collectColumns(results, 'params')
-  const metrics = collectColumns(results, 'metrics')
-  const hasNotes = results.some((result) => result.notes.length > 0)
-  const headers = ['scenario', ...params, ...metrics, ...(hasNotes ? ['notes'] : [])]
-  const alignment = [
-    '---',
-    ...params.map((column) => (isNumeric(results, 'params', column) ? '---:' : '---')),
-    ...metrics.map((column) => (isNumeric(results, 'metrics', column) ? '---:' : '---')),
-    ...(hasNotes ? ['---'] : []),
-  ]
-  const rows = results.map((result) => {
-    const cells = [
-      result.scenario,
-      ...params.map((column) => formatValue(result.params[column] ?? '')),
-      ...metrics.map((column) => formatValue(result.metrics[column] ?? '')),
-      ...(hasNotes ? [result.notes.join('; ').replaceAll('|', '\\|')] : []),
-    ]
-
-    return `| ${cells.join(' | ')} |`
-  })
-
-  return [
-    `### ${suite}`,
-    '',
-    `| ${headers.join(' | ')} |`,
-    `| ${alignment.join(' | ')} |`,
-    ...rows,
-  ].join('\n')
-}
-
-export function renderMarkdown(results: BenchmarkResult[]): string {
-  const suites = new Map<string, BenchmarkResult[]>()
-  for (const result of results) {
-    const group = suites.get(result.suite)
-    if (group === undefined) suites.set(result.suite, [result])
-    else group.push(result)
-  }
-
-  const sections: string[] = []
-  for (const [suite, group] of suites) sections.push(renderGroup(suite, group))
-
-  return sections.join('\n\n')
 }
 
 /** Which metrics best describe each suite, so the compact summary stays narrow. */

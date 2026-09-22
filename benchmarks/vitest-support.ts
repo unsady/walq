@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs'
 
-import type { Bench, BenchResult } from 'vitest'
+import { expect, test, type Bench, type BenchResult } from 'vitest'
 
 import { artifactPath, readBenchEnvironment, type BenchEnvironment } from './bench-options.js'
 import {
@@ -78,6 +78,31 @@ function summarySettings(
   if (environment.only !== undefined) settings.only = environment.only
 
   return settings
+}
+
+/** Register a suite with the same reporting and validity checks as the other benchmarks. */
+export function registerSuite(
+  suite: string,
+  label: string,
+  definitions: () => ScenarioDefinition[],
+): void {
+  // The provider guards each run; this timeout only bounds a broken suite.
+  test(`${label} scenarios`, { timeout: 60 * 60_000 }, async ({ bench, skip }) => {
+    const selected = definitions()
+    if (selected.length === 0)
+      skip(`no ${label} scenario matches BENCH_ONLY=${process.env.BENCH_ONLY ?? ''}`)
+
+    const environment = readBenchEnvironment(process.env)
+    const results = await executeDefinitions(bench, selected, `${label} (${environment.grid})`)
+    const path = writeArtifact(results, suite)
+    if (path !== undefined) process.stdout.write(`wrote ${path}\n`)
+
+    for (const result of results) {
+      expect
+        .soft(result.ok, `${result.scenario}: ${result.notes.join('; ') || 'invalid run'}`)
+        .toBe(true)
+    }
+  })
 }
 
 /** Persist the domain results of one suite when `BENCH_JSON` is set. */
