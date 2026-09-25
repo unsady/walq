@@ -8,6 +8,7 @@ import type {
   Processor,
   QueueOptions,
   RetentionStatus,
+  RetryBackoff,
   WorkerHandle,
 } from './types.js'
 import { QueueWorker } from './worker.js'
@@ -44,6 +45,31 @@ function retentionMaxAge(value: number | null | undefined, name: string): number
   return value
 }
 
+function normalizeRetry(value: QueueOptions['retry']): RetryBackoff | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('retry must be an object')
+  }
+
+  const backoff = value.backoff
+  if (typeof backoff !== 'object' || backoff === null || Array.isArray(backoff)) {
+    throw new TypeError('retry.backoff must be an object')
+  }
+  if (backoff.type !== 'fixed' && backoff.type !== 'exponential') {
+    throw new TypeError('retry.backoff.type must be fixed or exponential')
+  }
+  if (!Number.isSafeInteger(backoff.delay) || backoff.delay < 0) {
+    throw new TypeError('retry.backoff.delay must be a nonnegative safe integer')
+  }
+
+  const jitter = backoff.jitter === undefined ? 0 : backoff.jitter
+  if (typeof jitter !== 'number' || !Number.isFinite(jitter) || jitter < 0 || jitter > 1) {
+    throw new TypeError('retry.backoff.jitter must be a number between 0 and 1')
+  }
+
+  return { type: backoff.type, delay: backoff.delay, jitter }
+}
+
 /** Normalize the public shorthand and rule object into the strict core shape. */
 function normalizeRetention(
   value: RetentionStatus | undefined,
@@ -68,6 +94,7 @@ export class Queue<Data> {
   readonly #name: string
   readonly #storage: Storage
   readonly #attempts: number
+  readonly #retryBackoff: RetryBackoff | undefined
   readonly #onError: ProcessErrorHandler | undefined
   readonly #retention: RetentionPolicy
   #worker: QueueWorker<Data> | undefined
@@ -79,6 +106,7 @@ export class Queue<Data> {
 
     const attempts = options.attempts ?? 1
     positiveInteger(attempts, 'attempts')
+    const retryBackoff = normalizeRetry(options.retry)
 
     const onError = options.onError
     if (onError !== undefined && typeof onError !== 'function') {
@@ -96,6 +124,7 @@ export class Queue<Data> {
     this.#name = name
     this.#storage = options.storage
     this.#attempts = attempts
+    this.#retryBackoff = retryBackoff
     this.#onError = onError
     this.#retention = {
       completed: normalizeRetention(
@@ -135,6 +164,7 @@ export class Queue<Data> {
     const coordinator = getCoordinator(this.#storage)
     const worker = new QueueWorker(coordinator, this.#name, processor, {
       concurrency,
+      retryBackoff: this.#retryBackoff,
       onError: this.#onError,
       retention: this.#retention,
     })

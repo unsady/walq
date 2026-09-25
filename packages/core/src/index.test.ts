@@ -243,6 +243,132 @@ describe('Queue', () => {
     })
   })
 
+  it('applies fixed retry backoff with positive-only jitter', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const random = vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.999)
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('minimum'), claimedJob('jittered'))
+    const queue = new Queue('email', {
+      storage,
+      attempts: 3,
+      retry: { backoff: { type: 'fixed', delay: 1_000, jitter: 0.2 } },
+      onError: () => {},
+    })
+    const worker = queue.process(
+      async () => {
+        throw new Error('send failed')
+      },
+      { concurrency: 2 },
+    )
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(2))
+    await worker.close()
+
+    expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
+      { id: 'minimum', retryAt: now + 1_000 },
+      { id: 'jittered', retryAt: now + 1_200 },
+    ])
+    expect(random).toHaveBeenCalledTimes(2)
+  })
+
+  it('doubles exponential retry delay after each failed attempt', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const random = vi.spyOn(Math, 'random')
+    const storage = new TestStorage()
+    storage.jobs.push(
+      { ...claimedJob('first'), attemptsMade: 1, attempts: 3 },
+      { ...claimedJob('second'), attemptsMade: 2, attempts: 3 },
+    )
+    const queue = new Queue('email', {
+      storage,
+      retry: { backoff: { type: 'exponential', delay: 250 } },
+      onError: () => {},
+    })
+    const worker = queue.process(
+      async () => {
+        throw new Error('send failed')
+      },
+      { concurrency: 2 },
+    )
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(2))
+    await worker.close()
+
+    expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
+      { id: 'first', retryAt: now + 250 },
+      { id: 'second', retryAt: now + 500 },
+    ])
+    expect(random).not.toHaveBeenCalled()
+  })
+
+  it('caps overflowing retry timestamps and does not back off exhausted attempts', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const nearLimit = Number.MAX_SAFE_INTEGER - 3
+    vi.spyOn(Date, 'now').mockReturnValue(nearLimit)
+    const random = vi.spyOn(Math, 'random')
+    const storage = new TestStorage()
+    storage.jobs.push(
+      { ...claimedJob('overflow'), attemptsMade: 2, attempts: 3 },
+      { ...claimedJob('exhausted'), attemptsMade: 3, attempts: 3 },
+    )
+    const queue = new Queue('email', {
+      storage,
+      retry: { backoff: { type: 'exponential', delay: 10, jitter: 0.5 } },
+      onError: () => {},
+    })
+    const worker = queue.process(
+      async () => {
+        throw new Error('send failed')
+      },
+      { concurrency: 2 },
+    )
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(2))
+    await worker.close()
+
+    expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
+      { id: 'overflow', retryAt: Number.MAX_SAFE_INTEGER },
+      { id: 'exhausted', retryAt: nearLimit },
+    ])
+    expect(random).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    null,
+    'invalid',
+    [],
+    {},
+    { backoff: null },
+    { backoff: [] },
+    { backoff: {} },
+    { backoff: { type: 'linear', delay: 1 } },
+    { backoff: { type: 'fixed', delay: -1 } },
+    { backoff: { type: 'fixed', delay: 1.5 } },
+    { backoff: { type: 'fixed', delay: Number.POSITIVE_INFINITY } },
+    { backoff: { type: 'fixed', delay: Number.MAX_SAFE_INTEGER + 1 } },
+    { backoff: { type: 'fixed', delay: 1, jitter: Number.NaN } },
+    { backoff: { type: 'fixed', delay: 1, jitter: null } },
+    { backoff: { type: 'fixed', delay: 1, jitter: '0.2' } },
+    { backoff: { type: 'fixed', delay: 1, jitter: -0.01 } },
+    { backoff: { type: 'fixed', delay: 1, jitter: 1.01 } },
+  ])('rejects invalid retry configuration %j', (retry) => {
+    const storage = new TestStorage()
+
+    expect(() => new Queue('email', { storage, retry: retry as never })).toThrow('retry')
+  })
+
+  it('accepts zero delay and jitter boundary values', () => {
+    const storage = new TestStorage()
+
+    expect(
+      () =>
+        new Queue('email', {
+          storage,
+          retry: { backoff: { type: 'fixed', delay: 0, jitter: 1 } },
+        }),
+    ).not.toThrow()
+  })
+
   it('polls immediately and then once per second while empty', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)

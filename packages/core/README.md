@@ -29,7 +29,7 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 
 ## API
 
-- `new Queue(name, { storage, attempts?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
+- `new Queue(name, { storage, attempts?, retry?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
 - `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Each status is a count, `null` to keep every job of that status, or a rule object `{ count?, maxAge? }` where `maxAge` is milliseconds. Omitted statuses default to `completed: 0` and `failed: 100`.
 - `queue.add(data)` serializes the data and enqueues a job.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
@@ -38,9 +38,23 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 
 Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single call, split into a few transactions when the sweep covers many queues. A separate `Storage` instance has its own coordinator. One queue name can be processed by only one worker per `Storage`; registering a second worker for the same name is rejected.
 
-The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain.
+The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain unless a retry backoff is configured. Expired-lease recovery remains immediate.
 
 Handlers run concurrently as asynchronous tasks in the current Node.js process. They are not worker threads. The context signal aborts when the job loses its lease, but handlers must stop cooperatively. Delivery is at-least-once, so handlers must tolerate repeated execution.
+
+## Retry backoff
+
+`attempts` includes the initial execution. By default, handler failures retry immediately while attempts remain. Configure `retry.backoff` to delay retries:
+
+```ts
+const queue = new Queue('email', {
+  storage,
+  attempts: 5,
+  retry: { backoff: { type: 'exponential', delay: 1_000, jitter: 0.2 } },
+})
+```
+
+`type` is `fixed` or `exponential`. `delay` is a nonnegative safe-integer number of milliseconds; exponential backoff starts at `delay` after the first failed attempt and doubles for each later retry. `jitter` defaults to `0` and must be between 0 and 1. It adds positive-only randomness, so the actual delay is the base backoff multiplied by `1 + random(0, jitter)` and is never shorter than the base. Fractional milliseconds are rounded up; timestamp overflow is capped at the largest safe integer. Backoff applies to handler failures only; retries after expired-lease recovery remain immediate. Exhausted attempts are recorded as failures without scheduling another retry.
 
 ## Retention
 

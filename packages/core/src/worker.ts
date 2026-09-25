@@ -2,7 +2,7 @@ import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/stor
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
 import { deferred, delay, type Delay } from './delay.js'
-import type { ProcessErrorContext, ProcessErrorHandler, Processor } from './types.js'
+import type { ProcessErrorContext, ProcessErrorHandler, Processor, RetryBackoff } from './types.js'
 
 const leaseDuration = 30_000
 const heartbeatInterval = 10_000
@@ -11,8 +11,30 @@ const cleanupBatch = 500
 
 export interface WorkerOptions {
   concurrency: number
+  retryBackoff: RetryBackoff | undefined
   retention: RetentionPolicy
   onError: ProcessErrorHandler | undefined
+}
+
+function retryAt(now: number, attemptsMade: number, backoff: RetryBackoff | undefined): number {
+  if (backoff === undefined) return now
+
+  const baseBackoff =
+    backoff.type === 'fixed'
+      ? backoff.delay
+      : backoff.delay === 0
+        ? 0
+        : backoff.delay * 2 ** (attemptsMade - 1)
+  const maxRetryAt = Number.MAX_SAFE_INTEGER
+  const maxDelay = maxRetryAt - now
+  // Storage timestamps must remain safe integers, so saturate extreme backoffs.
+  if (baseBackoff >= maxDelay) return maxRetryAt
+
+  const jitter = backoff.jitter ?? 0
+  const jitteredDelay =
+    jitter === 0 || baseBackoff === 0 ? baseBackoff : baseBackoff * (1 + Math.random() * jitter)
+
+  return Math.min(maxRetryAt, now + Math.ceil(jitteredDelay))
 }
 
 function errorMessage(error: unknown): string {
@@ -56,6 +78,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #queue: string
   readonly #processor: Processor<Data>
   readonly #concurrency: number
+  readonly #retryBackoff: RetryBackoff | undefined
   readonly #onError: ProcessErrorHandler | undefined
   readonly #retention: RetentionPolicy
   readonly #cleanupEnabled: boolean
@@ -78,6 +101,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     this.#queue = queue
     this.#processor = processor
     this.#concurrency = options.concurrency
+    this.#retryBackoff = options.retryBackoff
     this.#onError = options.onError
     this.#retention = options.retention
     this.#cleanupEnabled = (['completed', 'failed'] as const).some((status) => {
@@ -223,12 +247,14 @@ export class QueueWorker<Data> implements CoordinatedWorker {
         if ((await this.#coordinator.complete(context)) === 'applied') this.#scheduleCleanup()
       } else {
         const now = Date.now()
+        const retryTimestamp =
+          job.attemptsMade < job.attempts ? retryAt(now, job.attemptsMade, this.#retryBackoff) : now
         const result = await this.#coordinator.fail({
           id: job.id,
           leaseToken: job.leaseToken,
           now,
           error: errorMessage(failure),
-          retryAt: now,
+          retryAt: retryTimestamp,
         })
         // The adapter schedules a retry while attempts remain, so only an
         // exhausted attempt budget produces a terminal row.

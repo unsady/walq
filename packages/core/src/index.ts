@@ -14,5 +14,7 @@ export type {
   QueueOptions,
   RetentionOptions,
   RetentionStatus,
+  RetryBackoff,
+  RetryOptions,
   WorkerHandle,
 } from './types.js'
