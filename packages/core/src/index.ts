@@ -1,5 +1,6 @@
 export { Queue } from './queue.js'
 export type {
+  AddOptions,
   AddedJob,
   ClaimErrorContext,
   CleanupErrorContext,

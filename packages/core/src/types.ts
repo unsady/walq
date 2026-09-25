@@ -69,6 +69,14 @@ export interface ProcessOptions {
   concurrency?: number
 }
 
+/** Scheduling options for `queue.add()`; `delay` and `runAt` are mutually exclusive. */
+export interface AddOptions {
+  /** Relative delay in nonnegative safe-integer milliseconds. */
+  delay?: number
+  /** Absolute Unix timestamp in nonnegative safe-integer milliseconds. */
+  runAt?: number
+}
+
 export interface AddedJob {
   id: string
 }

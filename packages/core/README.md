@@ -31,7 +31,7 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 
 - `new Queue(name, { storage, attempts?, retry?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
 - `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Each status is a count, `null` to keep every job of that status, or a rule object `{ count?, maxAge? }` where `maxAge` is milliseconds. Omitted statuses default to `completed: 0` and `failed: 100`.
-- `queue.add(data)` serializes the data and enqueues a job.
+- `queue.add(data, options?)` serializes the data and enqueues a job. `AddOptions` supports either `delay` or `runAt`; omitted options make the job available immediately.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
@@ -39,6 +39,17 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single call, split into a few transactions when the sweep covers many queues. A separate `Storage` instance has its own coordinator. One queue name can be processed by only one worker per `Storage`; registering a second worker for the same name is rejected.
 
 The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain unless a retry backoff is configured. Expired-lease recovery remains immediate.
+
+## Delayed jobs
+
+Pass `delay` in nonnegative safe-integer milliseconds or `runAt` as a nonnegative safe-integer Unix timestamp in milliseconds:
+
+```ts
+await queue.add({ name: 'Ada' }, { delay: 5_000 })
+await queue.add({ name: 'Grace' }, { runAt: Date.now() + 60_000 })
+```
+
+Only one option may be supplied. A past `runAt` is valid and is immediately eligible; without either option, jobs are available immediately. The resulting `availableAt` must be a safe integer, so a delay that overflows the timestamp range is rejected.
 
 Handlers run concurrently as asynchronous tasks in the current Node.js process. They are not worker threads. The context signal aborts when the job loses its lease, but handlers must stop cooperatively. Delivery is at-least-once, so handlers must tolerate repeated execution.
 

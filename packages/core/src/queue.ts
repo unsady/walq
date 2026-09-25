@@ -2,6 +2,7 @@ import type { RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage
 
 import { getCoordinator } from './coordinator.js'
 import type {
+  AddOptions,
   AddedJob,
   ProcessErrorHandler,
   ProcessOptions,
@@ -19,6 +20,29 @@ const defaultFailedRetention = 100
 function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`${name} must be a positive safe integer`)
+  }
+}
+
+function normalizeAddOptions(value: AddOptions | undefined): AddOptions {
+  if (value === undefined) return {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('add options must be an object')
+  }
+
+  const { delay, runAt } = value
+  if (delay !== undefined && runAt !== undefined) {
+    throw new TypeError('delay and runAt cannot be used together')
+  }
+  if (delay !== undefined && (!Number.isSafeInteger(delay) || delay < 0)) {
+    throw new TypeError('delay must be a nonnegative safe integer')
+  }
+  if (runAt !== undefined && (!Number.isSafeInteger(runAt) || runAt < 0)) {
+    throw new TypeError('runAt must be a nonnegative safe integer')
+  }
+
+  return {
+    ...(delay !== undefined ? { delay } : {}),
+    ...(runAt !== undefined ? { runAt } : {}),
   }
 }
 
@@ -136,18 +160,25 @@ export class Queue<Data> {
     }
   }
 
-  async add(data: Data): Promise<AddedJob> {
+  async add(data: Data, options?: AddOptions): Promise<AddedJob> {
+    const { delay, runAt } = normalizeAddOptions(options)
+
     const serialized = JSON.stringify(data)
     if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
     const now = Date.now()
+    const availableAt = runAt ?? (delay === undefined ? now : now + delay)
+    if (!Number.isSafeInteger(availableAt)) {
+      throw new TypeError('availableAt must be a safe integer')
+    }
+
     const coordinator = getCoordinator(this.#storage)
     const job = await coordinator.enqueue({
       queue: this.#name,
       name: this.#name,
       data: serialized,
       now,
-      availableAt: now,
+      availableAt,
       attempts: this.#attempts,
     })
     coordinator.wakeQueue(this.#name)

@@ -177,6 +177,76 @@ describe('Queue', () => {
     ])
   })
 
+  it('sets availability from a delay or absolute run time', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(10_000)
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await queue.add({}, { delay: 0 })
+    await queue.add({}, { delay: 25 })
+    await queue.add({}, { runAt: 0 })
+    await queue.add({}, { runAt: 9_000 })
+
+    expect(storage.enqueues.map(({ now, availableAt }) => ({ now, availableAt }))).toEqual([
+      { now: 10_000, availableAt: 10_000 },
+      { now: 10_000, availableAt: 10_025 },
+      { now: 10_000, availableAt: 0 },
+      { now: 10_000, availableAt: 9_000 },
+    ])
+  })
+
+  it('accepts safe-integer availability boundaries', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(0)
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await queue.add({}, { delay: Number.MAX_SAFE_INTEGER })
+    await queue.add({}, { runAt: Number.MAX_SAFE_INTEGER })
+
+    expect(storage.enqueues.map(({ availableAt }) => availableAt)).toEqual([
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+    ])
+  })
+
+  it('rejects invalid scheduling options before calling storage', async () => {
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+    const invalidOptions = [
+      null,
+      [],
+      1,
+      { delay: -1 },
+      { delay: 1.5 },
+      { delay: NaN },
+      { delay: Infinity },
+      { delay: Number.MAX_SAFE_INTEGER + 1 },
+      { delay: '1' },
+      { runAt: -1 },
+      { runAt: 1.5 },
+      { runAt: NaN },
+      { runAt: Infinity },
+      { runAt: Number.MAX_SAFE_INTEGER + 1 },
+      { runAt: '1' },
+      { delay: 0, runAt: 0 },
+    ]
+
+    for (const options of invalidOptions) {
+      await expect(queue.add({}, options as never)).rejects.toThrow(TypeError)
+    }
+
+    expect(storage.enqueues).toHaveLength(0)
+  })
+
+  it('rejects a delay whose computed availability overflows', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER)
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await expect(queue.add({}, { delay: 1 })).rejects.toThrow('availableAt')
+    expect(storage.enqueues).toHaveLength(0)
+  })
+
   it('uses queue-level attempts and rejects invalid configuration or data', async () => {
     const storage = new TestStorage()
     const queue = new Queue<unknown>('email', { storage, attempts: 3 })
