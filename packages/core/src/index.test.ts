@@ -435,7 +435,7 @@ describe('Queue', () => {
     })
   })
 
-  it('applies fixed retry backoff with positive-only jitter', async () => {
+  it('applies downward jitter to fixed retry backoff', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const random = vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.999)
     const storage = new TestStorage()
@@ -458,9 +458,36 @@ describe('Queue', () => {
 
     expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
       { id: 'minimum', retryAt: now + 1_000 },
-      { id: 'jittered', retryAt: now + 1_200 },
+      { id: 'jittered', retryAt: now + 801 },
     ])
     expect(random).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses full jitter over the base backoff when jitter is one', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.9999)
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('base'), claimedJob('minimum'))
+    const queue = new Queue('email', {
+      storage,
+      attempts: 3,
+      retry: { backoff: { type: 'fixed', delay: 1_000, jitter: 1 } },
+      onError: () => {},
+    })
+    const worker = queue.process(
+      async () => {
+        throw new Error('send failed')
+      },
+      { concurrency: 2 },
+    )
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(2))
+    await worker.close()
+
+    expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
+      { id: 'base', retryAt: now + 1_000 },
+      { id: 'minimum', retryAt: now + 1 },
+    ])
   })
 
   it('doubles exponential retry delay after each failed attempt', async () => {

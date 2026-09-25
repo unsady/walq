@@ -32,7 +32,7 @@ function retryAt(now: number, attemptsMade: number, backoff: RetryBackoff | unde
 
   const jitter = backoff.jitter ?? 0
   const jitteredDelay =
-    jitter === 0 || baseBackoff === 0 ? baseBackoff : baseBackoff * (1 + Math.random() * jitter)
+    jitter === 0 || baseBackoff === 0 ? baseBackoff : baseBackoff * (1 - Math.random() * jitter)
 
   return Math.min(maxRetryAt, now + Math.ceil(jitteredDelay))
 }

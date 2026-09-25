@@ -26,14 +26,14 @@ export type RetryBackoff =
       type: 'fixed'
       /** Base delay in milliseconds. */
       delay: number
-      /** Positive-only jitter fraction from 0 to 1; defaults to 0. */
+      /** Downward jitter fraction from 0 to 1; defaults to 0. */
       jitter?: number
     }
   | {
       type: 'exponential'
       /** Initial delay in milliseconds, doubled after each failed attempt. */
       delay: number
-      /** Positive-only jitter fraction from 0 to 1; defaults to 0. */
+      /** Downward jitter fraction from 0 to 1; defaults to 0. */
       jitter?: number
     }
 

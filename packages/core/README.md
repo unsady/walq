@@ -71,7 +71,7 @@ const queue = new Queue('email', {
 })
 ```
 
-`type` is `fixed` or `exponential`. `delay` is a nonnegative safe-integer number of milliseconds; exponential backoff starts at `delay` after the first failed attempt and doubles for each later retry. `jitter` defaults to `0` and must be between 0 and 1. It adds positive-only randomness, so the actual delay is the base backoff multiplied by `1 + random(0, jitter)` and is never shorter than the base. Fractional milliseconds are rounded up; timestamp overflow is capped at the largest safe integer. Backoff applies to handler failures only; retries after expired-lease recovery remain immediate. Exhausted attempts are recorded as failures without scheduling another retry.
+`type` is `fixed` or `exponential`. `delay` is a nonnegative safe-integer number of milliseconds; exponential backoff starts at `delay` after the first failed attempt and doubles for each later retry. `jitter` defaults to `0` and must be between 0 and 1. It reduces the base backoff by a random fraction, so the actual delay is the base backoff multiplied by `1 - random(0, jitter)`. A jitter of `0` leaves the base unchanged; a jitter of `1` provides full jitter from zero up to the base. Fractional milliseconds are rounded up; timestamp overflow is capped at the largest safe integer. Backoff applies to handler failures only; retries after expired-lease recovery remain immediate. Exhausted attempts are recorded as failures without scheduling another retry.
 
 ## Retention
 
