@@ -1,228 +1,141 @@
 # Storage contract
 
-`packages/core/src/storage.ts` defines the adapter boundary. Its interface and
-related types are exported from `@walq/core/storage`, separately from the main
-package entry point. All operations are asynchronous so local SQLite and remote
-adapters can implement the same contract.
+`packages/core/src/storage.ts` defines the async adapter boundary, exported from
+`@walq/core/storage` (not the main entry point). It lets local SQLite and remote
+adapters implement the same contract.
 
-## Scope and guarantees
+## Scope and shared rules
 
 - Delivery is at-least-once, subject to the attempt limit. Execution and external
-  side effects are not exactly-once.
-- A job has at most one current lease. Concurrent claims must not issue two live
-  leases for the same job.
-- A worker can continue executing after its lease expires. Tokens protect queue
-  state, not external effects; handlers should tolerate repeated execution.
-- Successful mutations are persisted before the operation resolves. Database or
-  transport failures reject the promise; they are not `lease_lost` results.
-- A transport error may leave the caller uncertain whether a mutation committed.
-  In particular, retrying enqueue can create another job: idempotent enqueue is
-  not provided.
-
-The contract does not include connections, migrations, polling, retry policies,
-cancellation, events, or a public Queue API. `claimQueues` is an optional adapter
-capability; see [Grouped claim](#grouped-claim) and [Cleanup](#cleanup).
-
-## Values and inputs
-
-- All timestamps are finite, nonnegative safe-integer Unix milliseconds. Durations
-  are positive safe-integer milliseconds; computed expiry must also be safe.
-- Callers provide `now`. Each operation uses that value consistently. Distributed
-  callers must use sufficiently synchronized clocks; storage does not establish
-  a shared clock or substitute its own time.
-- `limit` and `attempts` are positive safe integers. Each retention bound is
-  `null` or a nonnegative safe integer; `maxAge` is measured in milliseconds.
-- Queue and job names are nonempty strings. Queue names are matched exactly.
-- Data is a serialized JSON value. Serialization belongs above storage.
+  side effects are not exactly-once. A worker may continue after lease expiry;
+  tokens protect queue state, not external effects, so handlers should tolerate
+  repeated execution.
+- A job has at most one live lease. Claims and lease mutations must coordinate
+  atomically to prevent conflicting state changes.
+- Successful mutations are persisted before resolving. Database/transport errors
+  reject; they are not `lease_lost`. A transport error can leave commit status
+  uncertain. Retrying `enqueue` may create duplicates; enqueue is not idempotent.
+- All timestamps are finite, nonnegative safe-integer Unix milliseconds;
+  durations are positive safe-integer milliseconds, and computed expiries must
+  remain safe. Callers supply `now`, used consistently per operation. Storage
+  does not establish a shared clock; distributed callers need synchronized clocks.
+- `limit` and `attempts` are positive safe integers. Retention bounds are `null`
+  or nonnegative safe integers (`maxAge` in milliseconds). Queue and job names
+  are nonempty strings; queue matching is exact. Data is serialized JSON, with
+  serialization handled above storage.
 - IDs and lease tokens are opaque strings. Storage generates unique job IDs and
-  a fresh token for every successful claim; a job's token must never be reused.
-- Adapters must reject invalid inputs without mutation. Error classes and
-  messages are not standardized yet.
+  a fresh, never-reused token for every successful claim. Invalid inputs must be
+  rejected without mutation; error classes and messages are unspecified.
+- `StoredJob` is a metadata snapshot; `ClaimedJob` also contains lease
+  credentials. Arbitrary-job queries are not provided.
 
-`StoredJob` is a snapshot of job metadata. `ClaimedJob` additionally carries the
-lease credentials. No method is provided for querying arbitrary jobs yet.
+The contract excludes connections, migrations, polling, retry policies,
+cancellation, events, and a public Queue API. `claimQueues` is optional; see
+[Grouped claim](#grouped-claim).
 
 ## Enqueue
 
-`enqueue` creates and returns a job with:
+`enqueue` creates an independent job and returns its `StoredJob`: generated ID;
+provided queue, name, data, `availableAt`, and `attempts`; plus `createdAt = now`,
+`status = pending`, `attemptsMade = 0`, and `error = null`. Past `availableAt` is
+valid. Matching names or data do not deduplicate.
 
-- a generated ID;
-- the supplied queue, name, data, availableAt, and attempts;
-- `createdAt = now`, `status = pending`, `attemptsMade = 0`, and `error = null`.
-
-An availableAt in the past is valid. Every call creates an independent job;
-matching names or data do not cause deduplication.
-
-`enqueueMany(inputs)` applies the same rules to every input and returns one
-`StoredJob` per input, in input order. An empty array returns an empty array.
-The adapter validates the complete batch before mutation, then commits all
-inserts atomically: the operation inserts all jobs or none. As with other
-mutations, a transport error may leave the caller uncertain whether the whole
-batch committed. The adapter must not resolve before commit or run inside a
-caller-managed transaction. Each input creates an independent job; batch
-insertion does not deduplicate.
+`enqueueMany(inputs)` applies the same rules in input order. Empty input returns
+`[]`. Validate the entire batch before mutation and commit all inserts atomically
+(all or none). It must not resolve before commit or run inside a caller-managed
+transaction. Each input is independent. As with any mutation, a transport error
+may leave the caller unsure whether the batch committed.
 
 ## Claim and expiration
 
-`claim` operates only on its specified queue:
+`claim` only considers its specified queue. It recovers all expired active jobs
+(`expiresAt <= now`), even if the claim limit is reached or no job is returned:
+with attempts remaining, make them pending at the old `expiresAt` for immediate
+retry; otherwise mark them failed. Invalidate the old lease either way and
+preserve the last handler error. Recovery must conditionally verify the current
+lease so it cannot overwrite a concurrent heartbeat or completion. State changes
+occur on a subsequent claim, not automatically as time passes.
 
-1. Recover active jobs whose `expiresAt <= now`. With attempts remaining, they
-   become eligible for immediate retry, without backoff. Set `availableAt` to
-   the expired lease's expiry. With no attempts remaining, mark them failed.
-   Invalidate the old lease in either case. Preserve the last handler error.
-2. Select pending jobs with `availableAt <= now` and
-   `attemptsMade < attempts`, ordered by availableAt ascending, then ID ascending
-   using binary string order as a stable tie-breaker.
-3. For each selected job, atomically change status to active, increment attemptsMade
-   by one, and issue a fresh token with `expiresAt = now + leaseDuration`.
-4. Return the claimed snapshots in selection order, containing the incremented
-   attemptsMade and lease credentials.
+Then select pending jobs with `availableAt <= now` and `attemptsMade < attempts`,
+ordered by `availableAt` ascending, then ID ascending in binary string order.
+Atomically make each selected job active, increment `attemptsMade`, and assign a
+fresh token with `expiresAt = now + leaseDuration`. Return at most `limit`
+snapshots in selection order, with the incremented count and lease credentials.
+An empty or smaller-than-requested batch is valid; strict global FIFO across
+workers is not guaranteed. Eligibility and acquisition must be atomic against
+other claims and lease mutations. Individual claims must be atomic, but the whole
+batch need not be one transaction.
 
-Return at most limit jobs; an empty result is valid. Concurrent callers may
-receive smaller batches. Strict global FIFO across workers is not guaranteed.
-Eligibility checks and acquisition must be atomic with respect to other claims
-and lease mutations. Recovery must likewise conditionally check the current
-lease so it cannot overwrite a concurrent heartbeat or completion. The entire
-batch need not be one transaction; individual job claims must be atomic.
-
-Recovery also applies to expired jobs with exhausted attempts, even when no job
-can be returned. The limit bounds claims, not expiration recovery. State changes
-happen on a subsequent claim for that queue, not automatically as time passes.
-
-An attempt counts assignment, not handler invocation:
-
-```text
-enqueue         attemptsMade = 0
-claim           attemptsMade = 1
-lease expires   attemptsMade = 1
-claim again     attemptsMade = 2
-fail + retry    attemptsMade = 2
-```
-
-A crash before the handler starts still consumes an attempt. `attempts = 1`
-permits no retry, including recovery after a worker crash.
+An attempt counts assignment, not handler invocation: enqueue starts at 0, each
+claim increments it, and neither expiration nor `fail` increments it. A crash
+before handler start consumes an attempt; `attempts = 1` allows no retry, including
+after a crash.
 
 ## Grouped claim
 
-`claimQueues` is an optional adapter capability for callers that need to claim
-from several queues at once. It accepts `{ requests: ClaimInput[] }` and returns
-`ClaimedJob[][]`, where `results[k]` belongs to `requests[k]`.
-
-- Each request has exactly the semantics of a standalone `claim`, including
-  recovery, ordering, limit, and fresh lease tokens.
-- Requests are applied in array order. Two requests for the same queue observe
-  each other, so the second sees only work the first left behind and no job is
-  claimed twice.
-- An empty `requests` array is valid and returns an empty result without
-  touching storage.
-- An adapter may run the whole batch in one transaction. When it does, an error
-  in any request rolls back the whole batch; when it does not, requests may
-  commit independently. Callers must not depend on cross-request atomicity.
-- Invalid requests are rejected without mutation. Adapters should validate the
-  whole batch before opening a transaction.
-- Absence of this method is not an error: a caller that needs grouped claims
-  must fall back to one `claim` call per request.
+`claimQueues({ requests })` is optional and returns `ClaimedJob[][]`, with
+`results[k]` corresponding to `requests[k]`. Each request has standalone `claim`
+semantics. Requests run in array order, so repeated queues see earlier requests'
+changes and cannot claim a job twice. Empty input returns `[]` without touching
+storage. Validate all requests before mutation (and before opening a transaction).
+An adapter may transact the whole batch, rolling all requests back on error, or
+commit requests independently; callers must not rely on cross-request atomicity.
+If unsupported, callers needing grouped claims must call `claim` per request.
 
 ## Lease mutations
 
-`complete`, `fail`, and `heartbeat` atomically require all of:
+`complete`, `fail`, and `heartbeat` atomically require that the job exists, is
+active, has the supplied current token, and has `expiresAt > now`. Otherwise
+return `lease_lost` without mutation—including for an expired but unrecovered
+lease or repeated completion. On success return `applied`.
 
-- the job exists and is active;
-- the supplied token matches its current lease;
-- its current `expiresAt > now`.
-
-If any condition fails, return `lease_lost` without changing anything. This
-includes an expired lease that has not yet been recovered and a repeated
-completion call. Otherwise apply the mutation and return `applied`.
-
-### Complete
-
-Set status to completed and invalidate the lease. Preserve attemptsMade and the last
-handler error, if any. Results returned by handlers are not stored in this version.
-
-### Fail
-
-Record the supplied error without incrementing attemptsMade:
-
-- If retryAt is non-null and attemptsMade is less than attempts, set status to
-  pending and availableAt to retryAt.
-- Otherwise set status to failed. The attempt limit overrides a retry request.
-
-Invalidate the lease in either case. A retryAt at or before now is valid and
-allows immediate retry. Computing backoff and deciding whether an error is
-retryable belong above storage. `applied` means the failure was recorded, not
-necessarily that a retry was scheduled.
-
-### Heartbeat
-
-Set expiry to `max(current expiresAt, now + leaseDuration)`. Keep the same token,
-status, attemptsMade, and other job metadata. Heartbeat never shortens a lease and
-cannot revive an expired one.
+- **Complete:** mark completed and invalidate the lease; preserve `attemptsMade`
+  and the last handler error. Handler results are not stored.
+- **Fail:** record the supplied error without incrementing attempts. If
+  `retryAt != null` and attempts remain, set pending with `availableAt = retryAt`;
+  otherwise mark failed (the attempt limit overrides retry). Invalidate the lease.
+  `retryAt <= now` is valid. Backoff and retryability decisions belong above
+  storage; `applied` means recorded, not necessarily retried.
+- **Heartbeat:** set expiry to `max(current expiresAt, now + leaseDuration)`;
+  retain token and all other metadata. It never shortens or revives a lease.
 
 ## Cleanup
 
-`cleanup` provides bounded terminal-job retention. Every adapter must implement
-it. The method removes only terminal jobs of one queue and never touches pending
-or active rows. The input carries:
+Every adapter implements `cleanup`, which deletes only terminal jobs (completed
+or failed) from one exact queue; pending and active jobs are never touched. Input
+specifies `queue`, `now`, positive `limit`, and independent `count`/`maxAge`
+bounds for each terminal status. `count` keeps the newest N rows (`0` keeps
+none); `maxAge` is a maximum age in milliseconds. Either bound may be `null` to
+disable it. A row is eligible if it is beyond the newest `count` rows **or** has
+`finishedAt < now - maxAge`; bounds combine as a union. The age comparison is
+strict, the cutoff clamps to zero on underflow, and two null bounds keep all rows.
 
-- `queue` — the exact queue name to clean;
-- `retention.completed` and `retention.failed` — one `RetentionRule` per status,
-  each with independent `count` and `maxAge` bounds;
-- `now` — the finite, nonnegative safe-integer time used for the age bound;
-- `limit` — a positive bound on rows deleted by this call.
+Per call, consider only the queue's terminal rows and order each status newest
+first by finish time with a stable tie-breaker. Delete oldest eligible rows first,
+up to `limit` across both statuses, as one atomic mutation. This makes repeated
+bounded calls converge on the retained newest rows. Return `{ removed, more }`;
+`more` indicates another call may find eligible rows and may be true even if none
+remain, so callers repeat until false.
 
-A `count` is the number of newest rows of that status to keep; `0` makes every
-terminal row of the status eligible and `null` disables the bound. A `maxAge` is
-a maximum terminal age in milliseconds and `null` disables that bound. A row is
-eligible when it is older than the newest `count` rows of its status OR finished
-before `now - maxAge`; both bounds are upper limits and their union is the
-eligible set. The comparison is strict: a row with
-`finishedAt === now - maxAge` is retained and only `finishedAt < now - maxAge` is
-removed. If the subtraction would underflow, the cutoff is clamped at zero. When
-both bounds of a status are null, every row of that status is kept.
-
-Within one call the adapter must:
-
-1. Consider only rows of the requested queue with one of the two terminal
-   statuses.
-2. Order each status by the time the job finished, newest first, with a stable
-   tie-breaker.
-3. Delete only rows beyond the eligible frontier of that status. A bounded call
-   deletes from the oldest eligible rows first, so repeated calls converge on the
-   newest retained rows.
-4. Delete at most `limit` rows across both statuses as one atomic mutation.
-
-The result is `{ removed, more }`. `removed` is the number of rows deleted by
-this call. `more` reports that another call may still find eligible rows; it may
-be `true` even when nothing remains, so a caller repeats until it sees `false`.
-
-One call must stay proportional to `limit` and the retention bounds rather than
-to the size of the terminal history, so draining a large backlog remains linear
-in the number of deleted rows.
-
-Cleanup is idempotent and restart-safe: leftover terminal rows are discovered by
-a later call, including after a process crash. It is separate from `complete`
-and `fail`, so successful handler acknowledgement never waits for maintenance.
-Deletion frees pages for reuse but does not necessarily shrink the database
-file; adapters must not run `VACUUM` as part of cleanup.
-
-Callers choose when to run cleanup and how to bound and space batches. The
-contract does not schedule cleanup or delete any rows outside this method.
+Work must be proportional to `limit` and retention bounds, not total history.
+Cleanup is idempotent and restart-safe: later calls discover leftovers after a
+crash. It is separate from `complete`/`fail`, so acknowledgement does not wait for
+maintenance. Deletion frees pages for reuse but need not shrink the database file;
+cleanup must not run `VACUUM`. Callers schedule cleanup and choose batch limits;
+no other method deletes jobs.
 
 ## State transitions
 
-| Operation                                     | From                             | To        |
-| --------------------------------------------- | -------------------------------- | --------- |
-| enqueue or enqueueMany                        | absent                           | pending   |
-| claim                                         | pending, due, attempts remaining | active    |
-| complete                                      | active, live matching lease      | completed |
-| fail with retry and attempts remaining        | active, live matching lease      | pending   |
-| fail without retry or with attempts exhausted | active, live matching lease      | failed    |
-| expiration recovery with attempts remaining   | active, expired                  | pending   |
-| expiration recovery with attempts exhausted   | active, expired                  | failed    |
-| heartbeat                                     | active, live matching lease      | active    |
+| Operation                                   | From                             | To        |
+| ------------------------------------------- | -------------------------------- | --------- |
+| `enqueue`, `enqueueMany`                    | absent                           | pending   |
+| `claim`                                     | pending, due, attempts remaining | active    |
+| `complete`                                  | active, live matching lease      | completed |
+| `fail` with retry and attempts remaining    | active, live matching lease      | pending   |
+| `fail` otherwise                            | active, live matching lease      | failed    |
+| Expiration recovery with attempts remaining | active, expired                  | pending   |
+| Expiration recovery with attempts exhausted | active, expired                  | failed    |
+| `heartbeat`                                 | active, live matching lease      | active    |
 
-Completed and failed jobs are terminal. `enqueue`, `enqueueMany`, `claim`,
-`complete`, `fail`, and `heartbeat` never delete jobs; deletion happens only through
-[cleanup](#cleanup). Adapters record when a job
-became terminal so retention can keep the most recently finished jobs.
+Completed and failed are terminal. All methods except `cleanup` retain jobs;
+adapters record when a job became terminal for retention ordering.
