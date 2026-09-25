@@ -22,6 +22,8 @@ The two public packages are released together with the same version:
 
 ## Publish
 
+Before tagging, add the GitHub release notes to `release-notes/<tag>.md`, for example `release-notes/v0.2.2.md`.
+
 Create and push a version tag matching both manifests:
 
 ```sh
@@ -29,11 +31,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow validates the tag, tests packed artifacts in a clean consumer project, stages both packages through npm Trusted Publishing, and creates a draft GitHub release.
+The workflow validates the tag, tests packed artifacts in a clean consumer project, stages both packages through npm Trusted Publishing, and creates a published GitHub release using the matching notes file.
 
 After the workflow succeeds:
 
 1. Review the staged packages in npm.
 2. Approve `@walq/core` first and `@walq/better-sqlite3` second, confirming each action with 2FA.
-3. Publish the draft GitHub release.
-4. Install both packages by exact version in a separate project and run the README example against a file-backed database.
+3. Install both packages by exact version in a separate project and run the README example against a file-backed database.
