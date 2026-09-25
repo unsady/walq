@@ -1,5 +1,11 @@
 # @walq/core
 
+## 0.2.1
+
+### Patch Changes
+
+- Change retry backoff jitter to reduce delays, with jitter `1` providing full jitter from zero up to the base delay.
+
 ## 0.2.0
 
 ### Minor Changes
