@@ -32,6 +32,7 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 - `new Queue(name, { storage, attempts?, retry?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
 - `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Each status is a count, `null` to keep every job of that status, or a rule object `{ count?, maxAge? }` where `maxAge` is milliseconds. Omitted statuses default to `completed: 0` and `failed: 100`.
 - `queue.add(data, options?)` serializes the data and enqueues a job. `AddOptions` supports either `delay` or `runAt`; omitted options make the job available immediately.
+- `queue.addMany(items)` serializes and validates every `{ data, options? }` item before making one atomic storage call. It returns `AddedJob[]` in input order; an empty batch returns `[]`. Every scheduled item in a batch uses the same clock reading.
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
@@ -47,6 +48,11 @@ Pass `delay` in nonnegative safe-integer milliseconds or `runAt` as a nonnegativ
 ```ts
 await queue.add({ name: 'Ada' }, { delay: 5_000 })
 await queue.add({ name: 'Grace' }, { runAt: Date.now() + 60_000 })
+
+const added = await queue.addMany([
+  { data: { name: 'Lin' } },
+  { data: { name: 'Katherine' }, options: { delay: 5_000 } },
+])
 ```
 
 Only one option may be supplied. A past `runAt` is valid and is immediately eligible; without either option, jobs are available immediately. The resulting `availableAt` must be a safe integer, so a delay that overflows the timestamp range is rejected.

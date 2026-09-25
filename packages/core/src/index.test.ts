@@ -39,6 +39,8 @@ function claimedJob(id: string, options: { queue?: string; data?: string } = {})
 
 class TestStorage implements Storage {
   readonly enqueues: EnqueueInput[] = []
+  readonly enqueueManyCalls: EnqueueInput[][] = []
+  readonly enqueueManyErrors: unknown[] = []
   readonly claims: ClaimInput[] = []
   readonly completions: CompleteInput[] = []
   readonly failures: FailInput[] = []
@@ -51,12 +53,13 @@ class TestStorage implements Storage {
   jobs: ClaimedJob[] = []
   maxConcurrentCalls = 0
   #runningCalls = 0
+  #nextJobId = 0
 
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
     this.#enter()
     this.enqueues.push(input)
     const job: StoredJob = {
-      id: `job-${this.enqueues.length}`,
+      id: `job-${++this.#nextJobId}`,
       queue: input.queue,
       name: input.name,
       data: input.data,
@@ -68,6 +71,25 @@ class TestStorage implements Storage {
       error: null,
     }
     return this.#leave(job)
+  }
+
+  async enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {
+    this.#enter()
+    this.enqueueManyCalls.push(inputs)
+    this.#maybeThrow(this.enqueueManyErrors)
+    const jobs = inputs.map((input) => ({
+      id: `job-${++this.#nextJobId}`,
+      queue: input.queue,
+      name: input.name,
+      data: input.data,
+      status: 'pending' as const,
+      createdAt: input.now,
+      availableAt: input.availableAt,
+      attemptsMade: 0,
+      attempts: input.attempts,
+      error: null,
+    }))
+    return this.#leave(jobs)
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {
@@ -207,6 +229,106 @@ describe('Queue', () => {
       Number.MAX_SAFE_INTEGER,
       Number.MAX_SAFE_INTEGER,
     ])
+  })
+
+  it('adds many jobs atomically with one clock reading and ordered results', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage, attempts: 4 })
+
+    await expect(
+      queue.addMany([
+        { data: { index: 0 } },
+        { data: { index: 1 }, options: { delay: 25 } },
+        { data: { index: 2 }, options: { runAt: 0 } },
+      ]),
+    ).resolves.toEqual([{ id: 'job-1' }, { id: 'job-2' }, { id: 'job-3' }])
+
+    expect(clock).toHaveBeenCalledTimes(1)
+    expect(storage.enqueueManyCalls).toEqual([
+      [
+        {
+          queue: 'email',
+          name: 'email',
+          data: '{"index":0}',
+          now,
+          availableAt: now,
+          attempts: 4,
+        },
+        {
+          queue: 'email',
+          name: 'email',
+          data: '{"index":1}',
+          now,
+          availableAt: now + 25,
+          attempts: 4,
+        },
+        {
+          queue: 'email',
+          name: 'email',
+          data: '{"index":2}',
+          now,
+          availableAt: 0,
+          attempts: 4,
+        },
+      ],
+    ])
+    expect(storage.enqueues).toEqual([])
+  })
+
+  it('returns an empty batch without reading the clock or calling storage', async () => {
+    const clock = vi.spyOn(Date, 'now')
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await expect(queue.addMany([])).resolves.toEqual([])
+
+    expect(clock).not.toHaveBeenCalled()
+    expect(storage.enqueueManyCalls).toEqual([])
+  })
+
+  it('rejects invalid or unserializable batch items before any storage call', async () => {
+    const storage = new TestStorage()
+    const queue = new Queue<unknown>('email', { storage })
+    const cyclic: { self?: unknown } = {}
+    cyclic.self = cyclic
+
+    await expect(queue.addMany(null as never)).rejects.toThrow(TypeError)
+    await expect(queue.addMany([{} as never])).rejects.toThrow('JSON serializable')
+    await expect(queue.addMany([{ data: {} }, null] as never)).rejects.toThrow(TypeError)
+    await expect(queue.addMany(Array(1) as never)).rejects.toThrow(TypeError)
+    await expect(queue.addMany([{ data: {} }, { data: cyclic }])).rejects.toThrow('circular')
+    await expect(
+      queue.addMany([{ data: {} }, { data: {}, options: { delay: 1, runAt: 1 } }]),
+    ).rejects.toThrow('cannot be used together')
+    await expect(queue.addMany([{ data: {} }, { data: {}, options: [] as never }])).rejects.toThrow(
+      'add options',
+    )
+
+    expect(storage.enqueueManyCalls).toEqual([])
+    expect(storage.enqueues).toEqual([])
+  })
+
+  it('accepts safe scheduling boundaries and rejects a later overflowing delay atomically', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(0)
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await queue.addMany([
+      { data: {}, options: { delay: Number.MAX_SAFE_INTEGER } },
+      { data: {}, options: { runAt: Number.MAX_SAFE_INTEGER } },
+    ])
+    expect(storage.enqueueManyCalls[0]!.map(({ availableAt }) => availableAt)).toEqual([
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+    ])
+
+    storage.enqueueManyCalls.length = 0
+    vi.spyOn(Date, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER)
+    await expect(
+      queue.addMany([{ data: {} }, { data: {}, options: { delay: 1 } }]),
+    ).rejects.toThrow('availableAt')
+    expect(storage.enqueueManyCalls).toEqual([])
   })
 
   it('rejects invalid scheduling options before calling storage', async () => {

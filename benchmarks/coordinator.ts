@@ -139,6 +139,11 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 
       return inner.enqueue(input)
     },
+    async enqueueMany(inputs) {
+      tracker.onOperation()
+
+      return inner.enqueueMany(inputs)
+    },
     async claim(input) {
       tracker.onOperation()
       const started = performance.now()

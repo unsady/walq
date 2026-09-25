@@ -61,12 +61,14 @@ Inputs are validated before mutation. Data must already be serialized JSON.
 The adapter uses the supplied `now`, never its own clock. Job IDs and fresh lease
 tokens are generated with `crypto.randomUUID()`.
 
-Claim recovery and acquisition run in one immediate transaction. Recovery covers
-all expired active jobs in the requested queue, regardless of the batch limit.
-Completion, failure, and heartbeat use atomic conditional updates. Terminal
-transitions record the finish timestamp used for retention ordering. Database
-errors (including lock timeouts) reject promises, rather than returning
-`lease_lost`.
+`enqueueMany` validates its complete input before mutation, inserts the batch in
+one immediate transaction, and returns jobs in input order. Empty batches return
+without inserting rows. Claim recovery and acquisition run in one immediate
+transaction. Recovery covers all expired active jobs in the requested queue,
+regardless of the batch limit. Completion, failure, and heartbeat use atomic
+conditional updates. Terminal transitions record the finish timestamp used for
+retention ordering. Database errors (including lock timeouts) reject promises,
+rather than returning `lease_lost`.
 
 The optional `claimQueues` method applies every request in order and returns one
 result per request, so one coordinator sweep claims from many queues in one call.

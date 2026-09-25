@@ -92,6 +92,10 @@ export class StorageCoordinator {
     return this.#storage.enqueue(input)
   }
 
+  enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {
+    return this.#storage.enqueueMany(inputs)
+  }
+
   /**
    * Claim from one queue. When the adapter supports grouped claims, requests
    * issued in the same microtask batch are coalesced into one call so a single

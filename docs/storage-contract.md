@@ -53,6 +53,15 @@ lease credentials. No method is provided for querying arbitrary jobs yet.
 An availableAt in the past is valid. Every call creates an independent job;
 matching names or data do not cause deduplication.
 
+`enqueueMany(inputs)` applies the same rules to every input and returns one
+`StoredJob` per input, in input order. An empty array returns an empty array.
+The adapter validates the complete batch before mutation, then commits all
+inserts atomically: the operation inserts all jobs or none. As with other
+mutations, a transport error may leave the caller uncertain whether the whole
+batch committed. The adapter must not resolve before commit or run inside a
+caller-managed transaction. Each input creates an independent job; batch
+insertion does not deduplicate.
+
 ## Claim and expiration
 
 `claim` operates only on its specified queue:
@@ -204,7 +213,7 @@ contract does not schedule cleanup or delete any rows outside this method.
 
 | Operation                                     | From                             | To        |
 | --------------------------------------------- | -------------------------------- | --------- |
-| enqueue                                       | absent                           | pending   |
+| enqueue or enqueueMany                        | absent                           | pending   |
 | claim                                         | pending, due, attempts remaining | active    |
 | complete                                      | active, live matching lease      | completed |
 | fail with retry and attempts remaining        | active, live matching lease      | pending   |
@@ -213,7 +222,7 @@ contract does not schedule cleanup or delete any rows outside this method.
 | expiration recovery with attempts exhausted   | active, expired                  | failed    |
 | heartbeat                                     | active, live matching lease      | active    |
 
-Completed and failed jobs are terminal. `enqueue`, `claim`, `complete`, `fail`,
-and `heartbeat` never delete jobs; deletion happens only through
+Completed and failed jobs are terminal. `enqueue`, `enqueueMany`, `claim`,
+`complete`, `fail`, and `heartbeat` never delete jobs; deletion happens only through
 [cleanup](#cleanup). Adapters record when a job
 became terminal so retention can keep the most recently finished jobs.

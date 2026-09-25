@@ -55,6 +55,18 @@ function groupedStorage(
     async enqueue() {
       return storedJob
     },
+    async enqueueMany(inputs) {
+      return inputs.map((input, index) => ({
+        ...storedJob,
+        id: `job-${index + 1}`,
+        queue: input.queue,
+        name: input.name,
+        data: input.data,
+        createdAt: input.now,
+        availableAt: input.availableAt,
+        attempts: input.attempts,
+      }))
+    },
     async claim() {
       throw new Error('claim must not be called when claimQueues exists')
     },
@@ -99,6 +111,20 @@ function gatedStorage(): GatedStorage {
       started.push('enqueue')
       await gate.promise
       return storedJob
+    },
+    async enqueueMany(inputs) {
+      started.push('enqueueMany')
+      await gate.promise
+      return inputs.map((input, index) => ({
+        ...storedJob,
+        id: `job-${index + 1}`,
+        queue: input.queue,
+        name: input.name,
+        data: input.data,
+        createdAt: input.now,
+        availableAt: input.availableAt,
+        attempts: input.attempts,
+      }))
     },
     async claim() {
       started.push('claim')

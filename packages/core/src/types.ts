@@ -69,7 +69,7 @@ export interface ProcessOptions {
   concurrency?: number
 }
 
-/** Scheduling options for `queue.add()`; `delay` and `runAt` are mutually exclusive. */
+/** Scheduling options for `queue.add()` and `queue.addMany()`; `delay` and `runAt` are mutually exclusive. */
 export interface AddOptions {
   /** Relative delay in nonnegative safe-integer milliseconds. */
   delay?: number

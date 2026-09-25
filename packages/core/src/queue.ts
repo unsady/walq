@@ -1,4 +1,4 @@
-import type { RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage'
+import type { EnqueueInput, RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage'
 
 import { getCoordinator } from './coordinator.js'
 import type {
@@ -43,6 +43,45 @@ function normalizeAddOptions(value: AddOptions | undefined): AddOptions {
   return {
     ...(delay !== undefined ? { delay } : {}),
     ...(runAt !== undefined ? { runAt } : {}),
+  }
+}
+
+function prepareAdd(
+  data: unknown,
+  options: AddOptions | undefined,
+): {
+  data: string
+  options: AddOptions
+} {
+  const normalizedOptions = normalizeAddOptions(options)
+  const serialized = JSON.stringify(data)
+  if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
+
+  return { data: serialized, options: normalizedOptions }
+}
+
+function availability(now: number, options: AddOptions): number {
+  const availableAt = options.runAt ?? (options.delay === undefined ? now : now + options.delay)
+  if (!Number.isSafeInteger(availableAt)) {
+    throw new TypeError('availableAt must be a safe integer')
+  }
+
+  return availableAt
+}
+
+function buildEnqueueInput(
+  queue: string,
+  attempts: number,
+  now: number,
+  prepared: ReturnType<typeof prepareAdd>,
+): EnqueueInput {
+  return {
+    queue,
+    name: queue,
+    data: prepared.data,
+    now,
+    availableAt: availability(now, prepared.options),
+    attempts,
   }
 }
 
@@ -161,28 +200,36 @@ export class Queue<Data> {
   }
 
   async add(data: Data, options?: AddOptions): Promise<AddedJob> {
-    const { delay, runAt } = normalizeAddOptions(options)
-
-    const serialized = JSON.stringify(data)
-    if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
-
+    const prepared = prepareAdd(data, options)
     const now = Date.now()
-    const availableAt = runAt ?? (delay === undefined ? now : now + delay)
-    if (!Number.isSafeInteger(availableAt)) {
-      throw new TypeError('availableAt must be a safe integer')
-    }
 
     const coordinator = getCoordinator(this.#storage)
-    const job = await coordinator.enqueue({
-      queue: this.#name,
-      name: this.#name,
-      data: serialized,
-      now,
-      availableAt,
-      attempts: this.#attempts,
-    })
+    const job = await coordinator.enqueue(
+      buildEnqueueInput(this.#name, this.#attempts, now, prepared),
+    )
     coordinator.wakeQueue(this.#name)
     return { id: job.id }
+  }
+
+  async addMany(items: Array<{ data: Data; options?: AddOptions }>): Promise<AddedJob[]> {
+    if (!Array.isArray(items)) throw new TypeError('addMany items must be an array')
+    if (items.length === 0) return []
+
+    const prepared = Array.from(items, (item) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+        throw new TypeError('addMany items must be objects')
+      }
+
+      return prepareAdd(item.data, item.options)
+    })
+
+    const now = Date.now()
+    const inputs = prepared.map((item) => buildEnqueueInput(this.#name, this.#attempts, now, item))
+
+    const coordinator = getCoordinator(this.#storage)
+    const jobs = await coordinator.enqueueMany(inputs)
+    coordinator.wakeQueue(this.#name)
+    return jobs.map(({ id }) => ({ id }))
   }
 
   process(processor: Processor<Data>, options: ProcessOptions = {}): WorkerHandle {

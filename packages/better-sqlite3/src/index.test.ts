@@ -523,6 +523,7 @@ describe('SQLite integration', () => {
     db.exec('BEGIN')
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
+    await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
     db.exec('ROLLBACK; UPDATE walq_schema SET version = 3')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
@@ -535,6 +536,22 @@ describe('SQLite integration', () => {
       INSERT INTO walq_schema (id, version) VALUES (1, 1);
     `)
     expect(() => betterSqlite3(db)).toThrow('Unsupported walq schema version: 1')
+  })
+
+  it('rolls back every insert in enqueueMany when a later insert fails', async () => {
+    const { db, storage } = open()
+    db.exec(`CREATE TRIGGER reject_enqueue_many BEFORE INSERT ON walq_jobs
+      WHEN NEW.data = '"reject"'
+      BEGIN SELECT RAISE(ABORT, 'enqueueMany failed'); END`)
+
+    await expect(
+      storage.enqueueMany([
+        { ...input, data: '{"first":true}' },
+        { ...input, data: '"reject"' },
+      ]),
+    ).rejects.toThrow('enqueueMany failed')
+
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 0 })
   })
 
   it('rolls back the whole claim on a database error', async () => {

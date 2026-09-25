@@ -39,6 +39,26 @@ it('processes a job through the SQLite storage adapter', async () => {
   ).toEqual([])
 })
 
+it('adds scheduled jobs as one ordered SQLite batch', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(1_000)
+  const { db, storage } = openStorage()
+  const queue = new Queue<{ userId: string }>('email', { storage })
+
+  const added = await queue.addMany([
+    { data: { userId: 'first' } },
+    { data: { userId: 'second' }, options: { delay: 25 } },
+  ])
+
+  const rows = db
+    .prepare('SELECT id, data, createdAt, availableAt FROM walq_jobs ORDER BY rowid')
+    .all()
+  expect(added.map(({ id }) => id)).toEqual(rows.map((row) => (row as { id: string }).id))
+  expect(rows).toEqual([
+    { id: added[0]!.id, data: '{"userId":"first"}', createdAt: 1_000, availableAt: 1_000 },
+    { id: added[1]!.id, data: '{"userId":"second"}', createdAt: 1_000, availableAt: 1_025 },
+  ])
+})
+
 it('immediately retries failed handlers while attempts remain', async () => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const { storage } = openStorage()

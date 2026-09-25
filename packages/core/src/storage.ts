@@ -23,6 +23,9 @@ export interface Storage {
   /** Insert a pending job with a generated ID and zero attempts made. */
   enqueue(input: EnqueueInput): Promise<StoredJob>
 
+  /** Atomically insert all pending jobs and return them in input order. */
+  enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]>
+
   /** Recover expired leases and atomically claim up to limit eligible jobs. */
   claim(input: ClaimInput): Promise<ClaimedJob[]>
 

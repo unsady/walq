@@ -35,9 +35,36 @@ function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)
 }
 
+function validateEnqueue(input: EnqueueInput): EnqueueInput {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new TypeError('enqueue input must be an object')
+  }
+
+  const validated = {
+    queue: input.queue,
+    name: input.name,
+    data: input.data,
+    now: input.now,
+    availableAt: input.availableAt,
+    attempts: input.attempts,
+  }
+  text(validated.queue, 'queue')
+  text(validated.name, 'name')
+  text(validated.data, 'data')
+  JSON.parse(validated.data)
+  integer(validated.now, 'now')
+  integer(validated.availableAt, 'availableAt')
+  integer(validated.attempts, 'attempts', 1)
+
+  return validated
+}
+
 class BetterSqlite3Storage implements Storage {
   private readonly db: Database.Database
   private readonly insert: Database.Statement
+  private readonly enqueueManyTransaction: Database.Transaction<
+    (inputs: EnqueueInput[]) => StoredJob[]
+  >
   private readonly recover: Database.Statement
   private readonly select: Database.Statement
   private readonly acquire: Database.Statement
@@ -58,6 +85,9 @@ class BetterSqlite3Storage implements Storage {
         VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, 0, @attempts)
         RETURNING ${metadata}
       `,
+    )
+    this.enqueueManyTransaction = db.transaction((inputs: EnqueueInput[]) =>
+      inputs.map((input) => this.insert.get({ ...input, id: randomUUID() }) as StoredJob),
     )
     this.recover = prepare(
       db,
@@ -142,14 +172,18 @@ class BetterSqlite3Storage implements Storage {
 
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
     this.assertAutocommit()
-    text(input.queue, 'queue')
-    text(input.name, 'name')
-    text(input.data, 'data')
-    JSON.parse(input.data)
-    integer(input.now, 'now')
-    integer(input.availableAt, 'availableAt')
-    integer(input.attempts, 'attempts', 1)
-    return this.insert.get({ ...input, id: randomUUID() }) as StoredJob
+    const validated = validateEnqueue(input)
+    return this.insert.get({ ...validated, id: randomUUID() }) as StoredJob
+  }
+
+  async enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {
+    this.assertAutocommit()
+    if (!Array.isArray(inputs)) throw new TypeError('inputs must be an array')
+
+    const validated = Array.from(inputs, validateEnqueue)
+    if (validated.length === 0) return []
+
+    return this.enqueueManyTransaction.immediate(validated)
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {

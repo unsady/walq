@@ -83,6 +83,61 @@ export function runStorageConformance(
       await cleanup()
     })
 
+    it('accepts an empty enqueueMany batch', async () => {
+      expect(await storage.enqueueMany([])).toEqual([])
+    })
+
+    it('validates an enqueueMany batch before writing', async () => {
+      await expect(
+        storage.enqueueMany([
+          enqueueInput({ queue: 'should-not-exist', name: 'first' }),
+          enqueueInput({ queue: 'also-should-not-exist', data: 'undefined' }),
+        ]),
+      ).rejects.toThrow(/.+/)
+      await expect(storage.enqueueMany(null as never)).rejects.toThrow(/.+/)
+      await expect(storage.enqueueMany(Array(1) as never)).rejects.toThrow(/.+/)
+      expect(await storage.claim(claimInput({ queue: 'should-not-exist' }))).toEqual([])
+    })
+
+    it('enqueues many jobs in input order with pending state', async () => {
+      const inputs = [
+        enqueueInput({ name: 'first', data: '{"n":1}', availableAt: 8 }),
+        enqueueInput({ name: 'second', data: '{"n":2}', availableAt: 9 }),
+      ]
+      const jobs = await storage.enqueueMany(inputs)
+
+      expect(jobs).toHaveLength(2)
+      expect(jobs[0]!.id).not.toBe(jobs[1]!.id)
+      expect(
+        jobs.map(({ name, data, queue: resultQueue, availableAt, attemptsMade, status }) => ({
+          name,
+          data,
+          queue: resultQueue,
+          availableAt,
+          attemptsMade,
+          status,
+        })),
+      ).toEqual([
+        {
+          name: 'first',
+          data: '{"n":1}',
+          queue,
+          availableAt: 8,
+          attemptsMade: 0,
+          status: 'pending',
+        },
+        {
+          name: 'second',
+          data: '{"n":2}',
+          queue,
+          availableAt: 9,
+          attemptsMade: 0,
+          status: 'pending',
+        },
+      ])
+      expect(await storage.claim(claimInput({ now: 10 }))).toHaveLength(2)
+    })
+
     it('enqueues independent jobs with default state', async () => {
       const first = await storage.enqueue(enqueueInput())
       const second = await storage.enqueue(enqueueInput())

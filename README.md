@@ -6,7 +6,7 @@ Walq provides reliable at-least-once processing without Redis or a separate queu
 
 ## Features
 
-- atomic claims with expiring leases
+- atomic batch enqueue and claims with expiring leases
 - retries, attempt limits, and heartbeats
 - multiple logical queues in one database
 - concurrent processing with shared, queue-aware polling
@@ -41,6 +41,7 @@ const worker = queue.process(async ({ name }) => {
 })
 
 await queue.add({ name: 'Ada' })
+await queue.addMany([{ data: { name: 'Grace' } }, { data: { name: 'Lin' } }])
 ```
 
 Jobs are delivered at least once. Handlers should be idempotent when repeating side effects would be unsafe.
