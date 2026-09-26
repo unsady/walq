@@ -2,6 +2,7 @@ import { betterSqlite3 } from '@walq/better-sqlite3'
 import Database from 'better-sqlite3'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { deferred } from './delay.js'
 import { Queue } from './index.js'
 
 const databases: Database.Database[] = []
@@ -16,6 +17,108 @@ afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   for (const db of databases.splice(0)) if (db.open) db.close()
+})
+
+it('exposes and mutates the job lifecycle through the public Queue API', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(1_000)
+  const { storage } = openStorage()
+  const queue = new Queue<{ value: number }>('lifecycle', {
+    storage,
+    attempts: 2,
+    retention: { completed: null, failed: null },
+  })
+
+  const cancelled = await queue.add({ value: 1 })
+  expect(await queue.get(cancelled.id)).toMatchObject({
+    id: cancelled.id,
+    data: { value: 1 },
+    status: 'pending',
+    attempt: 0,
+    attempts: 2,
+    finishedAt: null,
+    error: null,
+  })
+  expect(await queue.list({ status: 'pending' })).toHaveLength(1)
+  expect(await queue.cancel(cancelled.id)).toBe(true)
+  expect(await queue.get(cancelled.id)).toMatchObject({ status: 'cancelled', finishedAt: 1_000 })
+  expect(await queue.list({ status: 'cancelled' })).toHaveLength(1)
+
+  const rescheduled = await queue.add({ value: 2 })
+  expect(await queue.reschedule(rescheduled.id, { runAt: 1_025 })).toBe(true)
+  expect(await queue.get(rescheduled.id)).toMatchObject({
+    status: 'pending',
+    availableAt: 1_025,
+    finishedAt: null,
+  })
+  expect(await queue.remove(rescheduled.id)).toBe(true)
+
+  const retried = await queue.add({ value: 3 })
+  const [firstClaim] = await storage.claim({
+    queue: 'lifecycle',
+    limit: 1,
+    now: 1_000,
+    leaseDuration: 30_000,
+  })
+  expect(firstClaim?.id).toBe(retried.id)
+  await storage.fail({
+    id: firstClaim!.id,
+    leaseToken: firstClaim!.leaseToken,
+    now: 1_000,
+    error: 'temporary failure',
+    retryAt: null,
+  })
+  expect(await queue.get(retried.id)).toMatchObject({
+    status: 'failed',
+    attempt: 1,
+    error: 'temporary failure',
+    finishedAt: 1_000,
+  })
+
+  expect(await queue.retry(retried.id)).toBe(true)
+  expect(await queue.get(retried.id)).toMatchObject({
+    status: 'pending',
+    attempt: 1,
+    error: 'temporary failure',
+    finishedAt: null,
+  })
+  const [secondClaim] = await storage.claim({
+    queue: 'lifecycle',
+    limit: 1,
+    now: 1_000,
+    leaseDuration: 30_000,
+  })
+  expect(secondClaim?.id).toBe(retried.id)
+  await storage.complete({ id: retried.id, leaseToken: secondClaim!.leaseToken, now: 1_001 })
+  expect(await queue.get(retried.id)).toMatchObject({
+    status: 'completed',
+    attempt: 2,
+    finishedAt: 1_001,
+  })
+  expect(await queue.remove(retried.id)).toBe(true)
+  await expect(queue.get(retried.id)).resolves.toBeNull()
+})
+
+it('wakes a sleeping worker after a pending job is rescheduled', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(10_000)
+  const { storage } = openStorage()
+  const queue = new Queue('wake', {
+    storage,
+    retention: { completed: null, failed: null },
+  })
+  const handled = deferred()
+  async function processJob(): Promise<void> {
+    handled.resolve()
+  }
+  const worker = queue.process(processJob)
+
+  await vi.advanceTimersByTimeAsync(0)
+  const added = await queue.add({}, { delay: 60_000 })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(await queue.reschedule(added.id, { runAt: Date.now() })).toBe(true)
+  await vi.advanceTimersByTimeAsync(0)
+  await expect(handled.promise).resolves.toBeUndefined()
+  await worker.close()
 })
 
 it('processes a job through the SQLite storage adapter', async () => {

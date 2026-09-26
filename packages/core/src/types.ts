@@ -1,4 +1,6 @@
-import type { Storage } from '@walq/core/storage'
+import type { JobStatus as StoredJobStatus, Storage } from '@walq/core/storage'
+
+export type JobStatus = StoredJobStatus
 
 /**
  * Public retention rule for one terminal status. A `number` is the count
@@ -79,6 +81,24 @@ export interface AddOptions {
 
 export interface AddedJob {
   id: string
+}
+
+/** Public job data and lifecycle fields returned by Queue.get() and Queue.list(). */
+export interface Job<Data> {
+  id: string
+  data: Data
+  status: JobStatus
+  attempt: number
+  attempts: number
+  createdAt: number
+  availableAt: number
+  finishedAt: number | null
+  error: string | null
+}
+
+export interface ListOptions {
+  status: JobStatus
+  limit?: number
 }
 
 export interface ProcessContext {

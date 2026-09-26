@@ -1,9 +1,18 @@
-import type { EnqueueInput, RetentionPolicy, RetentionRule, Storage } from '@walq/core/storage'
+import type {
+  EnqueueInput,
+  JobSnapshot,
+  RetentionPolicy,
+  RetentionRule,
+  Storage,
+} from '@walq/core/storage'
 
 import { getCoordinator } from './coordinator.js'
 import type {
   AddOptions,
   AddedJob,
+  Job,
+  JobStatus,
+  ListOptions,
   ProcessErrorHandler,
   ProcessOptions,
   Processor,
@@ -16,6 +25,67 @@ import { QueueWorker } from './worker.js'
 
 const defaultCompletedRetention = 0
 const defaultFailedRetention = 100
+const defaultListLimit = 100
+const maxListLimit = 1_000
+const jobStatuses: readonly JobStatus[] = ['pending', 'active', 'completed', 'failed', 'cancelled']
+
+function validateJobId(id: unknown): asserts id is string {
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new TypeError('id must be a nonempty string')
+  }
+}
+
+function normalizeListOptions(value: unknown): Required<ListOptions> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('list options must be an object')
+  }
+
+  const { status, limit = defaultListLimit } = value as ListOptions
+  if (!jobStatuses.includes(status)) {
+    throw new TypeError('status must be a supported job status')
+  }
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > maxListLimit) {
+    throw new TypeError(`limit must be a positive safe integer no greater than ${maxListLimit}`)
+  }
+
+  return { status, limit }
+}
+
+function normalizeRescheduleOptions(value: unknown): { delay?: number; runAt?: number } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('reschedule options must be an object')
+  }
+
+  const { delay, runAt } = value as { delay?: number; runAt?: number }
+  if ((delay === undefined) === (runAt === undefined)) {
+    throw new TypeError('exactly one of delay or runAt must be provided')
+  }
+  if (delay !== undefined && (!Number.isSafeInteger(delay) || delay < 0)) {
+    throw new TypeError('delay must be a nonnegative safe integer')
+  }
+  if (runAt !== undefined && (!Number.isSafeInteger(runAt) || runAt < 0)) {
+    throw new TypeError('runAt must be a nonnegative safe integer')
+  }
+
+  return {
+    ...(delay !== undefined ? { delay } : {}),
+    ...(runAt !== undefined ? { runAt } : {}),
+  }
+}
+
+function publicJob<Data>(snapshot: JobSnapshot): Job<Data> {
+  return {
+    id: snapshot.id,
+    data: JSON.parse(snapshot.data) as Data,
+    status: snapshot.status,
+    attempt: snapshot.attemptsMade,
+    attempts: snapshot.attempts,
+    createdAt: snapshot.createdAt,
+    availableAt: snapshot.availableAt,
+    finishedAt: snapshot.finishedAt,
+    error: snapshot.error,
+  }
+}
 
 function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -230,6 +300,49 @@ export class Queue<Data> {
     const jobs = await coordinator.enqueueMany(inputs)
     coordinator.wakeQueue(this.#name)
     return jobs.map(({ id }) => ({ id }))
+  }
+
+  async get(id: string): Promise<Job<Data> | null> {
+    validateJobId(id)
+    const snapshot = await this.#storage.inspect({ queue: this.#name, id })
+    return snapshot === null ? null : publicJob<Data>(snapshot)
+  }
+
+  async list(options: ListOptions): Promise<Job<Data>[]> {
+    const { status, limit } = normalizeListOptions(options)
+    const snapshots = await this.#storage.list({ queue: this.#name, status, limit })
+    return snapshots.map((snapshot) => publicJob<Data>(snapshot))
+  }
+
+  async retry(id: string): Promise<boolean> {
+    validateJobId(id)
+    const retried = await this.#storage.retry({ queue: this.#name, id, now: Date.now() })
+    if (retried) getCoordinator(this.#storage).wakeQueue(this.#name)
+    return retried
+  }
+
+  async cancel(id: string): Promise<boolean> {
+    validateJobId(id)
+    return this.#storage.cancel({ queue: this.#name, id, now: Date.now() })
+  }
+
+  async reschedule(id: string, options: { delay?: number; runAt?: number }): Promise<boolean> {
+    validateJobId(id)
+    const normalizedOptions = normalizeRescheduleOptions(options)
+    const now = Date.now()
+    const availableAt = normalizedOptions.runAt ?? now + normalizedOptions.delay!
+    if (!Number.isSafeInteger(availableAt)) {
+      throw new TypeError('availableAt must be a safe integer')
+    }
+
+    const rescheduled = await this.#storage.reschedule({ queue: this.#name, id, availableAt })
+    if (rescheduled) getCoordinator(this.#storage).wakeQueue(this.#name)
+    return rescheduled
+  }
+
+  async remove(id: string): Promise<boolean> {
+    validateJobId(id)
+    return this.#storage.remove({ queue: this.#name, id })
   }
 
   process(processor: Processor<Data>, options: ProcessOptions = {}): WorkerHandle {
