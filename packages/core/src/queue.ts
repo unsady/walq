@@ -51,13 +51,21 @@ function normalizeListOptions(value: unknown): Required<ListOptions> {
   return { status, limit }
 }
 
-function normalizeRescheduleOptions(value: unknown): { delay?: number; runAt?: number } {
+function normalizeScheduleOptions(value: unknown, operation: 'add' | 'reschedule'): AddOptions {
+  if (value === undefined && operation === 'add') return {}
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError('reschedule options must be an object')
+    throw new TypeError(`${operation} options must be an object`)
   }
 
-  const { delay, runAt } = value as { delay?: number; runAt?: number }
-  if ((delay === undefined) === (runAt === undefined)) {
+  const { delay, runAt } = value as AddOptions
+  if (delay !== undefined && runAt !== undefined) {
+    throw new TypeError(
+      operation === 'add'
+        ? 'delay and runAt cannot be used together'
+        : 'exactly one of delay or runAt must be provided',
+    )
+  }
+  if (operation === 'reschedule' && delay === undefined && runAt === undefined) {
     throw new TypeError('exactly one of delay or runAt must be provided')
   }
   if (delay !== undefined && (!Number.isSafeInteger(delay) || delay < 0)) {
@@ -93,29 +101,6 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
-function normalizeAddOptions(value: AddOptions | undefined): AddOptions {
-  if (value === undefined) return {}
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError('add options must be an object')
-  }
-
-  const { delay, runAt } = value
-  if (delay !== undefined && runAt !== undefined) {
-    throw new TypeError('delay and runAt cannot be used together')
-  }
-  if (delay !== undefined && (!Number.isSafeInteger(delay) || delay < 0)) {
-    throw new TypeError('delay must be a nonnegative safe integer')
-  }
-  if (runAt !== undefined && (!Number.isSafeInteger(runAt) || runAt < 0)) {
-    throw new TypeError('runAt must be a nonnegative safe integer')
-  }
-
-  return {
-    ...(delay !== undefined ? { delay } : {}),
-    ...(runAt !== undefined ? { runAt } : {}),
-  }
-}
-
 function prepareAdd(
   data: unknown,
   options: AddOptions | undefined,
@@ -123,7 +108,7 @@ function prepareAdd(
   data: string
   options: AddOptions
 } {
-  const normalizedOptions = normalizeAddOptions(options)
+  const normalizedOptions = normalizeScheduleOptions(options, 'add')
   const serialized = JSON.stringify(data)
   if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
@@ -328,12 +313,9 @@ export class Queue<Data> {
 
   async reschedule(id: string, options: { delay?: number; runAt?: number }): Promise<boolean> {
     validateJobId(id)
-    const normalizedOptions = normalizeRescheduleOptions(options)
+    const normalizedOptions = normalizeScheduleOptions(options, 'reschedule')
     const now = Date.now()
-    const availableAt = normalizedOptions.runAt ?? now + normalizedOptions.delay!
-    if (!Number.isSafeInteger(availableAt)) {
-      throw new TypeError('availableAt must be a safe integer')
-    }
+    const availableAt = availability(now, normalizedOptions)
 
     const rescheduled = await this.#storage.reschedule({ queue: this.#name, id, availableAt })
     if (rescheduled) getCoordinator(this.#storage).wakeQueue(this.#name)

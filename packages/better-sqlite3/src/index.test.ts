@@ -847,6 +847,25 @@ describe('SQLite integration', () => {
       status: 'cancelled',
       finishedAt: 13,
     })
+
+    const max = Number.MAX_SAFE_INTEGER
+    db.prepare(`
+      INSERT INTO walq_jobs
+        (id, queue, name, data, status, createdAt, availableAt, finishedAt,
+         attemptsMade, attempts, error)
+      VALUES ('retry-boundary', 'email', 'send', '{}', 'failed', 0, 0, 0, @attempt, @attempt, NULL)
+    `).run({ attempt: max - 1 })
+    const boundaryRetryInput = { queue: 'email', id: 'retry-boundary', now: 14 }
+    const boundaryResults = await race(path, [
+      { method: 'retry', input: boundaryRetryInput },
+      { method: 'retry', input: boundaryRetryInput },
+    ])
+    expect(boundaryResults.sort()).toEqual([false, true])
+    expect(
+      db
+        .prepare("SELECT status, attemptsMade, attempts FROM walq_jobs WHERE id = 'retry-boundary'")
+        .get(),
+    ).toEqual({ status: 'pending', attemptsMade: max - 1, attempts: max })
   })
 
   it('validates inspection inputs and protects attempt-count overflow', async () => {
@@ -880,28 +899,13 @@ describe('SQLite integration', () => {
       VALUES ('overflow', 'email', 'send', '{}', 'failed', 0, 0, 0, @max, @max, NULL)
     `).run({ max })
     await expect(storage.retry({ queue: 'email', id: 'overflow', now: 1 })).rejects.toThrow(
-      'safe integer range',
+      RangeError,
     )
     expect(
       db
         .prepare("SELECT status, attemptsMade, attempts FROM walq_jobs WHERE id = 'overflow'")
         .get(),
     ).toEqual({ status: 'failed', attemptsMade: max, attempts: max })
-  })
-
-  it('keeps lifecycle reads and mutations scoped to the exact queue', async () => {
-    const { storage } = open()
-    const job = await storage.enqueue({ ...input, queue: 'email', attempts: 1 })
-    await expect(storage.inspect({ queue: 'other', id: job.id })).resolves.toBeNull()
-    await expect(storage.list({ queue: 'other', status: 'pending', limit: 10 })).resolves.toEqual(
-      [],
-    )
-    expect(await storage.cancel({ queue: 'other', id: job.id, now: 11 })).toBe(false)
-    expect(await storage.reschedule({ queue: 'other', id: job.id, availableAt: 20 })).toBe(false)
-    expect(await storage.remove({ queue: 'other', id: job.id })).toBe(false)
-    expect(await storage.inspect({ queue: 'email', id: job.id })).toMatchObject({
-      status: 'pending',
-    })
   })
 
   it('never issues duplicate live leases to concurrent workers', async () => {

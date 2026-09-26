@@ -97,6 +97,9 @@ class BetterSqlite3Storage implements Storage {
   private readonly listStatements: Record<JobStatus, Database.Statement>
   private readonly retryStatement: Database.Statement
   private readonly retryOverflowStatement: Database.Statement
+  private readonly retryTransaction: Database.Transaction<
+    (input: InspectInput, now: number) => boolean
+  >
   private readonly cancelStatement: Database.Statement
   private readonly rescheduleStatement: Database.Statement
   private readonly removeStatement: Database.Statement
@@ -202,6 +205,22 @@ class BetterSqlite3Storage implements Storage {
        WHERE queue = @queue AND id = @id AND status = 'failed'
          AND attemptsMade >= attempts AND attemptsMade >= @maxSafeInteger`,
     )
+    this.retryTransaction = db.transaction((validated: InspectInput, now: number) => {
+      const changes = this.retryStatement.run({
+        ...validated,
+        now,
+        maxSafeInteger,
+      }).changes
+      if (changes === 1) return true
+
+      const overflow = this.retryOverflowStatement.get({
+        ...validated,
+        maxSafeInteger,
+      })
+      if (overflow !== undefined)
+        throw new RangeError('attempts would exceed the safe integer range')
+      return false
+    })
     this.cancelStatement = prepare(
       db,
       `UPDATE walq_jobs SET status = 'cancelled', finishedAt = @now
@@ -330,19 +349,7 @@ class BetterSqlite3Storage implements Storage {
     this.assertAutocommit()
     const validated = validateInspect(input)
     integer(input.now, 'now')
-    const changes = this.retryStatement.run({
-      ...validated,
-      now: input.now,
-      maxSafeInteger,
-    }).changes
-    if (changes === 1) return true
-
-    const overflow = this.retryOverflowStatement.get({
-      ...validated,
-      maxSafeInteger,
-    })
-    if (overflow !== undefined) throw new RangeError('attempts would exceed the safe integer range')
-    return false
+    return this.retryTransaction.immediate(validated, input.now)
   }
 
   async cancel(input: CancelInput): Promise<boolean> {
