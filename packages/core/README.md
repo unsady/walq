@@ -1,6 +1,6 @@
-# walq
+# @walq/core
 
-Typed queue API for walq storage adapters. Walq is ESM-only and requires Node.js 22 or newer.
+Typed queue API for walq storage adapters. ESM-only; requires Node.js 22+.
 
 ```sh
 pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
@@ -15,70 +15,31 @@ const db = new Database('queue.sqlite')
 const queue = new Queue<{ name: string }>('greetings', {
   storage: betterSqlite3(db),
 })
-
-const worker = queue.process(async ({ name }) => {
-  console.log(`Hello, ${name}!`)
-})
-
+queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
 await queue.add({ name: 'Ada' })
-await worker.close()
-db.close()
 ```
 
-Storage adapter authors can import the public contract from `@walq/core/storage`.
+Storage adapter authors import `Storage` from `@walq/core/storage`.
 
 ## API
 
-- `new Queue(name, { storage, attempts?, retry?, onError?, retention? })` creates a queue. `attempts` defaults to 1.
-- `retention` controls terminal-job cleanup: `{ completed?, failed? }`. Each status is a count, `null` to keep every job of that status, or a rule object `{ count?, maxAge? }` where `maxAge` is milliseconds. Omitted statuses default to `completed: 0` and `failed: 100`.
-- `queue.add(data, options?)` serializes the data and enqueues a job. `AddOptions` supports either `delay` or `runAt`; omitted options make the job available immediately.
-- `queue.addMany(items)` serializes and validates every `{ data, options? }` item before making one atomic storage call. It returns `AddedJob[]` in input order; an empty batch returns `[]`. Every scheduled item in a batch uses the same clock reading.
-- `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
-- Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
-- `worker.close()` stops new claims and waits for active handlers without aborting them.
-- `queue.get(id)` returns a `Job<Data>` snapshot or `null` if the ID is absent from this queue. `queue.list({ status, limit? })` returns up to `limit` snapshots and requires `status`; `limit` defaults to 100 and must be between 1 and 1,000. The supported statuses are `pending`, `active`, `completed`, `failed`, and `cancelled` (there is no `waiting`). Snapshots contain `attempt` (claims made), total `attempts`, timestamps, and the last error; they do not contain `startedAt` or lease credentials. An expired active job remains active in snapshots until a claim for that queue recovers it.
-- `queue.retry(id)` retries a failed job immediately and returns whether it changed the job. It preserves `attempt` and `error`; if the attempt budget was exhausted, it raises the total `attempts` by one to allow exactly one more claim.
-- `queue.cancel(id)` cancels pending jobs only. `queue.reschedule(id, { delay })` or `queue.reschedule(id, { runAt })` changes the availability of pending jobs only; supply exactly one nonnegative safe-integer millisecond value. `delay` is relative to the current time and `runAt` is an absolute Unix timestamp. The computed `availableAt` must also fit in the safe-integer range.
-- `queue.remove(id)` physically removes any non-active job. Retry, cancel, reschedule, and remove return `false` for a missing job or a job in a state that does not allow that operation; otherwise they return `true`.
+- `new Queue(name, { storage, attempts?, retry?, onError?, retention? })`: `attempts` defaults to `1`; retries after handler errors are immediate unless backoff is configured. Retention defaults to `{ completed: 0, failed: 100 }`.
+- `queue.add(data, options?)`: enqueue JSON-serializable data; omitted options make it immediately available. `options` accepts `delay` or `runAt`, not both. Values are nonnegative safe-integer milliseconds; a past `runAt` is immediately eligible.
+- `queue.addMany(items)`: enqueue `{ data, options? }` items atomically, in input order. All items are validated before enqueue; an empty batch returns `[]`. Scheduled items share one clock reading.
+- `queue.process(handler, { concurrency? })`: starts processing; concurrency defaults to `1`. The handler receives `(data, { signal, jobId, attempt })`.
+- `worker.close()`: stop new claims and wait for active handlers; it does not abort them.
+- `queue.get(id)` returns a snapshot or `null`. `queue.list({ status, limit? })` lists `pending`, `active`, `completed`, `failed`, or `cancelled` jobs (`limit` defaults to 100; range 1–1,000). Snapshots contain `id`, `data`, `status`, `attempt` (claims made), `attempts` (limit), `createdAt`, `availableAt`, `finishedAt`, and `error`; no lease credentials. Expired active jobs remain active until a claim recovers them.
+- `queue.retry(id)` retries a failed job immediately. It preserves attempt history and error; if attempts are exhausted, it grants exactly one additional claim.
+- `queue.cancel(id)` cancels pending jobs only. `queue.reschedule(id, { delay })` or `{ runAt }` changes availability of pending jobs only; exactly one value is required.
+- `queue.remove(id)` removes any non-active job. These four lifecycle methods return `false` if the job is missing or in an incompatible state; invalid inputs and storage errors reject.
 
-For example, inspect failed jobs and retry one, or schedule a pending job again:
+Queues using the same `Storage` instance share a queue-aware poller; only one worker per queue name may be registered on that instance. A separate storage instance has its own poller.
 
-```ts
-const added = await queue.add({ name: 'Grace' })
-const failed = await queue.list({ status: 'failed', limit: 20 })
-if (failed[0]) await queue.retry(failed[0].id)
+## Delivery and retries
 
-const job = await queue.get(added.id)
-if (job?.status === 'pending') {
-  await queue.reschedule(job.id, { delay: 60_000 })
-}
-```
+A claim increments `attempt`; a crash after claiming consumes an attempt. Jobs are delivered at least once, so handlers must tolerate repetition. Active jobs have a 30-second lease, renewed every 10 seconds. The signal aborts if the lease is lost, but handlers must stop cooperatively. Expired leases are recovered on the next claim for that queue; expiry alone does not change stored state.
 
-Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single call, split into a few transactions when the sweep covers many queues. A separate `Storage` instance has its own coordinator. One queue name can be processed by only one worker per `Storage`; registering a second worker for the same name is rejected.
-
-The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain unless a retry backoff is configured. An expired lease is recovered on a subsequent claim for that queue, then retried immediately when attempts remain; expiry alone does not change the stored state.
-
-## Delayed jobs
-
-Pass `delay` in nonnegative safe-integer milliseconds or `runAt` as a nonnegative safe-integer Unix timestamp in milliseconds:
-
-```ts
-await queue.add({ name: 'Ada' }, { delay: 5_000 })
-await queue.add({ name: 'Grace' }, { runAt: Date.now() + 60_000 })
-
-const added = await queue.addMany([
-  { data: { name: 'Lin' } },
-  { data: { name: 'Katherine' }, options: { delay: 5_000 } },
-])
-```
-
-Only one option may be supplied. A past `runAt` is valid and is immediately eligible; without either option, jobs are available immediately. The resulting `availableAt` must be a safe integer, so a delay that overflows the timestamp range is rejected.
-
-Handlers run concurrently as asynchronous tasks in the current Node.js process. They are not worker threads. The context signal aborts when the job loses its lease, but handlers must stop cooperatively. Delivery is at-least-once, so handlers must tolerate repeated execution.
-
-## Retry backoff
-
-`attempts` includes the initial execution. By default, handler failures retry immediately while attempts remain. Configure `retry.backoff` to delay retries:
+Configure optional handler-failure backoff:
 
 ```ts
 const queue = new Queue('email', {
@@ -88,76 +49,26 @@ const queue = new Queue('email', {
 })
 ```
 
-`type` is `fixed` or `exponential`. `delay` is a nonnegative safe-integer number of milliseconds; exponential backoff starts at `delay` after the first failed attempt and doubles for each later retry. `jitter` defaults to `0` and must be between 0 and 1. It reduces the base backoff by a random fraction, so the actual delay is the base backoff multiplied by `1 - random(0, jitter)`. A jitter of `0` leaves the base unchanged; a jitter of `1` provides full jitter from zero up to the base. Fractional milliseconds are rounded up; timestamp overflow is capped at the largest safe integer. Backoff applies to handler failures only; retries after expired-lease recovery remain immediate. Exhausted attempts are recorded as failures without scheduling another retry.
-
-## Retention
-
-Completed and failed jobs are removed asynchronously according to the per-queue
-retention policy after completion or terminal failure, during claim passes,
-and when a worker starts. By default every completed job is eligible for
-removal and the newest 100 failures are kept for diagnostics. Cancelled jobs
-are not covered by automatic retention and
-remain until explicitly removed. Since cleanup is asynchronous, a completed or
-failed job may still be visible after its transition, then disappear between
-`get()` or `list()` calls; a process crash can defer cleanup until a worker runs
-again.
-Pass `retention` to keep more or fewer:
+Backoff can be `fixed` or `exponential`; `delay` is nonnegative safe-integer milliseconds and `jitter` is from 0 to 1 (default 0), reducing the base delay by a random fraction up to that value. It applies to handler failures only; lease-expiry retries are immediate. `attempts` includes the initial claim; exhausted attempts are recorded as failures without another retry.
 
 ```ts
-const queue = new Queue('email', {
+const added = await queue.add({ name: 'Grace' })
+const failed = await queue.list({ status: 'failed', limit: 20 })
+if (failed[0]) await queue.retry(failed[0].id)
+
+const job = await queue.get(added.id)
+if (job?.status === 'pending') await queue.reschedule(job.id, { delay: 60_000 })
+```
+
+## Retention and errors
+
+Completed and failed jobs are cleaned asynchronously; cancelled jobs remain until removed. Configure `retention` per status as a count, `null` to keep all, or `{ count?, maxAge? }` in milliseconds. Defaults are 0 completed and 100 failed. In a rule object, omitted `count` uses that status default and omitted `maxAge` disables the age bound. A job is removed when it exceeds either bound, so cleanup can make snapshots disappear between reads:
+
+```ts
+const emailQueue = new Queue('email', {
   storage,
-  // Count shorthand: keep the newest 10 completed jobs and 1,000 failures.
-  retention: { completed: 10, failed: 1_000 },
+  retention: { completed: 10, failed: { count: 1_000, maxAge: 7 * 24 * 60 * 60 * 1_000 } },
 })
 ```
 
-A status can also be a rule object with independent `count` and `maxAge` bounds,
-where `maxAge` is milliseconds:
-
-```ts
-const queue = new Queue('email', {
-  storage,
-  retention: {
-    completed: 0,
-    failed: { count: 1_000, maxAge: 7 * 24 * 60 * 60 * 1_000 },
-  },
-})
-```
-
-`count` keeps that many newest rows; an omitted `count` uses the status default
-(completed `0`, failed `100`) and `count: null` disables the count bound. `maxAge`
-removes rows finished before `now - maxAge`; an omitted or null `maxAge` disables
-the age bound. A row is eligible when it exceeds either bound, so both are upper
-limits and the stricter one wins. The cutoff is strict: a row finished exactly at
-`now - maxAge` is retained. Cleanup passes the worker's current time as `now`, so
-every age bound in a pass is evaluated against one clock reading.
-
-A `null` status (or `count: null, maxAge: null`) keeps every job of that status,
-for example `retention: { completed: null, failed: null }` to disable cleanup
-entirely.
-
-Cleanup runs in bounded batches, at most one pass per second per queue, and
-yields to queue work between batches while eligible rows remain. A deferred task
-schedules passes after claim passes (which can recover expired jobs) and after
-terminal transitions, so `process()` and handler acknowledgements never run
-database maintenance themselves. An idle queue pays at most one pass per
-throttle interval. `worker.close()` stops scheduling new passes and waits for a
-batch already in flight.
-
-Every storage adapter implements bounded `cleanup` for completed and failed jobs
-only. The worker schedules cleanup asynchronously in bounded batches, so those
-rows may remain visible after a terminal transition and can survive a process
-crash until a worker runs again. Cancelled jobs persist until `queue.remove()`.
-
-## Error reporting
-
-`onError(err, ctx)` receives errors the queue would otherwise swallow. `ctx` is discriminated by `operation`:
-
-- `claim` — a claim failed before any job was acquired. Grouped claim failures are reported once per affected queue.
-- `cleanup` — a bounded cleanup pass failed for the queue. Cleanup is retried after the next terminal transition.
-- `heartbeat`, `complete`, `fail` — a lease mutation for a claimed job failed.
-- `handler` — the handler threw or rejected.
-
-Every context carries `queue`; job-scoped operations also carry `jobId` and `attempt`. Handler contexts add `attemptsExhausted`, derived from the claimed job's attempt limits. It means no retry can be issued; it does not confirm that a terminal failure was committed to storage.
-
-`lease_lost` is a normal protocol outcome, not an error, and is never reported. Without `onError`, errors are written to `console.error` with the same context. The callback may be sync or async; errors it throws or rejects are logged safely and never affect polling, acknowledgement, or shutdown.
+`onError(error, context)` receives `claim`, `cleanup`, `heartbeat`, `complete`, `fail`, or `handler` errors; without it errors go to `console.error`. `lease_lost` is a normal result, not an error. Errors thrown by `onError` are logged and do not affect queue processing.
