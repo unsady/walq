@@ -1,4 +1,5 @@
 import type {
+  CancelInput,
   ClaimedJob,
   ClaimInput,
   ClaimQueuesInput,
@@ -9,7 +10,13 @@ import type {
   EnqueueInput,
   FailInput,
   HeartbeatInput,
+  InspectInput,
+  JobSnapshot,
   LeaseMutationResult,
+  ListInput,
+  RemoveInput,
+  RescheduleInput,
+  RetryInput,
   StoredJob,
 } from './storage-types.js'
 
@@ -37,6 +44,28 @@ export interface Storage {
    * Coordinators fall back to claim() when this method is absent.
    */
   claimQueues?(input: ClaimQueuesInput): Promise<ClaimQueuesResult>
+
+  /** Inspect one job by its exact queue and ID; return null when absent. */
+  inspect(input: InspectInput): Promise<JobSnapshot | null>
+
+  /** List jobs in one required status, with a positive safe-integer limit. */
+  list(input: ListInput): Promise<JobSnapshot[]>
+
+  /**
+   * Retry a failed job immediately while retaining attemptsMade and error. If
+   * exhausted, increase attempts to attemptsMade + 1. Return false unless the
+   * job is failed in this queue.
+   */
+  retry(input: RetryInput): Promise<boolean>
+
+  /** Cancel a pending job and retain it as a terminal cancelled snapshot. */
+  cancel(input: CancelInput): Promise<boolean>
+
+  /** Change the absolute availability time of a pending job. */
+  reschedule(input: RescheduleInput): Promise<boolean>
+
+  /** Physically remove a job unless it is active. */
+  remove(input: RemoveInput): Promise<boolean>
 
   /** Complete a job only while its token matches and its lease is unexpired. */
   complete(input: CompleteInput): Promise<LeaseMutationResult>

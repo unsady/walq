@@ -144,6 +144,36 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 
       return inner.enqueueMany(inputs)
     },
+    async inspect(input) {
+      tracker.onOperation()
+
+      return inner.inspect(input)
+    },
+    async list(input) {
+      tracker.onOperation()
+
+      return inner.list(input)
+    },
+    async retry(input) {
+      tracker.onOperation()
+
+      return inner.retry(input)
+    },
+    async cancel(input) {
+      tracker.onOperation()
+
+      return inner.cancel(input)
+    },
+    async reschedule(input) {
+      tracker.onOperation()
+
+      return inner.reschedule(input)
+    },
+    async remove(input) {
+      tracker.onOperation()
+
+      return inner.remove(input)
+    },
     async claim(input) {
       tracker.onOperation()
       const started = performance.now()

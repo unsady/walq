@@ -454,6 +454,173 @@ export function runStorageConformance(
       expect(await storage.claim(claimInput({ queue: otherQueue, now: 100 }))).toEqual([])
     })
 
+    it('inspects jobs only within the requested queue and lists by required status', async () => {
+      const first = await storage.enqueue(enqueueInput({ availableAt: 9 }))
+      const second = await storage.enqueue(enqueueInput({ availableAt: 8 }))
+      await storage.enqueue(enqueueInput({ queue: otherQueue }))
+
+      expect(await storage.inspect({ queue, id: first.id })).toMatchObject({
+        ...first,
+        finishedAt: null,
+      })
+      expect(await storage.inspect({ queue: otherQueue, id: first.id })).toBeNull()
+      expect(await storage.inspect({ queue, id: 'missing' })).toBeNull()
+      expect(
+        (await storage.list({ queue, status: 'pending', limit: 10 })).map(({ id }) => id),
+      ).toEqual([second.id, first.id])
+      expect(await storage.list({ queue, status: 'active', limit: 10 })).toEqual([])
+    })
+
+    it('orders active and terminal listings deterministically', async () => {
+      const activeJobs = [
+        await storage.enqueue(enqueueInput()),
+        await storage.enqueue(enqueueInput()),
+        await storage.enqueue(enqueueInput()),
+      ]
+      expect(await storage.claim(claimInput({ limit: activeJobs.length }))).toHaveLength(
+        activeJobs.length,
+      )
+      const expectedActive = activeJobs
+        .map(({ id }) => id)
+        .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
+      expect(
+        (await storage.list({ queue, status: 'active', limit: 10 })).map(({ id }) => id),
+      ).toEqual(expectedActive)
+
+      const failed: string[] = []
+      for (const time of [20, 21, 21]) {
+        const source = await storage.enqueue(
+          enqueueInput({ now: time, availableAt: time, attempts: 1 }),
+        )
+        const [claimed] = await storage.claim(claimInput({ now: time, limit: 1 }))
+        expect(claimed?.id).toBe(source.id)
+        await storage.fail({
+          id: claimed!.id,
+          leaseToken: claimed!.leaseToken,
+          now: time,
+          error: 'terminal',
+          retryAt: null,
+        })
+        failed.push(source.id)
+      }
+      const expectedFailed = [failed[1]!, failed[2]!].sort((left, right) =>
+        Buffer.compare(Buffer.from(right), Buffer.from(left)),
+      )
+      expect(
+        (await storage.list({ queue, status: 'failed', limit: 10 })).map(({ id }) => id),
+      ).toEqual([...expectedFailed, failed[0]])
+      expect(
+        (await storage.list({ queue, status: 'failed', limit: 2 })).map(({ id }) => id),
+      ).toEqual([...expectedFailed])
+    })
+
+    it('retries failed jobs immediately without resetting attemptsMade or error', async () => {
+      const source = await storage.enqueue(enqueueInput({ attempts: 1 }))
+      const [claimed] = await storage.claim(claimInput({ limit: 1 }))
+      await storage.fail({
+        id: claimed!.id,
+        leaseToken: claimed!.leaseToken,
+        now: 11,
+        error: 'preserved error',
+        retryAt: null,
+      })
+
+      expect(await storage.retry({ queue, id: source.id, now: 15 })).toBe(true)
+      expect(await storage.inspect({ queue, id: source.id })).toMatchObject({
+        status: 'pending',
+        attemptsMade: 1,
+        attempts: 2,
+        error: 'preserved error',
+        availableAt: 15,
+        finishedAt: null,
+      })
+      const [retried] = await storage.claim(claimInput({ now: 15, limit: 1 }))
+      expect(retried).toMatchObject({ id: source.id, attemptsMade: 2, attempts: 2 })
+
+      await storage.fail({
+        id: retried!.id,
+        leaseToken: retried!.leaseToken,
+        now: 16,
+        error: 'second failure',
+        retryAt: null,
+      })
+      expect(await storage.retry({ queue, id: source.id, now: 17 })).toBe(true)
+      expect(await storage.inspect({ queue, id: source.id })).toMatchObject({
+        status: 'pending',
+        attemptsMade: 2,
+        attempts: 3,
+        error: 'second failure',
+      })
+    })
+
+    it('cancels and reschedules pending jobs, and removes only non-active jobs', async () => {
+      const cancelled = await storage.enqueue(enqueueInput())
+      expect(await storage.cancel({ queue, id: cancelled.id, now: 11 })).toBe(true)
+      expect(await storage.inspect({ queue, id: cancelled.id })).toMatchObject({
+        status: 'cancelled',
+        finishedAt: 11,
+      })
+      expect(
+        (await storage.list({ queue, status: 'cancelled', limit: 1 })).map(({ id }) => id),
+      ).toEqual([cancelled.id])
+      expect(await storage.cancel({ queue, id: cancelled.id, now: 12 })).toBe(false)
+      expect(await storage.remove({ queue, id: cancelled.id })).toBe(true)
+      expect(await storage.inspect({ queue, id: cancelled.id })).toBeNull()
+
+      const pending = await storage.enqueue(enqueueInput())
+      expect(await storage.reschedule({ queue, id: pending.id, availableAt: 50 })).toBe(true)
+      expect(await storage.inspect({ queue, id: pending.id })).toMatchObject({ availableAt: 50 })
+      expect(await storage.claim(claimInput({ now: 49 }))).toEqual([])
+      expect((await storage.claim(claimInput({ now: 50, limit: 1 }))).map(({ id }) => id)).toEqual([
+        pending.id,
+      ])
+
+      const active = await storage.enqueue(enqueueInput())
+      const [claimed] = await storage.claim(claimInput({ limit: 1 }))
+      expect(claimed?.id).toBe(active.id)
+      expect(await storage.remove({ queue, id: active.id })).toBe(false)
+      expect(await storage.remove({ queue, id: active.id })).toBe(false)
+    })
+
+    it('returns false for missing, cross-queue, and illegal-state mutations', async () => {
+      const pending = await storage.enqueue(enqueueInput())
+      expect(await storage.retry({ queue, id: pending.id, now })).toBe(false)
+      expect(await storage.cancel({ queue: otherQueue, id: pending.id, now })).toBe(false)
+      expect(await storage.reschedule({ queue: otherQueue, id: pending.id, availableAt: 20 })).toBe(
+        false,
+      )
+      expect(await storage.remove({ queue: otherQueue, id: pending.id })).toBe(false)
+      expect(await storage.cancel({ queue, id: 'missing', now })).toBe(false)
+      expect(await storage.retry({ queue, id: 'missing', now })).toBe(false)
+      expect(await storage.reschedule({ queue, id: 'missing', availableAt: 20 })).toBe(false)
+      expect(await storage.remove({ queue, id: 'missing' })).toBe(false)
+    })
+
+    it('validates lifecycle operation inputs without mutation', async () => {
+      const source = await storage.enqueue(enqueueInput({ attempts: 2 }))
+
+      await expect(storage.inspect(null as never)).rejects.toThrow(/.+/)
+      await expect(storage.inspect({ queue: '', id: source.id })).rejects.toThrow(/.+/)
+      await expect(storage.list({ queue, status: undefined as never, limit: 1 })).rejects.toThrow(
+        /.+/,
+      )
+      await expect(storage.list({ queue, status: 'pending', limit: 0 })).rejects.toThrow(/.+/)
+      await expect(
+        storage.list({ queue, status: 'pending', limit: Number.MAX_SAFE_INTEGER + 1 }),
+      ).rejects.toThrow(/.+/)
+      await expect(storage.retry({ queue, id: source.id, now: Number.NaN })).rejects.toThrow(/.+/)
+      await expect(storage.cancel({ queue, id: source.id, now: -1 })).rejects.toThrow(/.+/)
+      await expect(
+        storage.reschedule({ queue, id: source.id, availableAt: Number.POSITIVE_INFINITY }),
+      ).rejects.toThrow(/.+/)
+      await expect(storage.remove(null as never)).rejects.toThrow(/.+/)
+
+      expect(await storage.inspect({ queue, id: source.id })).toMatchObject({
+        status: 'pending',
+        availableAt: now,
+      })
+    })
+
     it('rejects invalid inputs without mutation', async () => {
       // Messages are not standardized; only rejection without mutation is asserted.
       const base = enqueueInput()

@@ -42,7 +42,7 @@ async function race(path: string, operations: { method: string; input: object }[
   try {
     const tasks = operations.map(
       (operation) =>
-        new Promise<ClaimedJob[] | LeaseMutationResult>((resolve, reject) => {
+        new Promise<ClaimedJob[] | LeaseMutationResult | boolean>((resolve, reject) => {
           let settled = false
           const timer = setTimeout(() => {
             settled = true
@@ -55,7 +55,9 @@ async function race(path: string, operations: { method: string; input: object }[
           workers.push(worker)
           worker.on(
             'message',
-            (message: { ready: true } | { result: ClaimedJob[] | LeaseMutationResult }) => {
+            (
+              message: { ready: true } | { result: ClaimedJob[] | LeaseMutationResult | boolean },
+            ) => {
               if (!('result' in message)) {
                 Atomics.add(new Int32Array(gate), 0, 1)
                 if (Atomics.load(new Int32Array(gate), 0) === operations.length)
@@ -493,6 +495,126 @@ describe('SQLite retention', () => {
 })
 
 describe('SQLite integration', () => {
+  it('migrates v2 jobs, leases, and indexes to the v3 schema', async () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    db.exec(`
+      CREATE TABLE walq_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      INSERT INTO walq_schema (id, version) VALUES (1, 2);
+      CREATE TABLE walq_jobs (
+        id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
+        queue TEXT NOT NULL COLLATE BINARY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed')),
+        createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
+        availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
+        finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
+        attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
+        attempts INTEGER NOT NULL CHECK (attempts > 0),
+        error TEXT,
+        leaseToken TEXT,
+        expiresAt INTEGER,
+        CHECK (
+          (status = 'active' AND leaseToken IS NOT NULL AND expiresAt IS NOT NULL AND expiresAt >= 0)
+          OR (status != 'active' AND leaseToken IS NULL AND expiresAt IS NULL)
+        ),
+        CHECK (
+          (status IN ('completed', 'failed') AND finishedAt IS NOT NULL)
+          OR (status NOT IN ('completed', 'failed') AND finishedAt IS NULL)
+        )
+      );
+      CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
+      CREATE INDEX walq_active ON walq_jobs (queue, expiresAt) WHERE status = 'active';
+      CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
+        WHERE finishedAt IS NOT NULL;
+      INSERT INTO walq_jobs VALUES
+        ('pending-id', 'email', 'send', '{}', 'pending', 1, 2, NULL, 0, 2, NULL, NULL, NULL),
+        ('active-id', 'email', 'send', '{}', 'active', 3, 4, NULL, 1, 3, 'last error', 'lease-token', 50),
+        ('completed-id', 'email', 'send', '{}', 'completed', 5, 6, 7, 1, 3, NULL, NULL, NULL),
+        ('failed-id', 'other', 'send', '{}', 'failed', 8, 9, 10, 2, 2, 'failed', NULL, NULL);
+    `)
+
+    const storage = betterSqlite3(db)
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 3 })
+    expect(
+      db
+        .prepare(
+          'SELECT id, queue, status, availableAt, finishedAt, attemptsMade, attempts, error, leaseToken, expiresAt FROM walq_jobs ORDER BY id',
+        )
+        .all(),
+    ).toEqual([
+      {
+        id: 'active-id',
+        queue: 'email',
+        status: 'active',
+        availableAt: 4,
+        finishedAt: null,
+        attemptsMade: 1,
+        attempts: 3,
+        error: 'last error',
+        leaseToken: 'lease-token',
+        expiresAt: 50,
+      },
+      {
+        id: 'completed-id',
+        queue: 'email',
+        status: 'completed',
+        availableAt: 6,
+        finishedAt: 7,
+        attemptsMade: 1,
+        attempts: 3,
+        error: null,
+        leaseToken: null,
+        expiresAt: null,
+      },
+      {
+        id: 'failed-id',
+        queue: 'other',
+        status: 'failed',
+        availableAt: 9,
+        finishedAt: 10,
+        attemptsMade: 2,
+        attempts: 2,
+        error: 'failed',
+        leaseToken: null,
+        expiresAt: null,
+      },
+      {
+        id: 'pending-id',
+        queue: 'email',
+        status: 'pending',
+        availableAt: 2,
+        finishedAt: null,
+        attemptsMade: 0,
+        attempts: 2,
+        error: null,
+        leaseToken: null,
+        expiresAt: null,
+      },
+    ])
+    expect(db.prepare('PRAGMA index_list(walq_jobs)').all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'walq_pending' }),
+        expect.objectContaining({ name: 'walq_active' }),
+        expect.objectContaining({ name: 'walq_terminal' }),
+      ]),
+    )
+    expect(db.prepare('PRAGMA index_info(walq_active)').all()).toEqual([
+      { seqno: 0, cid: 1, name: 'queue' },
+      { seqno: 1, cid: 12, name: 'expiresAt' },
+      { seqno: 2, cid: 0, name: 'id' },
+    ])
+    expect(
+      await storage.heartbeat({
+        id: 'active-id',
+        leaseToken: 'lease-token',
+        now: 20,
+        leaseDuration: 10,
+      }),
+    ).toBe('applied')
+  })
+
   it('persists enqueued jobs across reopen', async () => {
     const path = filename()
     const { db, storage } = open(path)
@@ -524,7 +646,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 3')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 4')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 
@@ -689,6 +811,98 @@ describe('SQLite integration', () => {
       expect(jobs.every((item) => item.leaseToken !== job!.leaseToken)).toBe(true)
     },
   )
+
+  it('atomically serializes concurrent retry and cancellation transitions', async () => {
+    const path = filename()
+    const { db, storage } = open(path)
+    db.pragma('journal_mode = WAL')
+
+    const failed = await storage.enqueue({ ...input, attempts: 1 })
+    const [claimed] = await storage.claim(claimInput)
+    await storage.fail({
+      id: claimed!.id,
+      leaseToken: claimed!.leaseToken,
+      now: 11,
+      error: 'retry me',
+      retryAt: null,
+    })
+    const retryInput = { queue: 'email', id: failed.id, now: 12 }
+    const retryResults = await race(path, [
+      { method: 'retry', input: retryInput },
+      { method: 'retry', input: retryInput },
+    ])
+    expect(retryResults.sort()).toEqual([false, true])
+    expect(
+      db.prepare('SELECT status, attemptsMade, attempts, availableAt FROM walq_jobs').get(),
+    ).toEqual({ status: 'pending', attemptsMade: 1, attempts: 2, availableAt: 12 })
+
+    const pending = await storage.enqueue(input)
+    const cancelInput = { queue: 'email', id: pending.id, now: 13 }
+    const cancelResults = await race(path, [
+      { method: 'cancel', input: cancelInput },
+      { method: 'cancel', input: cancelInput },
+    ])
+    expect(cancelResults.sort()).toEqual([false, true])
+    expect(await storage.inspect({ queue: 'email', id: pending.id })).toMatchObject({
+      status: 'cancelled',
+      finishedAt: 13,
+    })
+  })
+
+  it('validates inspection inputs and protects attempt-count overflow', async () => {
+    const { db, storage } = open()
+    const pending = await storage.enqueue(input)
+
+    await expect(storage.inspect({ queue: '', id: pending.id })).rejects.toThrow('queue')
+    await expect(
+      storage.list({ queue: 'email', status: undefined as never, limit: 1 }),
+    ).rejects.toThrow('status')
+    await expect(
+      storage.list({ queue: 'email', status: 'pending', limit: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow('limit')
+    await expect(
+      storage.retry({ queue: 'email', id: pending.id, now: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow('now')
+    await expect(storage.cancel({ queue: 'email', id: pending.id, now: -1 })).rejects.toThrow('now')
+    await expect(
+      storage.reschedule({
+        queue: 'email',
+        id: pending.id,
+        availableAt: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).rejects.toThrow('availableAt')
+
+    const max = Number.MAX_SAFE_INTEGER
+    db.prepare(`
+      INSERT INTO walq_jobs
+        (id, queue, name, data, status, createdAt, availableAt, finishedAt,
+         attemptsMade, attempts, error)
+      VALUES ('overflow', 'email', 'send', '{}', 'failed', 0, 0, 0, @max, @max, NULL)
+    `).run({ max })
+    await expect(storage.retry({ queue: 'email', id: 'overflow', now: 1 })).rejects.toThrow(
+      'safe integer range',
+    )
+    expect(
+      db
+        .prepare("SELECT status, attemptsMade, attempts FROM walq_jobs WHERE id = 'overflow'")
+        .get(),
+    ).toEqual({ status: 'failed', attemptsMade: max, attempts: max })
+  })
+
+  it('keeps lifecycle reads and mutations scoped to the exact queue', async () => {
+    const { storage } = open()
+    const job = await storage.enqueue({ ...input, queue: 'email', attempts: 1 })
+    await expect(storage.inspect({ queue: 'other', id: job.id })).resolves.toBeNull()
+    await expect(storage.list({ queue: 'other', status: 'pending', limit: 10 })).resolves.toEqual(
+      [],
+    )
+    expect(await storage.cancel({ queue: 'other', id: job.id, now: 11 })).toBe(false)
+    expect(await storage.reschedule({ queue: 'other', id: job.id, availableAt: 20 })).toBe(false)
+    expect(await storage.remove({ queue: 'other', id: job.id })).toBe(false)
+    expect(await storage.inspect({ queue: 'email', id: job.id })).toMatchObject({
+      status: 'pending',
+    })
+  })
 
   it('never issues duplicate live leases to concurrent workers', async () => {
     const path = filename()

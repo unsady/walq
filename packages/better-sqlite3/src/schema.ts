@@ -1,6 +1,59 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 2
+const schemaVersion = 3
+
+function jobsTable(name: string): string {
+  return `
+    CREATE TABLE ${name} (
+      id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
+      queue TEXT NOT NULL COLLATE BINARY,
+      name TEXT NOT NULL,
+      data TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed', 'cancelled')),
+      createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
+      availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
+      finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
+      attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
+      attempts INTEGER NOT NULL CHECK (attempts > 0),
+      error TEXT,
+      leaseToken TEXT,
+      expiresAt INTEGER,
+      CHECK (
+        (status = 'active' AND leaseToken IS NOT NULL AND expiresAt IS NOT NULL AND expiresAt >= 0)
+        OR (status != 'active' AND leaseToken IS NULL AND expiresAt IS NULL)
+      ),
+      CHECK (
+        (status IN ('completed', 'failed', 'cancelled') AND finishedAt IS NOT NULL)
+        OR (status NOT IN ('completed', 'failed', 'cancelled') AND finishedAt IS NULL)
+      )
+    );
+  `
+}
+
+const indexes = `
+  CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
+  CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
+  CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
+    WHERE finishedAt IS NOT NULL;
+`
+
+function migrateV2(db: Database.Database): void {
+  db.exec(`
+    ${jobsTable('walq_jobs_v3')}
+    INSERT INTO walq_jobs_v3 (
+      id, queue, name, data, status, createdAt, availableAt, finishedAt,
+      attemptsMade, attempts, error, leaseToken, expiresAt
+    )
+    SELECT
+      id, queue, name, data, status, createdAt, availableAt, finishedAt,
+      attemptsMade, attempts, error, leaseToken, expiresAt
+    FROM walq_jobs;
+    DROP TABLE walq_jobs;
+    ALTER TABLE walq_jobs_v3 RENAME TO walq_jobs;
+    ${indexes}
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 2;
+  `)
+}
 
 export function initialize(db: Database.Database): void {
   if (db.inTransaction) throw new Error('Storage cannot initialize inside a transaction')
@@ -19,6 +72,10 @@ export function initialize(db: Database.Database): void {
       .get() as { version: number } | undefined
 
     if (row) {
+      if (row.version === 2) {
+        migrateV2(db)
+        return
+      }
       if (row.version !== schemaVersion) {
         throw new Error(`Unsupported walq schema version: ${row.version}`)
       }
@@ -26,33 +83,8 @@ export function initialize(db: Database.Database): void {
     }
 
     db.exec(`
-      CREATE TABLE walq_jobs (
-        id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
-        queue TEXT NOT NULL COLLATE BINARY,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed')),
-        createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
-        availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
-        finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
-        attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
-        attempts INTEGER NOT NULL CHECK (attempts > 0),
-        error TEXT,
-        leaseToken TEXT,
-        expiresAt INTEGER,
-        CHECK (
-          (status = 'active' AND leaseToken IS NOT NULL AND expiresAt IS NOT NULL AND expiresAt >= 0)
-          OR (status != 'active' AND leaseToken IS NULL AND expiresAt IS NULL)
-        ),
-        CHECK (
-          (status IN ('completed', 'failed') AND finishedAt IS NOT NULL)
-          OR (status NOT IN ('completed', 'failed') AND finishedAt IS NULL)
-        )
-      );
-      CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
-      CREATE INDEX walq_active ON walq_jobs (queue, expiresAt) WHERE status = 'active';
-      CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
-        WHERE finishedAt IS NOT NULL;
+      ${jobsTable('walq_jobs')}
+      ${indexes}
       INSERT INTO walq_schema (id, version) VALUES (1, ${schemaVersion});
     `)
   }).immediate()

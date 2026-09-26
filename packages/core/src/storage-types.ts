@@ -3,7 +3,7 @@ export type JobId = string
 export type QueueName = string
 export type LeaseToken = string
 
-export type JobStatus = 'pending' | 'active' | 'completed' | 'failed'
+export type JobStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled'
 
 /** All timestamps are Unix time in milliseconds. Data is serialized JSON. */
 export interface StoredJob {
@@ -20,6 +20,11 @@ export interface StoredJob {
   attempts: number
   /** Most recent handler error; lease expiration does not overwrite it. */
   error: string | null
+}
+
+/** A persisted job snapshot, including the time it entered a terminal state. */
+export interface JobSnapshot extends StoredJob {
+  finishedAt: number | null
 }
 
 export interface ClaimedJob extends StoredJob {
@@ -57,6 +62,35 @@ export interface ClaimQueuesInput {
 
 /** Result of a grouped claim; `results[k]` belongs to `requests[k]`. */
 export type ClaimQueuesResult = ClaimedJob[][]
+
+export interface InspectInput {
+  queue: QueueName
+  id: JobId
+}
+
+/** List persisted jobs of one required status, ordered deterministically by status. */
+export interface ListInput {
+  queue: QueueName
+  status: JobStatus
+  /** Maximum number of snapshots to return; the storage contract has no default. */
+  limit: number
+}
+
+export interface RetryInput extends InspectInput {
+  /** Current time; a retried job is immediately available. */
+  now: number
+}
+
+export interface CancelInput extends InspectInput {
+  now: number
+}
+
+export interface RescheduleInput extends InspectInput {
+  /** Absolute Unix time in milliseconds at which the pending job becomes available. */
+  availableAt: number
+}
+
+export type RemoveInput = InspectInput
 
 export interface CompleteInput {
   id: JobId

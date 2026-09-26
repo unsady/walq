@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type {
+  CancelInput,
   ClaimedJob,
   ClaimInput,
   ClaimQueuesInput,
@@ -11,7 +12,14 @@ import type {
   EnqueueInput,
   FailInput,
   HeartbeatInput,
+  InspectInput,
+  JobSnapshot,
+  JobStatus,
   LeaseMutationResult,
+  ListInput,
+  RemoveInput,
+  RescheduleInput,
+  RetryInput,
   Storage,
   StoredJob,
 } from '@walq/core/storage'
@@ -24,7 +32,10 @@ import { expiry, integer, lease, retentionRule, text } from './validation.js'
 
 const metadata =
   'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
+const snapshotMetadata = `${metadata}, finishedAt`
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
+const maxSafeInteger = Number.MAX_SAFE_INTEGER
+const jobStatuses: readonly JobStatus[] = ['pending', 'active', 'completed', 'failed', 'cancelled']
 
 interface ClaimStep {
   input: ClaimInput
@@ -33,6 +44,20 @@ interface ClaimStep {
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)
+}
+
+function validateObject(input: unknown, name: string): asserts input is Record<string, unknown> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new TypeError(`${name} must be an object`)
+  }
+}
+
+function validateInspect(input: InspectInput): InspectInput {
+  validateObject(input, 'input')
+  const validated = { queue: input.queue, id: input.id }
+  text(validated.queue, 'queue')
+  text(validated.id, 'id')
+  return validated
 }
 
 function validateEnqueue(input: EnqueueInput): EnqueueInput {
@@ -68,6 +93,13 @@ class BetterSqlite3Storage implements Storage {
   private readonly recover: Database.Statement
   private readonly select: Database.Statement
   private readonly acquire: Database.Statement
+  private readonly inspectStatement: Database.Statement
+  private readonly listStatements: Record<JobStatus, Database.Statement>
+  private readonly retryStatement: Database.Statement
+  private readonly retryOverflowStatement: Database.Statement
+  private readonly cancelStatement: Database.Statement
+  private readonly rescheduleStatement: Database.Statement
+  private readonly removeStatement: Database.Statement
   private readonly completeStatement: Database.Statement
   private readonly failStatement: Database.Statement
   private readonly heartbeatStatement: Database.Statement
@@ -116,6 +148,73 @@ class BetterSqlite3Storage implements Storage {
         WHERE id = @id
         RETURNING ${metadata}, leaseToken, expiresAt
       `,
+    )
+    this.inspectStatement = prepare(
+      db,
+      `SELECT ${snapshotMetadata} FROM walq_jobs WHERE queue = @queue AND id = @id`,
+    )
+    this.listStatements = {
+      pending: prepare(
+        db,
+        `SELECT ${snapshotMetadata} FROM walq_jobs
+         WHERE queue = @queue AND status = 'pending'
+         ORDER BY availableAt, id COLLATE BINARY LIMIT @limit`,
+      ),
+      active: prepare(
+        db,
+        `SELECT ${snapshotMetadata} FROM walq_jobs
+         WHERE queue = @queue AND status = 'active'
+         ORDER BY expiresAt, id COLLATE BINARY LIMIT @limit`,
+      ),
+      completed: prepare(
+        db,
+        `SELECT ${snapshotMetadata} FROM walq_jobs
+         WHERE queue = @queue AND status = 'completed'
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
+      ),
+      failed: prepare(
+        db,
+        `SELECT ${snapshotMetadata} FROM walq_jobs
+         WHERE queue = @queue AND status = 'failed'
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
+      ),
+      cancelled: prepare(
+        db,
+        `SELECT ${snapshotMetadata} FROM walq_jobs
+         WHERE queue = @queue AND status = 'cancelled'
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
+      ),
+    }
+    this.retryStatement = prepare(
+      db,
+      `
+        UPDATE walq_jobs SET status = 'pending',
+          availableAt = @now,
+          attempts = CASE WHEN attemptsMade >= attempts THEN attemptsMade + 1 ELSE attempts END,
+          finishedAt = NULL
+        WHERE queue = @queue AND id = @id AND status = 'failed'
+          AND (attemptsMade < attempts OR attemptsMade < @maxSafeInteger)
+      `,
+    )
+    this.retryOverflowStatement = prepare(
+      db,
+      `SELECT 1 AS overflow FROM walq_jobs
+       WHERE queue = @queue AND id = @id AND status = 'failed'
+         AND attemptsMade >= attempts AND attemptsMade >= @maxSafeInteger`,
+    )
+    this.cancelStatement = prepare(
+      db,
+      `UPDATE walq_jobs SET status = 'cancelled', finishedAt = @now
+       WHERE queue = @queue AND id = @id AND status = 'pending'`,
+    )
+    this.rescheduleStatement = prepare(
+      db,
+      `UPDATE walq_jobs SET availableAt = @availableAt
+       WHERE queue = @queue AND id = @id AND status = 'pending'`,
+    )
+    this.removeStatement = prepare(
+      db,
+      `DELETE FROM walq_jobs WHERE queue = @queue AND id = @id AND status != 'active'`,
     )
     this.completeStatement = prepare(
       db,
@@ -207,6 +306,68 @@ class BetterSqlite3Storage implements Storage {
     return chunkClaims(steps, (step) => step.input.limit).flatMap((chunk) =>
       this.claimTransaction.immediate(chunk),
     )
+  }
+
+  async inspect(input: InspectInput): Promise<JobSnapshot | null> {
+    this.assertAutocommit()
+    const validated = validateInspect(input)
+    return (this.inspectStatement.get(validated) as JobSnapshot | undefined) ?? null
+  }
+
+  async list(input: ListInput): Promise<JobSnapshot[]> {
+    this.assertAutocommit()
+    validateObject(input, 'input')
+    text(input.queue, 'queue')
+    if (!jobStatuses.includes(input.status)) {
+      throw new TypeError('status must be a supported job status')
+    }
+    integer(input.limit, 'limit', 1)
+
+    return this.listStatements[input.status].all(input) as JobSnapshot[]
+  }
+
+  async retry(input: RetryInput): Promise<boolean> {
+    this.assertAutocommit()
+    const validated = validateInspect(input)
+    integer(input.now, 'now')
+    const changes = this.retryStatement.run({
+      ...validated,
+      now: input.now,
+      maxSafeInteger,
+    }).changes
+    if (changes === 1) return true
+
+    const overflow = this.retryOverflowStatement.get({
+      ...validated,
+      maxSafeInteger,
+    })
+    if (overflow !== undefined) throw new RangeError('attempts would exceed the safe integer range')
+    return false
+  }
+
+  async cancel(input: CancelInput): Promise<boolean> {
+    this.assertAutocommit()
+    const validated = validateInspect(input)
+    integer(input.now, 'now')
+    return this.cancelStatement.run({ ...validated, now: input.now }).changes === 1
+  }
+
+  async reschedule(input: RescheduleInput): Promise<boolean> {
+    this.assertAutocommit()
+    const validated = validateInspect(input)
+    integer(input.availableAt, 'availableAt')
+    return (
+      this.rescheduleStatement.run({
+        ...validated,
+        availableAt: input.availableAt,
+      }).changes === 1
+    )
+  }
+
+  async remove(input: RemoveInput): Promise<boolean> {
+    this.assertAutocommit()
+    const validated = validateInspect(input)
+    return this.removeStatement.run(validated).changes === 1
   }
 
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {

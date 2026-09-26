@@ -74,6 +74,24 @@ function groupedStorage(
       calls.push(requests)
       return handler(requests)
     },
+    async inspect() {
+      return null
+    },
+    async list() {
+      return []
+    },
+    async retry() {
+      return false
+    },
+    async cancel() {
+      return false
+    },
+    async reschedule() {
+      return false
+    },
+    async remove() {
+      return false
+    },
     async complete() {
       return 'applied'
     },
@@ -130,6 +148,36 @@ function gatedStorage(): GatedStorage {
       started.push('claim')
       await gate.promise
       return []
+    },
+    async inspect() {
+      started.push('inspect')
+      await gate.promise
+      return null
+    },
+    async list() {
+      started.push('list')
+      await gate.promise
+      return []
+    },
+    async retry() {
+      started.push('retry')
+      await gate.promise
+      return false
+    },
+    async cancel() {
+      started.push('cancel')
+      await gate.promise
+      return false
+    },
+    async reschedule() {
+      started.push('reschedule')
+      await gate.promise
+      return false
+    },
+    async remove() {
+      started.push('remove')
+      await gate.promise
+      return false
     },
     async complete() {
       started.push('complete')

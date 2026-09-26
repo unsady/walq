@@ -101,6 +101,30 @@ class TestStorage implements Storage {
     return this.#leave(claimed)
   }
 
+  async inspect() {
+    return null
+  }
+
+  async list() {
+    return []
+  }
+
+  async retry() {
+    return false
+  }
+
+  async cancel() {
+    return false
+  }
+
+  async reschedule() {
+    return false
+  }
+
+  async remove() {
+    return false
+  }
+
   async complete(input: CompleteInput): Promise<LeaseMutationResult> {
     this.#enter()
     this.completions.push(input)
