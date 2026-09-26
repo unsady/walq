@@ -1,6 +1,6 @@
 {
   "name": "@walq/better-sqlite3",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "better-sqlite3 storage adapter for walq.",
   "keywords": [
     "better-sqlite3",
@@ -49,7 +49,7 @@
     "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "@walq/core": ">=0.2.1 <0.4.0",
+    "@walq/core": "^0.3.0",
     "better-sqlite3": "^13.0.3"
   },
   "engines": {
