@@ -36,10 +36,27 @@ Storage adapter authors can import the public contract from `@walq/core/storage`
 - `queue.process(handler, { concurrency? })` registers the queue with the shared poller. `concurrency` defaults to 1.
 - Handlers receive `(data, context)`. Context contains `signal`, `jobId`, and the current `attempt`.
 - `worker.close()` stops new claims and waits for active handlers without aborting them.
+- `queue.get(id)` returns a `Job<Data>` snapshot or `null` if the ID is absent from this queue. `queue.list({ status, limit? })` returns up to `limit` snapshots and requires `status`; `limit` defaults to 100 and must be between 1 and 1,000. The supported statuses are `pending`, `active`, `completed`, `failed`, and `cancelled` (there is no `waiting`). Snapshots contain `attempt` (claims made), total `attempts`, timestamps, and the last error; they do not contain `startedAt` or lease credentials. An expired active job remains active in snapshots until a claim for that queue recovers it.
+- `queue.retry(id)` retries a failed job immediately and returns whether it changed the job. It preserves `attempt` and `error`; if the attempt budget was exhausted, it raises the total `attempts` by one to allow exactly one more claim.
+- `queue.cancel(id)` cancels pending jobs only. `queue.reschedule(id, { delay })` or `queue.reschedule(id, { runAt })` changes the availability of pending jobs only; supply exactly one nonnegative safe-integer millisecond value. `delay` is relative to the current time and `runAt` is an absolute Unix timestamp. The computed `availableAt` must also fit in the safe-integer range.
+- `queue.remove(id)` physically removes any non-active job. Retry, cancel, reschedule, and remove return `false` for a missing job or a job in a state that does not allow that operation; otherwise they return `true`.
+
+For example, inspect failed jobs and retry one, or schedule a pending job again:
+
+```ts
+const added = await queue.add({ name: 'Grace' })
+const failed = await queue.list({ status: 'failed', limit: 20 })
+if (failed[0]) await queue.retry(failed[0].id)
+
+const job = await queue.get(added.id)
+if (job?.status === 'pending') {
+  await queue.reschedule(job.id, { delay: 60_000 })
+}
+```
 
 Queues created with the same `Storage` instance share one queue-aware poller. Ready queues are polled in rotating order, and adapters with `claimQueues` can claim for one sweep in a single call, split into a few transactions when the sweep covers many queues. A separate `Storage` instance has its own coordinator. One queue name can be processed by only one worker per `Storage`; registering a second worker for the same name is rejected.
 
-The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain unless a retry backoff is configured. Expired-lease recovery remains immediate.
+The poller checks empty queues once per second and wakes on `add()` and on handler completion. Active jobs use a 30-second lease with a heartbeat every 10 seconds. Handler failures retry immediately while attempts remain unless a retry backoff is configured. An expired lease is recovered on a subsequent claim for that queue, then retried immediately when attempts remain; expiry alone does not change the stored state.
 
 ## Delayed jobs
 
@@ -75,9 +92,15 @@ const queue = new Queue('email', {
 
 ## Retention
 
-Terminal jobs are removed asynchronously after `complete()` or a terminal
-`fail()` commits. Retention is per queue and per status: by default every
-completed job is removed and the newest 100 failures are kept for diagnostics.
+Completed and failed jobs are removed asynchronously according to the per-queue
+retention policy after completion or terminal failure, during claim passes,
+and when a worker starts. By default every completed job is eligible for
+removal and the newest 100 failures are kept for diagnostics. Cancelled jobs
+are not covered by automatic retention and
+remain until explicitly removed. Since cleanup is asynchronous, a completed or
+failed job may still be visible after its transition, then disappear between
+`get()` or `list()` calls; a process crash can defer cleanup until a worker runs
+again.
 Pass `retention` to keep more or fewer:
 
 ```ts
@@ -121,10 +144,10 @@ database maintenance themselves. An idle queue pays at most one pass per
 throttle interval. `worker.close()` stops scheduling new passes and waits for a
 batch already in flight.
 
-Every storage adapter implements bounded `cleanup`. Because cleanup is
-asynchronous, terminal rows may remain
-visible after `complete()` and can survive a process crash until a later worker
-starts or finishes another job.
+Every storage adapter implements bounded `cleanup` for completed and failed jobs
+only. The worker schedules cleanup asynchronously in bounded batches, so those
+rows may remain visible after a terminal transition and can survive a process
+crash until a worker runs again. Cancelled jobs persist until `queue.remove()`.
 
 ## Error reporting
 

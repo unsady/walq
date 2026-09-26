@@ -38,6 +38,12 @@ storage instance can serve multiple queues, isolated by their exact queue names.
 - The factory synchronously initializes versioned `walq_schema` and `walq_jobs`
   tables in an immediate transaction, then prepares statements. Repeated
   initialization is supported. These table names are reserved for the adapter.
+- Opening a version 2 database automatically migrates it to schema version 3 in
+  that transaction. The migration rebuilds `walq_jobs`, preserves existing job
+  rows and metadata, and adds support for the `cancelled` status. Make a backup
+  before opening a production database with the new adapter. The migration is
+  one-way: version 2 binaries do not support schema version 3 and cannot be used
+  after it has been migrated.
 - The caller owns and closes the connection. The adapter neither closes it nor
   changes connection pragmas. It requires a writable connection.
 - Configure WAL, `synchronous = FULL`, and a suitable busy timeout as shown above
@@ -65,10 +71,16 @@ tokens are generated with `crypto.randomUUID()`.
 one immediate transaction, and returns jobs in input order. Empty batches return
 without inserting rows. Claim recovery and acquisition run in one immediate
 transaction. Recovery covers all expired active jobs in the requested queue,
-regardless of the batch limit. Completion, failure, and heartbeat use atomic
-conditional updates. Terminal transitions record the finish timestamp used for
-retention ordering. Database errors (including lock timeouts) reject promises,
-rather than returning `lease_lost`.
+regardless of the batch limit. Completion, failure, heartbeat, and lifecycle
+controls use conditional statements so concurrent state changes are reflected
+by their results; inspection and listing return queue-scoped snapshots.
+`retry`, `cancel`, `reschedule`,
+and `remove` return `false` for a missing job, a different queue, or an illegal
+state; active jobs cannot be removed. `retry` preserves the attempt count and
+error, and increases the allowed attempts by one if the job was already
+exhausted. Terminal transitions record `finishedAt`; pending and active jobs do
+not have a finish time. Database errors (including lock timeouts) reject
+promises, rather than returning `lease_lost` or `false`.
 
 The optional `claimQueues` method applies every request in order and returns one
 result per request, so one coordinator sweep claims from many queues in one call.
@@ -91,8 +103,10 @@ See [the storage contract](https://github.com/unsady/walq/blob/main/docs/storage
 
 ## Cleanup
 
-Terminal transitions record when the job finished. `cleanup` keeps the newest
-completed and failed jobs per queue and deletes the rest, oldest first:
+Terminal transitions record when the job finished. `cleanup` applies only to
+completed and failed jobs: it keeps the newest of those statuses per queue and
+deletes the rest, oldest first. Cancelled jobs are not subject to retention and
+remain until explicitly removed with `storage.remove()`:
 
 ```ts
 const result = await storage.cleanup({
@@ -116,8 +130,9 @@ used for the age bound; callers supply it so age behavior is deterministic.
 
 `limit` bounds rows deleted by one call; the result reports how many rows were
 removed and whether more eligible rows remain, so a caller can drain in batches.
-Rows are deleted inside one immediate transaction, and only terminal rows of the
-requested queue are eligible, so pending and active jobs are never removed.
+Rows are deleted inside one immediate transaction, and only completed or failed
+rows of the requested queue are eligible, so pending, active, and cancelled jobs
+are never removed by cleanup. Use `storage.remove()` to delete a cancelled job.
 Eligible rows are kept in a partial index ordered by finish time.
 
 Each call is bounded by `limit` and the retention bounds rather than by the size

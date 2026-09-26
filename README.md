@@ -8,6 +8,7 @@ Walq provides reliable at-least-once processing without Redis or a separate queu
 
 - atomic batch enqueue and claims with expiring leases
 - retries, attempt limits, and heartbeats
+- inspect, list, retry, cancel, reschedule, and remove jobs by ID
 - multiple logical queues in one database
 - concurrent processing with shared, queue-aware polling
 - automatic count- and age-based cleanup
@@ -62,7 +63,7 @@ process.once('SIGTERM', () => void shutdown())
 
 ## Retention and cleanup
 
-Terminal jobs are cleaned up automatically in bounded batches. By default, completed jobs are removed and the newest 100 failed jobs per queue are retained.
+Completed and failed jobs are cleaned up automatically in bounded batches. By default, completed jobs are removed and the newest 100 failed jobs per queue are retained. Cancelled jobs persist until explicitly removed.
 
 ```ts
 const queue = new Queue('email', {

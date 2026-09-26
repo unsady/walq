@@ -1,6 +1,6 @@
 ---
-'@walq/core': major
-'@walq/better-sqlite3': major
+'@walq/core': minor
+'@walq/better-sqlite3': minor
 ---
 
-Add storage-level job inspection, listing, retry, cancellation, rescheduling, and removal, with a v2-to-v3 SQLite migration for the `cancelled` status.
+Add public job inspection, listing, retry, cancellation, rescheduling, and removal APIs. The SQLite adapter automatically migrates the schema from v2 to v3 to support the `cancelled` status.
