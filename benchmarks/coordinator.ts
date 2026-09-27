@@ -255,7 +255,15 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 async function enqueueJobs(storage: Storage, queue: string, count: number): Promise<void> {
   const now = Date.now()
   for (let index = 0; index < count; index += 1) {
-    await storage.enqueue({ queue, name: 'bench', data: '{}', now, availableAt: now, attempts: 1 })
+    await storage.enqueue({
+      queue,
+      name: 'bench',
+      data: '{}',
+      now,
+      availableAt: now,
+      priority: 0,
+      attempts: 1,
+    })
   }
 }
 

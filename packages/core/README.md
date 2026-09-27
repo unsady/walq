@@ -24,11 +24,11 @@ Storage adapter authors import `Storage` from `@walq/core/storage`.
 ## API
 
 - `new Queue(name, { storage, attempts?, retry?, onError?, retention? })`: `attempts` defaults to `1`; retries after handler errors are immediate unless backoff is configured. Retention defaults to `{ completed: 0, failed: 100 }`.
-- `queue.add(data, options?)`: enqueue JSON-serializable data; omitted options make it immediately available. `options` accepts `delay` or `runAt`, not both. Values are nonnegative safe-integer milliseconds; a past `runAt` is immediately eligible.
+- `queue.add(data, options?)`: enqueue JSON-serializable data; omitted options make it immediately available. `options` accepts `delay` or `runAt`, not both, plus a signed safe-integer `priority` (default `0`). Higher-priority due jobs are claimed first; a past `runAt` is immediately eligible.
 - `queue.addMany(items)`: enqueue `{ data, options? }` items atomically, in input order. All items are validated before enqueue; an empty batch returns `[]`. Scheduled items share one clock reading.
 - `queue.process(handler, { concurrency? })`: starts processing; concurrency defaults to `1`. The handler receives `(data, { signal, jobId, attempt })`.
 - `worker.close()`: stop new claims and wait for active handlers; it does not abort them.
-- `queue.get(id)` returns a snapshot or `null`. `queue.list({ status, limit? })` lists `pending`, `active`, `completed`, `failed`, or `cancelled` jobs (`limit` defaults to 100; range 1–1,000). Snapshots contain `id`, `data`, `status`, `attempt` (claims made), `attempts` (limit), `createdAt`, `availableAt`, `finishedAt`, and `error`; no lease credentials. Expired active jobs remain active until a claim recovers them.
+- `queue.get(id)` returns a snapshot or `null`. `queue.list({ status, limit? })` lists `pending`, `active`, `completed`, `failed`, or `cancelled` jobs (`limit` defaults to 100; range 1–1,000). Snapshots contain `id`, `data`, `status`, `attempt` (claims made), `attempts` (limit), `createdAt`, `availableAt`, `priority`, `finishedAt`, and `error`; no lease credentials. Expired active jobs remain active until a claim recovers them. Pending jobs list by availability, not priority; claims order due jobs by priority first.
 - `queue.retry(id)` retries a failed job immediately. It preserves attempt history and error; if attempts are exhausted, it grants exactly one additional claim.
 - `queue.cancel(id)` cancels pending jobs only. `queue.reschedule(id, { delay })` or `{ runAt }` changes availability of pending jobs only; exactly one value is required.
 - `queue.remove(id)` removes any non-active job. These four lifecycle methods return `false` if the job is missing or in an incompatible state; invalid inputs and storage errors reject.

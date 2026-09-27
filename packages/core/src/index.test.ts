@@ -29,6 +29,7 @@ function claimedJob(id: string, options: { queue?: string; data?: string } = {})
     status: 'active',
     createdAt: now,
     availableAt: now,
+    priority: 0,
     attemptsMade: 1,
     attempts: 3,
     error: null,
@@ -66,6 +67,7 @@ class TestStorage implements Storage {
       status: 'pending',
       createdAt: input.now,
       availableAt: input.availableAt,
+      priority: input.priority,
       attemptsMade: 0,
       attempts: input.attempts,
       error: null,
@@ -85,6 +87,7 @@ class TestStorage implements Storage {
       status: 'pending' as const,
       createdAt: input.now,
       availableAt: input.availableAt,
+      priority: input.priority,
       attemptsMade: 0,
       attempts: input.attempts,
       error: null,
@@ -218,10 +221,37 @@ describe('Queue', () => {
         data: '{"userId":"123"}',
         now,
         availableAt: now,
+        priority: 0,
         attempts: 1,
       },
     ])
   })
+
+  it('accepts signed safe-integer priorities for single and batch enqueue', async () => {
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await queue.add({}, { priority: Number.MAX_SAFE_INTEGER })
+    await queue.addMany([{ data: {}, options: { priority: Number.MIN_SAFE_INTEGER } }])
+
+    expect(storage.enqueues[0]!.priority).toBe(Number.MAX_SAFE_INTEGER)
+    expect(storage.enqueueManyCalls[0]![0]!.priority).toBe(Number.MIN_SAFE_INTEGER)
+  })
+
+  it.each([null, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1])(
+    'rejects invalid priority %o before storage access',
+    async (priority) => {
+      const storage = new TestStorage()
+      const queue = new Queue('email', { storage })
+
+      await expect(queue.add({}, { priority: priority as never })).rejects.toThrow(TypeError)
+      await expect(
+        queue.addMany([{ data: {} }, { data: {}, options: { priority: priority as never } }]),
+      ).rejects.toThrow(TypeError)
+      expect(storage.enqueues).toEqual([])
+      expect(storage.enqueueManyCalls).toEqual([])
+    },
+  )
 
   it('sets availability from a delay or absolute run time', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(10_000)
@@ -277,6 +307,7 @@ describe('Queue', () => {
           data: '{"index":0}',
           now,
           availableAt: now,
+          priority: 0,
           attempts: 4,
         },
         {
@@ -285,6 +316,7 @@ describe('Queue', () => {
           data: '{"index":1}',
           now,
           availableAt: now + 25,
+          priority: 0,
           attempts: 4,
         },
         {
@@ -293,6 +325,7 @@ describe('Queue', () => {
           data: '{"index":2}',
           now,
           availableAt: 0,
+          priority: 0,
           attempts: 4,
         },
       ],

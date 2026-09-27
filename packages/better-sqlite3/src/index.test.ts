@@ -17,6 +17,7 @@ const input = {
   data: '{"to":"a"}',
   now: 10,
   availableAt: 10,
+  priority: 0,
   attempts: 2,
 }
 const claimInput = { queue: 'email', now: 10, limit: 10, leaseDuration: 20 }
@@ -495,7 +496,7 @@ describe('SQLite retention', () => {
 })
 
 describe('SQLite integration', () => {
-  it('migrates v2 jobs, leases, and indexes to the v3 schema', async () => {
+  it('migrates v2 jobs, leases, and indexes to the v4 schema', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -536,11 +537,11 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 3 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 4 })
     expect(
       db
         .prepare(
-          'SELECT id, queue, status, availableAt, finishedAt, attemptsMade, attempts, error, leaseToken, expiresAt FROM walq_jobs ORDER BY id',
+          'SELECT id, queue, status, availableAt, priority, finishedAt, attemptsMade, attempts, error, leaseToken, expiresAt FROM walq_jobs ORDER BY id',
         )
         .all(),
     ).toEqual([
@@ -549,6 +550,7 @@ describe('SQLite integration', () => {
         queue: 'email',
         status: 'active',
         availableAt: 4,
+        priority: 0,
         finishedAt: null,
         attemptsMade: 1,
         attempts: 3,
@@ -561,6 +563,7 @@ describe('SQLite integration', () => {
         queue: 'email',
         status: 'completed',
         availableAt: 6,
+        priority: 0,
         finishedAt: 7,
         attemptsMade: 1,
         attempts: 3,
@@ -573,6 +576,7 @@ describe('SQLite integration', () => {
         queue: 'other',
         status: 'failed',
         availableAt: 9,
+        priority: 0,
         finishedAt: 10,
         attemptsMade: 2,
         attempts: 2,
@@ -585,6 +589,7 @@ describe('SQLite integration', () => {
         queue: 'email',
         status: 'pending',
         availableAt: 2,
+        priority: 0,
         finishedAt: null,
         attemptsMade: 0,
         attempts: 2,
@@ -602,7 +607,7 @@ describe('SQLite integration', () => {
     )
     expect(db.prepare('PRAGMA index_info(walq_active)').all()).toEqual([
       { seqno: 0, cid: 1, name: 'queue' },
-      { seqno: 1, cid: 12, name: 'expiresAt' },
+      { seqno: 1, cid: 13, name: 'expiresAt' },
       { seqno: 2, cid: 0, name: 'id' },
     ])
     expect(
@@ -615,13 +620,76 @@ describe('SQLite integration', () => {
     ).toBe('applied')
   })
 
+  it('migrates v3 jobs to the priority schema with zero priority', async () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    db.exec(`
+      CREATE TABLE walq_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      INSERT INTO walq_schema (id, version) VALUES (1, 3);
+      CREATE TABLE walq_jobs (
+        id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
+        queue TEXT NOT NULL COLLATE BINARY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed', 'cancelled')),
+        createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
+        availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
+        finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
+        attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
+        attempts INTEGER NOT NULL CHECK (attempts > 0),
+        error TEXT,
+        leaseToken TEXT,
+        expiresAt INTEGER,
+        CHECK (
+          (status = 'active' AND leaseToken IS NOT NULL AND expiresAt IS NOT NULL AND expiresAt >= 0)
+          OR (status != 'active' AND leaseToken IS NULL AND expiresAt IS NULL)
+        ),
+        CHECK (
+          (status IN ('completed', 'failed', 'cancelled') AND finishedAt IS NOT NULL)
+          OR (status NOT IN ('completed', 'failed', 'cancelled') AND finishedAt IS NULL)
+        )
+      );
+      CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
+      CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
+      CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
+        WHERE finishedAt IS NOT NULL;
+      INSERT INTO walq_jobs (
+        id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts
+      ) VALUES ('legacy', 'email', 'send', '{}', 'pending', 1, 1, 0, 1);
+    `)
+
+    const storage = betterSqlite3(db)
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 4 })
+    expect(db.prepare('SELECT priority FROM walq_jobs WHERE id = ?').get('legacy')).toEqual({
+      priority: 0,
+    })
+
+    await storage.enqueue({ ...input, priority: 10 })
+    expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([10, 0])
+  })
+
+  it('persists signed safe-integer priority boundaries', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, priority: Number.MIN_SAFE_INTEGER })
+    await storage.enqueue({ ...input, priority: Number.MAX_SAFE_INTEGER })
+
+    expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([
+      Number.MAX_SAFE_INTEGER,
+      Number.MIN_SAFE_INTEGER,
+    ])
+    expect(db.prepare('SELECT priority FROM walq_jobs ORDER BY priority').all()).toEqual([
+      { priority: Number.MIN_SAFE_INTEGER },
+      { priority: Number.MAX_SAFE_INTEGER },
+    ])
+  })
+
   it('persists enqueued jobs across reopen', async () => {
     const path = filename()
     const { db, storage } = open(path)
-    const job = await storage.enqueue(input)
+    const job = await storage.enqueue({ ...input, priority: 11 })
     db.close()
     const reopened = open(path)
-    expect((await reopened.storage.claim(claimInput))[0]!.id).toBe(job.id)
+    expect(await reopened.storage.claim(claimInput)).toMatchObject([{ id: job.id, priority: 11 }])
     expect(reopened.db.open).toBe(true)
   })
 
@@ -646,7 +714,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 4')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 5')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 
@@ -851,9 +919,9 @@ describe('SQLite integration', () => {
     const max = Number.MAX_SAFE_INTEGER
     db.prepare(`
       INSERT INTO walq_jobs
-        (id, queue, name, data, status, createdAt, availableAt, finishedAt,
+        (id, queue, name, data, status, createdAt, availableAt, priority, finishedAt,
          attemptsMade, attempts, error)
-      VALUES ('retry-boundary', 'email', 'send', '{}', 'failed', 0, 0, 0, @attempt, @attempt, NULL)
+      VALUES ('retry-boundary', 'email', 'send', '{}', 'failed', 0, 0, 0, 0, @attempt, @attempt, NULL)
     `).run({ attempt: max - 1 })
     const boundaryRetryInput = { queue: 'email', id: 'retry-boundary', now: 14 }
     const boundaryResults = await race(path, [
@@ -894,9 +962,9 @@ describe('SQLite integration', () => {
     const max = Number.MAX_SAFE_INTEGER
     db.prepare(`
       INSERT INTO walq_jobs
-        (id, queue, name, data, status, createdAt, availableAt, finishedAt,
+        (id, queue, name, data, status, createdAt, availableAt, priority, finishedAt,
          attemptsMade, attempts, error)
-      VALUES ('overflow', 'email', 'send', '{}', 'failed', 0, 0, 0, @max, @max, NULL)
+      VALUES ('overflow', 'email', 'send', '{}', 'failed', 0, 0, 0, 0, @max, @max, NULL)
     `).run({ max })
     await expect(storage.retry({ queue: 'email', id: 'overflow', now: 1 })).rejects.toThrow(
       RangeError,

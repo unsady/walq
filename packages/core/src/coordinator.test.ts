@@ -12,6 +12,7 @@ const enqueueInput: EnqueueInput = {
   data: '{}',
   now: 1_000,
   availableAt: 1_000,
+  priority: 0,
   attempts: 1,
 }
 
@@ -30,6 +31,7 @@ const storedJob: StoredJob = {
   status: 'pending',
   createdAt: 1_000,
   availableAt: 1_000,
+  priority: 0,
   attemptsMade: 0,
   attempts: 1,
   error: null,
@@ -64,6 +66,7 @@ function groupedStorage(
         data: input.data,
         createdAt: input.now,
         availableAt: input.availableAt,
+        priority: input.priority,
         attempts: input.attempts,
       }))
     },
@@ -141,6 +144,7 @@ function gatedStorage(): GatedStorage {
         data: input.data,
         createdAt: input.now,
         availableAt: input.availableAt,
+        priority: input.priority,
         attempts: input.attempts,
       }))
     },

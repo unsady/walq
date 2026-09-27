@@ -32,6 +32,7 @@ function enqueueInput(overrides: Partial<EnqueueInput> = {}): EnqueueInput {
     data,
     now,
     availableAt: now,
+    priority: 0,
     attempts: 2,
     ...overrides,
   }
@@ -96,6 +97,24 @@ export function runStorageConformance(
       ).rejects.toThrow(/.+/)
       await expect(storage.enqueueMany(null as never)).rejects.toThrow(/.+/)
       await expect(storage.enqueueMany(Array(1) as never)).rejects.toThrow(/.+/)
+      for (const priority of [
+        null,
+        1.5,
+        NaN,
+        Infinity,
+        Number.MAX_SAFE_INTEGER + 1,
+        Number.MIN_SAFE_INTEGER - 1,
+      ]) {
+        await expect(
+          storage.enqueue(enqueueInput({ priority: priority as never })),
+        ).rejects.toThrow(/.+/)
+      }
+      await expect(
+        storage.enqueueMany([
+          enqueueInput({ queue: 'should-not-exist', priority: 2 }),
+          enqueueInput({ queue: 'should-not-exist', priority: NaN as never }),
+        ]),
+      ).rejects.toThrow(/.+/)
       expect(await storage.claim(claimInput({ queue: 'should-not-exist' }))).toEqual([])
     })
 
@@ -109,20 +128,24 @@ export function runStorageConformance(
       expect(jobs).toHaveLength(2)
       expect(jobs[0]!.id).not.toBe(jobs[1]!.id)
       expect(
-        jobs.map(({ name, data, queue: resultQueue, availableAt, attemptsMade, status }) => ({
-          name,
-          data,
-          queue: resultQueue,
-          availableAt,
-          attemptsMade,
-          status,
-        })),
+        jobs.map(
+          ({ name, data, queue: resultQueue, availableAt, priority, attemptsMade, status }) => ({
+            name,
+            data,
+            queue: resultQueue,
+            availableAt,
+            priority,
+            attemptsMade,
+            status,
+          }),
+        ),
       ).toEqual([
         {
           name: 'first',
           data: '{"n":1}',
           queue,
           availableAt: 8,
+          priority: 0,
           attemptsMade: 0,
           status: 'pending',
         },
@@ -131,6 +154,7 @@ export function runStorageConformance(
           data: '{"n":2}',
           queue,
           availableAt: 9,
+          priority: 0,
           attemptsMade: 0,
           status: 'pending',
         },
@@ -164,7 +188,25 @@ export function runStorageConformance(
       expect(jobs).toHaveLength(3)
     })
 
-    it('claims due jobs ordered by availableAt then id', async () => {
+    it('claims due jobs by priority before availability and leaves future jobs pending', async () => {
+      await storage.enqueue(enqueueInput({ name: 'low', priority: -2, availableAt: 8 }))
+      await storage.enqueue(enqueueInput({ name: 'normal', priority: 0, availableAt: 9 }))
+      await storage.enqueue(enqueueInput({ name: 'high', priority: 5, availableAt: 10 }))
+      await storage.enqueue(enqueueInput({ name: 'future', priority: 100, availableAt: 11 }))
+
+      const jobs = await storage.claim(claimInput({ limit: 3 }))
+      expect(jobs.map(({ name, priority }) => ({ name, priority }))).toEqual([
+        { name: 'high', priority: 5 },
+        { name: 'normal', priority: 0 },
+        { name: 'low', priority: -2 },
+      ])
+      expect(await storage.claim(claimInput())).toEqual([])
+      expect(await storage.claim(claimInput({ now: 11 }))).toMatchObject([
+        { name: 'future', priority: 100 },
+      ])
+    })
+
+    it('claims due jobs ordered by priority, then availableAt and id', async () => {
       const first = await storage.enqueue(enqueueInput())
       const second = await storage.enqueue(enqueueInput())
       const future = await storage.enqueue(enqueueInput({ availableAt: 11 }))

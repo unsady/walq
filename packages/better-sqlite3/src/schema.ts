@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 3
+const schemaVersion = 4
+const maxPriority = Number.MAX_SAFE_INTEGER
 
 function jobsTable(name: string): string {
   return `
@@ -12,6 +13,7 @@ function jobsTable(name: string): string {
       status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed', 'cancelled')),
       createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
       availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
+      priority INTEGER NOT NULL CHECK (priority >= ${-maxPriority} AND priority <= ${maxPriority}),
       finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
       attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
       attempts INTEGER NOT NULL CHECK (attempts > 0),
@@ -31,7 +33,7 @@ function jobsTable(name: string): string {
 }
 
 const indexes = `
-  CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
+  CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, id) WHERE status = 'pending';
   CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
   CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
     WHERE finishedAt IS NOT NULL;
@@ -39,19 +41,30 @@ const indexes = `
 
 function migrateV2(db: Database.Database): void {
   db.exec(`
-    ${jobsTable('walq_jobs_v3')}
-    INSERT INTO walq_jobs_v3 (
-      id, queue, name, data, status, createdAt, availableAt, finishedAt,
+    ${jobsTable('walq_jobs_v4')}
+    INSERT INTO walq_jobs_v4 (
+      id, queue, name, data, status, createdAt, availableAt, priority, finishedAt,
       attemptsMade, attempts, error, leaseToken, expiresAt
     )
     SELECT
-      id, queue, name, data, status, createdAt, availableAt, finishedAt,
+      id, queue, name, data, status, createdAt, availableAt, 0, finishedAt,
       attemptsMade, attempts, error, leaseToken, expiresAt
     FROM walq_jobs;
     DROP TABLE walq_jobs;
-    ALTER TABLE walq_jobs_v3 RENAME TO walq_jobs;
+    ALTER TABLE walq_jobs_v4 RENAME TO walq_jobs;
     ${indexes}
     UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 2;
+  `)
+}
+
+function migrateV3(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE walq_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
+      CHECK (priority >= ${-maxPriority} AND priority <= ${maxPriority});
+    DROP INDEX walq_pending;
+    CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, id)
+      WHERE status = 'pending';
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 3;
   `)
 }
 
@@ -74,6 +87,10 @@ export function initialize(db: Database.Database): void {
     if (row) {
       if (row.version === 2) {
         migrateV2(db)
+        return
+      }
+      if (row.version === 3) {
+        migrateV3(db)
         return
       }
       if (row.version !== schemaVersion) {

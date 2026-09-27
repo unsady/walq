@@ -31,7 +31,7 @@ import { initialize } from './schema.js'
 import { expiry, integer, lease, retentionRule, text } from './validation.js'
 
 const metadata =
-  'id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, error'
+  'id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts, error'
 const snapshotMetadata = `${metadata}, finishedAt`
 const liveLease = "id = @id AND status = 'active' AND leaseToken = @leaseToken AND expiresAt > @now"
 const maxSafeInteger = Number.MAX_SAFE_INTEGER
@@ -71,6 +71,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
     data: input.data,
     now: input.now,
     availableAt: input.availableAt,
+    priority: input.priority,
     attempts: input.attempts,
   }
   text(validated.queue, 'queue')
@@ -79,6 +80,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
   JSON.parse(validated.data)
   integer(validated.now, 'now')
   integer(validated.availableAt, 'availableAt')
+  integer(validated.priority, 'priority', -maxSafeInteger)
   integer(validated.attempts, 'attempts', 1)
 
   return validated
@@ -116,8 +118,10 @@ class BetterSqlite3Storage implements Storage {
     this.insert = prepare(
       db,
       `
-        INSERT INTO walq_jobs (id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts)
-        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, 0, @attempts)
+        INSERT INTO walq_jobs (
+          id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
+        )
+        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, @priority, 0, @attempts)
         RETURNING ${metadata}
       `,
     )
@@ -140,7 +144,7 @@ class BetterSqlite3Storage implements Storage {
       `
         SELECT id FROM walq_jobs
         WHERE queue = @queue AND status = 'pending' AND availableAt <= @now AND attemptsMade < attempts
-        ORDER BY availableAt, id COLLATE BINARY LIMIT @limit
+        ORDER BY priority DESC, availableAt, id COLLATE BINARY LIMIT @limit
       `,
     )
     this.acquire = prepare(

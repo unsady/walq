@@ -149,16 +149,28 @@ it('adds scheduled jobs as one ordered SQLite batch', async () => {
 
   const added = await queue.addMany([
     { data: { userId: 'first' } },
-    { data: { userId: 'second' }, options: { delay: 25 } },
+    { data: { userId: 'second' }, options: { delay: 25, priority: 7 } },
   ])
 
   const rows = db
-    .prepare('SELECT id, data, createdAt, availableAt FROM walq_jobs ORDER BY rowid')
+    .prepare('SELECT id, data, createdAt, availableAt, priority FROM walq_jobs ORDER BY rowid')
     .all()
   expect(added.map(({ id }) => id)).toEqual(rows.map((row) => (row as { id: string }).id))
   expect(rows).toEqual([
-    { id: added[0]!.id, data: '{"userId":"first"}', createdAt: 1_000, availableAt: 1_000 },
-    { id: added[1]!.id, data: '{"userId":"second"}', createdAt: 1_000, availableAt: 1_025 },
+    {
+      id: added[0]!.id,
+      data: '{"userId":"first"}',
+      createdAt: 1_000,
+      availableAt: 1_000,
+      priority: 0,
+    },
+    {
+      id: added[1]!.id,
+      data: '{"userId":"second"}',
+      createdAt: 1_000,
+      availableAt: 1_025,
+      priority: 7,
+    },
   ])
 })
 
@@ -231,6 +243,7 @@ it('removes terminal rows created by lease recovery', async () => {
     data: '{}',
     now: stale,
     availableAt: stale,
+    priority: 0,
     attempts: 1,
   })
   // Leave an expired lease with an exhausted attempt budget behind. The next

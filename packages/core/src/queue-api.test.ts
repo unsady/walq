@@ -24,6 +24,7 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     status: 'pending',
     createdAt: 100,
     availableAt: 200,
+    priority: 0,
     attemptsMade: 2,
     attempts: 4,
     error: null,
@@ -54,7 +55,7 @@ describe('Queue public job API', () => {
   it('maps an inspected snapshot to public fields and scopes by the exact queue name', async () => {
     const methods = storageMock()
     methods.inspect.mockResolvedValue(
-      snapshot({ status: 'failed', finishedAt: 900, error: 'send failed' }),
+      snapshot({ status: 'failed', priority: -3, finishedAt: 900, error: 'send failed' }),
     )
     const queue = new Queue(' email ', { storage: methods.storage })
 
@@ -66,6 +67,7 @@ describe('Queue public job API', () => {
       attempts: 4,
       createdAt: 100,
       availableAt: 200,
+      priority: -3,
       finishedAt: 900,
       error: 'send failed',
     })
@@ -94,6 +96,7 @@ describe('Queue public job API', () => {
         attempts: 4,
         createdAt: 100,
         availableAt: 200,
+        priority: 0,
         finishedAt: null,
         error: null,
       },

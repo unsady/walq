@@ -357,6 +357,7 @@ async function warmConnection(storage: Storage): Promise<void> {
       data: '{}',
       now,
       availableAt: now,
+      priority: 0,
       attempts: 1,
     })
   }
@@ -398,6 +399,7 @@ async function runActive(storage: Storage, jobs: number): Promise<RetentionActiv
         data: '{}',
         now,
         availableAt: now,
+        priority: 0,
         attempts: 1,
       })
       enqueueSamples.push(performance.now() - enqueueStarted)

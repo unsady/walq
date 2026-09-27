@@ -90,6 +90,7 @@ function publicJob<Data>(snapshot: JobSnapshot): Job<Data> {
     attempts: snapshot.attempts,
     createdAt: snapshot.createdAt,
     availableAt: snapshot.availableAt,
+    priority: snapshot.priority,
     finishedAt: snapshot.finishedAt,
     error: snapshot.error,
   }
@@ -101,18 +102,22 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
-function prepareAdd(
-  data: unknown,
-  options: AddOptions | undefined,
-): {
+interface PreparedAdd {
   data: string
-  options: AddOptions
-} {
-  const normalizedOptions = normalizeScheduleOptions(options, 'add')
+  options: AddOptions & { priority: number }
+}
+
+function prepareAdd(data: unknown, options: AddOptions | undefined): PreparedAdd {
+  const scheduleOptions = normalizeScheduleOptions(options, 'add')
+  const priority = options?.priority === undefined ? 0 : options.priority
+  if (!Number.isSafeInteger(priority)) {
+    throw new TypeError('priority must be a safe integer')
+  }
+
   const serialized = JSON.stringify(data)
   if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
-  return { data: serialized, options: normalizedOptions }
+  return { data: serialized, options: { ...scheduleOptions, priority } }
 }
 
 function availability(now: number, options: AddOptions): number {
@@ -136,6 +141,7 @@ function buildEnqueueInput(
     data: prepared.data,
     now,
     availableAt: availability(now, prepared.options),
+    priority: prepared.options.priority,
     attempts,
   }
 }

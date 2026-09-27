@@ -14,6 +14,8 @@ export interface StoredJob {
   status: JobStatus
   createdAt: number
   availableAt: number
+  /** Signed safe-integer priority; higher values are claimed first. */
+  priority: number
   /** Number of successful claims, including claims whose workers crashed. */
   attemptsMade: number
   /** Total allowed attempts, including the first one. */
@@ -40,6 +42,8 @@ export interface EnqueueInput {
   data: string
   now: number
   availableAt: number
+  /** Signed safe-integer priority; higher values are claimed first. */
+  priority: number
   attempts: number
 }
 

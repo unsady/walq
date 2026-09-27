@@ -77,6 +77,8 @@ export interface AddOptions {
   delay?: number
   /** Absolute Unix timestamp in nonnegative safe-integer milliseconds. */
   runAt?: number
+  /** Signed safe-integer priority; higher values are claimed first. Defaults to 0. */
+  priority?: number
 }
 
 export interface AddedJob {
@@ -92,6 +94,7 @@ export interface Job<Data> {
   attempts: number
   createdAt: number
   availableAt: number
+  priority: number
   finishedAt: number | null
   error: string | null
 }
