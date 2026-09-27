@@ -79,6 +79,8 @@ export interface AddOptions {
   runAt?: number
   /** Signed safe-integer priority; higher values are claimed first. Defaults to 0. */
   priority?: number
+  /** Optional nonempty key; a matching persisted job in this queue is returned unchanged. */
+  dedupe?: string
 }
 
 export interface AddedJob {

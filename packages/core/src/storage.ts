@@ -27,10 +27,10 @@ export type * from './storage-types.js'
  * See https://github.com/unsady/walq/blob/main/docs/storage-contract.md.
  */
 export interface Storage {
-  /** Insert a pending job with a generated ID and zero attempts made. */
+  /** Insert a pending job or return the existing queue-scoped row for its dedupe key. */
   enqueue(input: EnqueueInput): Promise<StoredJob>
 
-  /** Atomically insert all pending jobs and return them in input order. */
+  /** Atomically enqueue all inputs; repeated dedupe keys resolve to the same row. */
   enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]>
 
   /** Recover expired leases and atomically claim up to limit eligible jobs. */

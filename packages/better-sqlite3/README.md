@@ -26,7 +26,7 @@ await queue.add({ to: 'user@example.com' })
 
 The caller owns the connection and must stop workers before closing it. Configure WAL, `synchronous = FULL`, and a suitable busy timeout for durable file-backed use; durability depends on the filesystem and hardware honoring SQLite sync requests. WAL needs a local filesystem with SQLite-compatible locking. SQLite has one writer at a time.
 
-Storage methods return promises, but SQLite work is synchronous and blocks the event loop. The adapter initializes reserved `walq_schema` and `walq_jobs` tables; use a writable connection and do not call it inside a caller-managed transaction. `enqueueMany` commits the entire batch atomically.
+Storage methods return promises, but SQLite work is synchronous and blocks the event loop. The adapter initializes reserved `walq_schema` and `walq_jobs` tables and migrates schema versions 2–4; use a writable connection and do not call it inside a caller-managed transaction. `enqueueMany` commits the entire batch atomically, including deduplication.
 
 See the [storage contract](../../docs/storage-contract.md) for adapter semantics, including leases, queue isolation, and error results.
 

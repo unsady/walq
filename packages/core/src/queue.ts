@@ -102,24 +102,6 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
-interface PreparedAdd {
-  data: string
-  options: AddOptions & { priority: number }
-}
-
-function prepareAdd(data: unknown, options: AddOptions | undefined): PreparedAdd {
-  const scheduleOptions = normalizeScheduleOptions(options, 'add')
-  const priority = options?.priority === undefined ? 0 : options.priority
-  if (!Number.isSafeInteger(priority)) {
-    throw new TypeError('priority must be a safe integer')
-  }
-
-  const serialized = JSON.stringify(data)
-  if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
-
-  return { data: serialized, options: { ...scheduleOptions, priority } }
-}
-
 function availability(now: number, options: AddOptions): number {
   const availableAt = options.runAt ?? (options.delay === undefined ? now : now + options.delay)
   if (!Number.isSafeInteger(availableAt)) {
@@ -133,15 +115,31 @@ function buildEnqueueInput(
   queue: string,
   attempts: number,
   now: number,
-  prepared: ReturnType<typeof prepareAdd>,
+  data: unknown,
+  options: AddOptions | undefined,
 ): EnqueueInput {
+  const schedule = normalizeScheduleOptions(options, 'add')
+  const priority = options?.priority === undefined ? 0 : options.priority
+  if (!Number.isSafeInteger(priority)) {
+    throw new TypeError('priority must be a safe integer')
+  }
+
+  const dedupe = options?.dedupe
+  if (dedupe !== undefined && (typeof dedupe !== 'string' || dedupe.length === 0)) {
+    throw new TypeError('dedupe must be a nonempty string')
+  }
+
+  const serialized = JSON.stringify(data)
+  if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
+
   return {
     queue,
     name: queue,
-    data: prepared.data,
+    data: serialized,
     now,
-    availableAt: availability(now, prepared.options),
-    priority: prepared.options.priority,
+    availableAt: availability(now, schedule),
+    priority,
+    ...(dedupe !== undefined ? { dedupe } : {}),
     attempts,
   }
 }
@@ -261,13 +259,9 @@ export class Queue<Data> {
   }
 
   async add(data: Data, options?: AddOptions): Promise<AddedJob> {
-    const prepared = prepareAdd(data, options)
-    const now = Date.now()
-
+    const input = buildEnqueueInput(this.#name, this.#attempts, Date.now(), data, options)
     const coordinator = getCoordinator(this.#storage)
-    const job = await coordinator.enqueue(
-      buildEnqueueInput(this.#name, this.#attempts, now, prepared),
-    )
+    const job = await coordinator.enqueue(input)
     coordinator.wakeQueue(this.#name)
     return { id: job.id }
   }
@@ -276,16 +270,14 @@ export class Queue<Data> {
     if (!Array.isArray(items)) throw new TypeError('addMany items must be an array')
     if (items.length === 0) return []
 
-    const prepared = Array.from(items, (item) => {
+    const now = Date.now()
+    const inputs = Array.from(items, (item) => {
       if (typeof item !== 'object' || item === null || Array.isArray(item)) {
         throw new TypeError('addMany items must be objects')
       }
 
-      return prepareAdd(item.data, item.options)
+      return buildEnqueueInput(this.#name, this.#attempts, now, item.data, item.options)
     })
-
-    const now = Date.now()
-    const inputs = prepared.map((item) => buildEnqueueInput(this.#name, this.#attempts, now, item))
 
     const coordinator = getCoordinator(this.#storage)
     const jobs = await coordinator.enqueueMany(inputs)

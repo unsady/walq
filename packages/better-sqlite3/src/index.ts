@@ -72,6 +72,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
     now: input.now,
     availableAt: input.availableAt,
     priority: input.priority,
+    ...(input.dedupe !== undefined ? { dedupe: input.dedupe } : {}),
     attempts: input.attempts,
   }
   text(validated.queue, 'queue')
@@ -81,6 +82,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
   integer(validated.now, 'now')
   integer(validated.availableAt, 'availableAt')
   integer(validated.priority, 'priority', -maxSafeInteger)
+  if (validated.dedupe !== undefined) text(validated.dedupe, 'dedupe')
   integer(validated.attempts, 'attempts', 1)
 
   return validated
@@ -89,6 +91,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
 class BetterSqlite3Storage implements Storage {
   private readonly db: Database.Database
   private readonly insert: Database.Statement
+  private readonly findDeduplicated: Database.Statement
   private readonly enqueueManyTransaction: Database.Transaction<
     (inputs: EnqueueInput[]) => StoredJob[]
   >
@@ -119,14 +122,18 @@ class BetterSqlite3Storage implements Storage {
       db,
       `
         INSERT INTO walq_jobs (
-          id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
+          id, queue, name, data, status, createdAt, availableAt, priority, dedupe, attemptsMade, attempts
         )
-        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, @priority, 0, @attempts)
+        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, @priority, @dedupe, 0, @attempts)
         RETURNING ${metadata}
       `,
     )
+    this.findDeduplicated = prepare(
+      db,
+      `SELECT ${metadata} FROM walq_jobs WHERE queue = @queue AND dedupe = @dedupe`,
+    )
     this.enqueueManyTransaction = db.transaction((inputs: EnqueueInput[]) =>
-      inputs.map((input) => this.insert.get({ ...input, id: randomUUID() }) as StoredJob),
+      inputs.map((input) => this.insertOrGet(input)),
     )
     this.recover = prepare(
       db,
@@ -287,6 +294,23 @@ class BetterSqlite3Storage implements Storage {
     )
   }
 
+  /** Deduplicated checks must run inside an immediate transaction for a stable winner. */
+  private insertOrGet(input: EnqueueInput): StoredJob {
+    if (input.dedupe !== undefined) {
+      const existing = this.findDeduplicated.get({
+        queue: input.queue,
+        dedupe: input.dedupe,
+      }) as StoredJob | undefined
+      if (existing !== undefined) return existing
+    }
+
+    return this.insert.get({
+      ...input,
+      dedupe: input.dedupe ?? null,
+      id: randomUUID(),
+    }) as StoredJob
+  }
+
   private assertAutocommit(): void {
     // Resolving before an outer transaction commits would violate the storage contract.
     if (this.db.inTransaction) throw new Error('Storage operations cannot run inside a transaction')
@@ -295,7 +319,11 @@ class BetterSqlite3Storage implements Storage {
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
     this.assertAutocommit()
     const validated = validateEnqueue(input)
-    return this.insert.get({ ...validated, id: randomUUID() }) as StoredJob
+    if (validated.dedupe !== undefined) {
+      return this.enqueueManyTransaction.immediate([validated])[0]!
+    }
+
+    return this.insertOrGet(validated)
   }
 
   async enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {

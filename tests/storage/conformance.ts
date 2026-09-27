@@ -97,6 +97,8 @@ export function runStorageConformance(
       ).rejects.toThrow(/.+/)
       await expect(storage.enqueueMany(null as never)).rejects.toThrow(/.+/)
       await expect(storage.enqueueMany(Array(1) as never)).rejects.toThrow(/.+/)
+      await expect(storage.enqueue(enqueueInput({ dedupe: '' }))).rejects.toThrow(/.+/)
+      await expect(storage.enqueue(enqueueInput({ dedupe: 1 as never }))).rejects.toThrow(/.+/)
       for (const priority of [
         null,
         1.5,
@@ -113,6 +115,12 @@ export function runStorageConformance(
         storage.enqueueMany([
           enqueueInput({ queue: 'should-not-exist', priority: 2 }),
           enqueueInput({ queue: 'should-not-exist', priority: NaN as never }),
+        ]),
+      ).rejects.toThrow(/.+/)
+      await expect(
+        storage.enqueueMany([
+          enqueueInput({ queue: 'should-not-exist', dedupe: 'would-rollback' }),
+          enqueueInput({ queue: 'should-not-exist', dedupe: '' }),
         ]),
       ).rejects.toThrow(/.+/)
       expect(await storage.claim(claimInput({ queue: 'should-not-exist' }))).toEqual([])
@@ -160,6 +168,142 @@ export function runStorageConformance(
         },
       ])
       expect(await storage.claim(claimInput({ now: 10 }))).toHaveLength(2)
+    })
+
+    it('deduplicates by queue and key across every persisted status', async () => {
+      const statuses = ['pending', 'active', 'completed', 'failed', 'cancelled'] as const
+      let pendingId: string | undefined
+
+      for (const status of statuses) {
+        const dedupe = `status:${status}`
+        const statusQueue = `${queue}-${status}`
+        const original = await storage.enqueue(
+          enqueueInput({
+            queue: statusQueue,
+            dedupe,
+            name: `original-${status}`,
+            data: '{"original":true}',
+            priority: 7,
+          }),
+        )
+        if (status === 'pending') pendingId = original.id
+
+        let lifecycleResult: string | boolean | LeaseMutationResult | undefined
+        if (status === 'active' || status === 'completed' || status === 'failed') {
+          const [job] = await storage.claim(claimInput({ queue: statusQueue, now, limit: 1 }))
+          lifecycleResult = job?.id
+          if (status === 'completed') {
+            lifecycleResult = await storage.complete({
+              id: job!.id,
+              leaseToken: job!.leaseToken,
+              now: now + 1,
+            })
+          }
+          if (status === 'failed') {
+            lifecycleResult = await storage.fail({
+              id: job!.id,
+              leaseToken: job!.leaseToken,
+              now: now + 1,
+              error: 'terminal',
+              retryAt: null,
+            })
+          }
+        } else if (status === 'cancelled') {
+          lifecycleResult = await storage.cancel({
+            queue: statusQueue,
+            id: original.id,
+            now: now + 1,
+          })
+        }
+        expect(lifecycleResult).toBe(
+          status === 'active'
+            ? original.id
+            : status === 'completed' || status === 'failed'
+              ? 'applied'
+              : status === 'cancelled'
+                ? true
+                : undefined,
+        )
+
+        const duplicate = await storage.enqueue(
+          enqueueInput({
+            queue: statusQueue,
+            dedupe,
+            name: `replacement-${status}`,
+            data: '{"replacement":true}',
+            now: now + 2,
+            availableAt: now + 3,
+            priority: -5,
+            attempts: 9,
+          }),
+        )
+        expect(duplicate.id).toBe(original.id)
+        expect(await storage.inspect({ queue: statusQueue, id: original.id })).toMatchObject({
+          id: original.id,
+          name: `original-${status}`,
+          data: '{"original":true}',
+          status,
+          createdAt: now,
+          availableAt: now,
+          priority: 7,
+          attempts: 2,
+        })
+      }
+
+      const sameKeyInAnotherQueue = await storage.enqueue(
+        enqueueInput({ queue: otherQueue, dedupe: 'status:pending' }),
+      )
+      expect(sameKeyInAnotherQueue.id).not.toBe(pendingId)
+    })
+
+    it('returns repeated batch keys in input order and validates before inserting', async () => {
+      const existing = await storage.enqueue(enqueueInput({ dedupe: 'already-present' }))
+      const jobs = await storage.enqueueMany([
+        enqueueInput({ dedupe: 'within-batch', data: '{"winner":true}' }),
+        enqueueInput({ dedupe: 'within-batch', data: '{"winner":false}', priority: 50 }),
+        enqueueInput({ dedupe: 'already-present', data: '{"replacement":true}' }),
+        enqueueInput({ data: '{"independent":1}' }),
+        enqueueInput({ data: '{"independent":2}' }),
+      ])
+
+      expect(jobs.map(({ id }) => id)).toEqual([
+        jobs[0]!.id,
+        jobs[0]!.id,
+        existing.id,
+        expect.any(String),
+        expect.any(String),
+      ])
+      expect(jobs[3]!.id).not.toBe(jobs[4]!.id)
+      expect(await storage.inspect({ queue, id: jobs[0]!.id })).toMatchObject({
+        data: '{"winner":true}',
+        priority: 0,
+      })
+      expect(await storage.inspect({ queue, id: existing.id })).toMatchObject({
+        data,
+        priority: 0,
+      })
+
+      await expect(
+        storage.enqueueMany([
+          enqueueInput({ dedupe: 'validation-rollback', data: '{"must":"rollback"}' }),
+          enqueueInput({ dedupe: '' }),
+        ]),
+      ).rejects.toThrow(/.+/)
+      const afterValidationFailure = await storage.enqueue(
+        enqueueInput({ dedupe: 'validation-rollback', data: '{"after":"failure"}' }),
+      )
+      expect(afterValidationFailure.data).toBe('{"after":"failure"}')
+    })
+
+    it('releases dedupe keys after physical removal', async () => {
+      const original = await storage.enqueue(enqueueInput({ dedupe: 'remove-me' }))
+      expect(await storage.remove({ queue, id: original.id })).toBe(true)
+
+      const replacement = await storage.enqueue(
+        enqueueInput({ dedupe: 'remove-me', data: '{"new":true}' }),
+      )
+      expect(replacement.id).not.toBe(original.id)
+      expect(replacement.data).toBe('{"new":true}')
     })
 
     it('enqueues independent jobs with default state', async () => {
@@ -951,6 +1095,24 @@ export function runCleanupConformance(
 
       return job
     }
+
+    it('releases dedupe keys when retention cleanup physically deletes a job', async () => {
+      const existing = await storage.enqueue(
+        enqueueInput({ dedupe: 'cleanup-key', now: cleanupNow - 2, availableAt: cleanupNow - 2 }),
+      )
+      const [job] = await storage.claim(claimInput({ now: cleanupNow - 2, limit: 1 }))
+      expect(job?.id).toBe(existing.id)
+      expect(
+        await storage.complete({ id: job!.id, leaseToken: job!.leaseToken, now: cleanupNow - 1 }),
+      ).toBe('applied')
+
+      expect(await runCleanup(cleanupInput())).toEqual({ removed: 1, more: false })
+      const replacement = await storage.enqueue(
+        enqueueInput({ dedupe: 'cleanup-key', data: '{"after":"cleanup"}' }),
+      )
+      expect(replacement.id).not.toBe(existing.id)
+      expect(replacement.data).toBe('{"after":"cleanup"}')
+    })
 
     it('removes only terminal rows beyond the retention counts and queue scope', async () => {
       for (const finishedAt of [100, 101, 102, 103]) await finish('completed', finishedAt)

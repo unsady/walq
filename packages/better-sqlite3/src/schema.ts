@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 4
+const schemaVersion = 5
 const maxPriority = Number.MAX_SAFE_INTEGER
 
 function jobsTable(name: string): string {
@@ -14,6 +14,7 @@ function jobsTable(name: string): string {
       createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
       availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
       priority INTEGER NOT NULL CHECK (priority >= ${-maxPriority} AND priority <= ${maxPriority}),
+      dedupe TEXT,
       finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
       attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
       attempts INTEGER NOT NULL CHECK (attempts > 0),
@@ -37,12 +38,13 @@ const indexes = `
   CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
   CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
     WHERE finishedAt IS NOT NULL;
+  CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
 `
 
 function migrateV2(db: Database.Database): void {
   db.exec(`
-    ${jobsTable('walq_jobs_v4')}
-    INSERT INTO walq_jobs_v4 (
+    ${jobsTable('walq_jobs_v5')}
+    INSERT INTO walq_jobs_v5 (
       id, queue, name, data, status, createdAt, availableAt, priority, finishedAt,
       attemptsMade, attempts, error, leaseToken, expiresAt
     )
@@ -51,7 +53,7 @@ function migrateV2(db: Database.Database): void {
       attemptsMade, attempts, error, leaseToken, expiresAt
     FROM walq_jobs;
     DROP TABLE walq_jobs;
-    ALTER TABLE walq_jobs_v4 RENAME TO walq_jobs;
+    ALTER TABLE walq_jobs_v5 RENAME TO walq_jobs;
     ${indexes}
     UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 2;
   `)
@@ -64,7 +66,17 @@ function migrateV3(db: Database.Database): void {
     DROP INDEX walq_pending;
     CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, id)
       WHERE status = 'pending';
+    ALTER TABLE walq_jobs ADD COLUMN dedupe TEXT;
+    CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
     UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 3;
+  `)
+}
+
+function migrateV4(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE walq_jobs ADD COLUMN dedupe TEXT;
+    CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 4;
   `)
 }
 
@@ -91,6 +103,10 @@ export function initialize(db: Database.Database): void {
       }
       if (row.version === 3) {
         migrateV3(db)
+        return
+      }
+      if (row.version === 4) {
+        migrateV4(db)
         return
       }
       if (row.version !== schemaVersion) {

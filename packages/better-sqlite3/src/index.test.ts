@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 
-import type { ClaimedJob, LeaseMutationResult } from '@walq/core/storage'
+import type { ClaimedJob, LeaseMutationResult, StoredJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -34,6 +34,13 @@ function filename() {
   return join(directory, 'queue.sqlite')
 }
 
+function expectPartialDedupeIndex(db: Database.Database): void {
+  const index = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'walq_dedupe'")
+    .get() as { sql: string } | undefined
+  expect(index?.sql).toMatch(/WHERE dedupe IS NOT NULL$/)
+}
+
 const raceTimeout = 4000
 
 async function race(path: string, operations: { method: string; input: object }[]) {
@@ -43,7 +50,7 @@ async function race(path: string, operations: { method: string; input: object }[
   try {
     const tasks = operations.map(
       (operation) =>
-        new Promise<ClaimedJob[] | LeaseMutationResult | boolean>((resolve, reject) => {
+        new Promise<ClaimedJob[] | StoredJob | LeaseMutationResult | boolean>((resolve, reject) => {
           let settled = false
           const timer = setTimeout(() => {
             settled = true
@@ -57,7 +64,11 @@ async function race(path: string, operations: { method: string; input: object }[
           worker.on(
             'message',
             (
-              message: { ready: true } | { result: ClaimedJob[] | LeaseMutationResult | boolean },
+              message:
+                | {
+                    ready: true
+                  }
+                | { result: ClaimedJob[] | StoredJob | LeaseMutationResult | boolean },
             ) => {
               if (!('result' in message)) {
                 Atomics.add(new Int32Array(gate), 0, 1)
@@ -496,7 +507,7 @@ describe('SQLite retention', () => {
 })
 
 describe('SQLite integration', () => {
-  it('migrates v2 jobs, leases, and indexes to the v4 schema', async () => {
+  it('migrates v2 jobs, leases, and indexes to the v5 schema', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -537,7 +548,8 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 4 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expectPartialDedupeIndex(db)
     expect(
       db
         .prepare(
@@ -607,7 +619,7 @@ describe('SQLite integration', () => {
     )
     expect(db.prepare('PRAGMA index_info(walq_active)').all()).toEqual([
       { seqno: 0, cid: 1, name: 'queue' },
-      { seqno: 1, cid: 13, name: 'expiresAt' },
+      { seqno: 1, cid: 14, name: 'expiresAt' },
       { seqno: 2, cid: 0, name: 'id' },
     ])
     expect(
@@ -620,7 +632,7 @@ describe('SQLite integration', () => {
     ).toBe('applied')
   })
 
-  it('migrates v3 jobs to the priority schema with zero priority', async () => {
+  it('migrates v3 jobs to the priority and dedupe schema with zero priority', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -650,22 +662,46 @@ describe('SQLite integration', () => {
         )
       );
       CREATE INDEX walq_pending ON walq_jobs (queue, availableAt, id) WHERE status = 'pending';
-      CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
-      CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
-        WHERE finishedAt IS NOT NULL;
       INSERT INTO walq_jobs (
         id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts
       ) VALUES ('legacy', 'email', 'send', '{}', 'pending', 1, 1, 0, 1);
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 4 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expectPartialDedupeIndex(db)
     expect(db.prepare('SELECT priority FROM walq_jobs WHERE id = ?').get('legacy')).toEqual({
       priority: 0,
     })
 
     await storage.enqueue({ ...input, priority: 10 })
     expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([10, 0])
+  })
+
+  it('migrates schema v4 to v5 and preserves existing jobs', async () => {
+    const { db } = open()
+    const legacy = await betterSqlite3(db).enqueue(input)
+    db.exec(`
+      DROP INDEX walq_dedupe;
+      ALTER TABLE walq_jobs DROP COLUMN dedupe;
+      UPDATE walq_schema SET version = 4;
+    `)
+
+    const storage = betterSqlite3(db)
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expectPartialDedupeIndex(db)
+    expect(await storage.inspect({ queue: 'email', id: legacy.id })).toMatchObject({
+      id: legacy.id,
+      data: input.data,
+    })
+
+    const first = await storage.enqueue({ ...input, dedupe: 'migrated-key' })
+    const duplicate = await storage.enqueue({
+      ...input,
+      data: '{"replacement":true}',
+      dedupe: 'migrated-key',
+    })
+    expect(duplicate).toMatchObject({ id: first.id, data: input.data })
   })
 
   it('persists signed safe-integer priority boundaries', async () => {
@@ -695,6 +731,7 @@ describe('SQLite integration', () => {
 
   it('supports repeated initialization on the same connection', async () => {
     const { db, storage } = open()
+    expectPartialDedupeIndex(db)
     betterSqlite3(db)
     betterSqlite3(db)
     await storage.enqueue(input)
@@ -714,7 +751,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 5')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 6')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 
@@ -742,6 +779,36 @@ describe('SQLite integration', () => {
     ).rejects.toThrow('enqueueMany failed')
 
     expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 0 })
+  })
+
+  it('rolls back new dedupe keys when an atomic batch fails', async () => {
+    const { db, storage } = open()
+    const existing = await storage.enqueue({ ...input, dedupe: 'stored-key' })
+    db.exec(`CREATE TRIGGER reject_deduped_enqueue BEFORE INSERT ON walq_jobs
+      WHEN NEW.data = '"reject"'
+      BEGIN SELECT RAISE(ABORT, 'enqueueMany failed'); END`)
+
+    await expect(
+      storage.enqueueMany([
+        { ...input, dedupe: 'batch-key', data: '{"first":true}' },
+        { ...input, dedupe: 'batch-key', data: '{"second":true}' },
+        { ...input, dedupe: 'stored-key', data: '{"replacement":true}' },
+        { ...input, data: '"reject"' },
+      ]),
+    ).rejects.toThrow('enqueueMany failed')
+
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 1 })
+    expect(await storage.inspect({ queue: input.queue, id: existing.id })).toMatchObject({
+      data: input.data,
+      status: 'pending',
+    })
+    const afterRollback = await storage.enqueue({
+      ...input,
+      data: '{"after":"rollback"}',
+      dedupe: 'batch-key',
+    })
+    expect(afterRollback.id).not.toBe(existing.id)
+    expect(afterRollback.data).toBe('{"after":"rollback"}')
   })
 
   it('rolls back the whole claim on a database error', async () => {
@@ -974,6 +1041,23 @@ describe('SQLite integration', () => {
         .prepare("SELECT status, attemptsMade, attempts FROM walq_jobs WHERE id = 'overflow'")
         .get(),
     ).toEqual({ status: 'failed', attemptsMade: max, attempts: max })
+  })
+
+  it('deduplicates concurrent enqueue calls across database connections', async () => {
+    const path = filename()
+    const { db } = open(path)
+    db.pragma('journal_mode = WAL')
+    const results = await race(
+      path,
+      Array.from({ length: 4 }, () => ({
+        method: 'enqueue',
+        input: { ...input, dedupe: 'concurrent-key' },
+      })),
+    )
+    const jobs = results as StoredJob[]
+
+    expect(new Set(jobs.map(({ id }) => id)).size).toBe(1)
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 1 })
   })
 
   it('never issues duplicate live leases to concurrent workers', async () => {

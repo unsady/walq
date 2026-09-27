@@ -35,7 +35,7 @@ export interface ClaimedJob extends StoredJob {
   expiresAt: number
 }
 
-/** Storage generates a unique ID. Enqueue does not provide deduplication. */
+/** A pending job to enqueue; an optional key deduplicates within its queue. */
 export interface EnqueueInput {
   queue: QueueName
   name: string
@@ -44,6 +44,8 @@ export interface EnqueueInput {
   availableAt: number
   /** Signed safe-integer priority; higher values are claimed first. */
   priority: number
+  /** Optional nonempty key; an existing job with this key is returned unchanged. */
+  dedupe?: string
   attempts: number
 }
 

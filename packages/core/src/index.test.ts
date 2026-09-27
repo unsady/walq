@@ -14,6 +14,7 @@ import type {
 } from '@walq/core/storage'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { StorageCoordinator } from './coordinator.js'
 import { deferred } from './delay.js'
 import { Queue, type ProcessErrorContext, type ProcessErrorHandler } from './index.js'
 
@@ -55,10 +56,13 @@ class TestStorage implements Storage {
   maxConcurrentCalls = 0
   #runningCalls = 0
   #nextJobId = 0
+  #deduplicatedJobs = new Map<string, StoredJob>()
 
-  async enqueue(input: EnqueueInput): Promise<StoredJob> {
-    this.#enter()
-    this.enqueues.push(input)
+  #enqueue(input: EnqueueInput): StoredJob {
+    const key = input.dedupe === undefined ? undefined : JSON.stringify([input.queue, input.dedupe])
+    const existing = key === undefined ? undefined : this.#deduplicatedJobs.get(key)
+    if (existing !== undefined) return existing
+
     const job: StoredJob = {
       id: `job-${++this.#nextJobId}`,
       queue: input.queue,
@@ -72,27 +76,21 @@ class TestStorage implements Storage {
       attempts: input.attempts,
       error: null,
     }
-    return this.#leave(job)
+    if (key !== undefined) this.#deduplicatedJobs.set(key, job)
+    return job
+  }
+
+  async enqueue(input: EnqueueInput): Promise<StoredJob> {
+    this.#enter()
+    this.enqueues.push(input)
+    return this.#leave(this.#enqueue(input))
   }
 
   async enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {
     this.#enter()
     this.enqueueManyCalls.push(inputs)
     this.#maybeThrow(this.enqueueManyErrors)
-    const jobs = inputs.map((input) => ({
-      id: `job-${++this.#nextJobId}`,
-      queue: input.queue,
-      name: input.name,
-      data: input.data,
-      status: 'pending' as const,
-      createdAt: input.now,
-      availableAt: input.availableAt,
-      priority: input.priority,
-      attemptsMade: 0,
-      attempts: input.attempts,
-      error: null,
-    }))
-    return this.#leave(jobs)
+    return this.#leave(inputs.map((input) => this.#enqueue(input)))
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {
@@ -237,6 +235,52 @@ describe('Queue', () => {
     expect(storage.enqueues[0]!.priority).toBe(Number.MAX_SAFE_INTEGER)
     expect(storage.enqueueManyCalls[0]![0]!.priority).toBe(Number.MIN_SAFE_INTEGER)
   })
+
+  it('forwards dedupe keys and returns duplicate IDs from single and batch enqueue', async () => {
+    const storage = new TestStorage()
+    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
+    const queue = new Queue('email', { storage })
+
+    await expect(queue.add({ id: 1 }, { dedupe: 'user:123' })).resolves.toEqual({ id: 'job-1' })
+    await expect(queue.add({ id: 2 }, { dedupe: 'user:123' })).resolves.toEqual({ id: 'job-1' })
+    await expect(
+      queue.addMany([
+        { data: { id: 3 }, options: { dedupe: 'user:456' } },
+        { data: { id: 4 }, options: { dedupe: 'user:456' } },
+        { data: { id: 5 }, options: { dedupe: 'user:123' } },
+      ]),
+    ).resolves.toEqual([{ id: 'job-2' }, { id: 'job-2' }, { id: 'job-1' }])
+
+    expect(storage.enqueues[0]).toMatchObject({ dedupe: 'user:123' })
+    await expect(
+      queue.addMany([
+        { data: { id: 6 }, options: { dedupe: 'user:456' } },
+        { data: { id: 7 }, options: { dedupe: 'user:123' } },
+      ]),
+    ).resolves.toEqual([{ id: 'job-2' }, { id: 'job-1' }])
+    expect(storage.enqueueManyCalls[0]!.map(({ dedupe }) => dedupe)).toEqual([
+      'user:456',
+      'user:456',
+      'user:123',
+    ])
+    expect(wakeQueue.mock.calls).toEqual([['email'], ['email'], ['email'], ['email']])
+  })
+
+  it.each(['', null, 1, {}, []])(
+    'rejects invalid dedupe key %o before storage access',
+    async (dedupe) => {
+      const storage = new TestStorage()
+      const queue = new Queue('email', { storage })
+
+      await expect(queue.add({}, { dedupe: dedupe as never })).rejects.toThrow(TypeError)
+      await expect(
+        queue.addMany([{ data: {} }, { data: {}, options: { dedupe: dedupe as never } }]),
+      ).rejects.toThrow(TypeError)
+
+      expect(storage.enqueues).toEqual([])
+      expect(storage.enqueueManyCalls).toEqual([])
+    },
+  )
 
   it.each([null, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1])(
     'rejects invalid priority %o before storage access',
