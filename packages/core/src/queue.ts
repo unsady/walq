@@ -170,29 +170,24 @@ function retentionMaxAge(value: number | null | undefined, name: string): number
   return value
 }
 
-function normalizeRetry(value: QueueOptions['retry']): RetryBackoff | undefined {
+function normalizeBackoff(value: QueueOptions['backoff']): RetryBackoff | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError('retry must be an object')
+    throw new TypeError('backoff must be an object')
+  }
+  if (value.type !== 'fixed' && value.type !== 'exponential') {
+    throw new TypeError('backoff.type must be fixed or exponential')
+  }
+  if (!Number.isSafeInteger(value.delay) || value.delay < 0) {
+    throw new TypeError('backoff.delay must be a nonnegative safe integer')
   }
 
-  const backoff = value.backoff
-  if (typeof backoff !== 'object' || backoff === null || Array.isArray(backoff)) {
-    throw new TypeError('retry.backoff must be an object')
-  }
-  if (backoff.type !== 'fixed' && backoff.type !== 'exponential') {
-    throw new TypeError('retry.backoff.type must be fixed or exponential')
-  }
-  if (!Number.isSafeInteger(backoff.delay) || backoff.delay < 0) {
-    throw new TypeError('retry.backoff.delay must be a nonnegative safe integer')
-  }
-
-  const jitter = backoff.jitter === undefined ? 0 : backoff.jitter
+  const jitter = value.jitter === undefined ? 0 : value.jitter
   if (typeof jitter !== 'number' || !Number.isFinite(jitter) || jitter < 0 || jitter > 1) {
-    throw new TypeError('retry.backoff.jitter must be a number between 0 and 1')
+    throw new TypeError('backoff.jitter must be a number between 0 and 1')
   }
 
-  return { type: backoff.type, delay: backoff.delay, jitter }
+  return { type: value.type, delay: value.delay, jitter }
 }
 
 /** Normalize the public shorthand and rule object into the strict core shape. */
@@ -231,7 +226,7 @@ export class Queue<Data> {
 
     const attempts = options.attempts ?? 1
     positiveInteger(attempts, 'attempts')
-    const retryBackoff = normalizeRetry(options.retry)
+    const retryBackoff = normalizeBackoff(options.backoff)
 
     const onError = options.onError
     if (onError !== undefined && typeof onError !== 'function') {

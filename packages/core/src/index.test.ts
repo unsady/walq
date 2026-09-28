@@ -591,7 +591,7 @@ describe('Queue', () => {
     const queue = new Queue('email', {
       storage,
       attempts: 3,
-      retry: { backoff: { type: 'fixed', delay: 250 } },
+      backoff: { type: 'fixed', delay: 250 },
       onError: (_error, context) => {
         errors.push(context)
       },
@@ -683,7 +683,7 @@ describe('Queue', () => {
     const queue = new Queue('email', {
       storage,
       attempts: 3,
-      retry: { backoff: { type: 'fixed', delay: 1_000, jitter: 0.2 } },
+      backoff: { type: 'fixed', delay: 1_000, jitter: 0.2 },
       onError: () => {},
     })
     const worker = queue.process(
@@ -711,7 +711,7 @@ describe('Queue', () => {
     const queue = new Queue('email', {
       storage,
       attempts: 3,
-      retry: { backoff: { type: 'fixed', delay: 1_000, jitter: 1 } },
+      backoff: { type: 'fixed', delay: 1_000, jitter: 1 },
       onError: () => {},
     })
     const worker = queue.process(
@@ -740,7 +740,7 @@ describe('Queue', () => {
     )
     const queue = new Queue('email', {
       storage,
-      retry: { backoff: { type: 'exponential', delay: 250 } },
+      backoff: { type: 'exponential', delay: 250 },
       onError: () => {},
     })
     const worker = queue.process(
@@ -772,7 +772,7 @@ describe('Queue', () => {
     )
     const queue = new Queue('email', {
       storage,
-      retry: { backoff: { type: 'exponential', delay: 10, jitter: 0.5 } },
+      backoff: { type: 'exponential', delay: 10, jitter: 0.5 },
       onError: () => {},
     })
     const worker = queue.process(
@@ -797,23 +797,20 @@ describe('Queue', () => {
     'invalid',
     [],
     {},
-    { backoff: null },
-    { backoff: [] },
-    { backoff: {} },
-    { backoff: { type: 'linear', delay: 1 } },
-    { backoff: { type: 'fixed', delay: -1 } },
-    { backoff: { type: 'fixed', delay: 1.5 } },
-    { backoff: { type: 'fixed', delay: Number.POSITIVE_INFINITY } },
-    { backoff: { type: 'fixed', delay: Number.MAX_SAFE_INTEGER + 1 } },
-    { backoff: { type: 'fixed', delay: 1, jitter: Number.NaN } },
-    { backoff: { type: 'fixed', delay: 1, jitter: null } },
-    { backoff: { type: 'fixed', delay: 1, jitter: '0.2' } },
-    { backoff: { type: 'fixed', delay: 1, jitter: -0.01 } },
-    { backoff: { type: 'fixed', delay: 1, jitter: 1.01 } },
-  ])('rejects invalid retry configuration %j', (retry) => {
+    { type: 'linear', delay: 1 },
+    { type: 'fixed', delay: -1 },
+    { type: 'fixed', delay: 1.5 },
+    { type: 'fixed', delay: Number.POSITIVE_INFINITY },
+    { type: 'fixed', delay: Number.MAX_SAFE_INTEGER + 1 },
+    { type: 'fixed', delay: 1, jitter: Number.NaN },
+    { type: 'fixed', delay: 1, jitter: null },
+    { type: 'fixed', delay: 1, jitter: '0.2' },
+    { type: 'fixed', delay: 1, jitter: -0.01 },
+    { type: 'fixed', delay: 1, jitter: 1.01 },
+  ])('rejects invalid backoff configuration %j', (backoff) => {
     const storage = new TestStorage()
 
-    expect(() => new Queue('email', { storage, retry: retry as never })).toThrow('retry')
+    expect(() => new Queue('email', { storage, backoff: backoff as never })).toThrow('backoff')
   })
 
   it('accepts zero delay and jitter boundary values', () => {
@@ -823,7 +820,7 @@ describe('Queue', () => {
       () =>
         new Queue('email', {
           storage,
-          retry: { backoff: { type: 'fixed', delay: 0, jitter: 1 } },
+          backoff: { type: 'fixed', delay: 0, jitter: 1 },
         }),
     ).not.toThrow()
   })

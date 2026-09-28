@@ -39,16 +39,12 @@ export type RetryBackoff =
       jitter?: number
     }
 
-export interface RetryOptions {
-  backoff: RetryBackoff
-}
-
 export interface QueueOptions {
   storage: Storage
   /** Total allowed executions for every job in this queue. */
   attempts?: number
   /** Optional backoff for handler failures; omitted retries immediately. */
-  retry?: RetryOptions
+  backoff?: RetryBackoff
   /**
    * Called when a claim, lease mutation, cleanup, or handler fails. Absent
    * means errors are written to `console.error`. The callback may be async; its

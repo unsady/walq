@@ -23,7 +23,7 @@ Storage adapter authors import `Storage` from `@walq/core/storage`.
 
 ## API
 
-- `new Queue(name, { storage, attempts?, retry?, onError?, retention? })`: `attempts` defaults to `1`; retries after handler errors are immediate unless backoff is configured. Retention defaults to `{ completed: 0, failed: 100 }`.
+- `new Queue(name, { storage, attempts?, backoff?, onError?, retention? })`: `attempts` defaults to `1`; retries after handler errors are immediate unless backoff is configured. Retention defaults to `{ completed: 0, failed: 100 }`.
 - `queue.add(data, options?)`: enqueue JSON-serializable data; omitted options make it immediately available. `options` accepts `delay` or `runAt`, not both, a signed safe-integer `priority` (default `0`), and an optional nonempty `dedupe` key. A matching persisted key in the same queue returns the existing job ID unchanged, regardless of status; payload and options are not replaced. Keys are released only when the job is physically removed, including by retention cleanup. Higher-priority due jobs are claimed first; a past `runAt` is immediately eligible.
 - `queue.addMany(items)`: enqueue `{ data, options? }` items atomically, in input order. All items are validated before enqueue; repeated dedupe keys resolve to the same first or existing job ID in their result positions. An empty batch returns `[]`. Scheduled items share one clock reading.
 - `queue.process(handler, { concurrency? })`: starts processing; concurrency defaults to `1`. The handler receives `(data, { signal, jobId, attempt })`.
@@ -46,7 +46,7 @@ Configure optional handler-failure backoff:
 const queue = new Queue('email', {
   storage,
   attempts: 5,
-  retry: { backoff: { type: 'exponential', delay: 1_000, jitter: 0.2 } },
+  backoff: { type: 'exponential', delay: 1_000, jitter: 0.2 },
 })
 ```
 
