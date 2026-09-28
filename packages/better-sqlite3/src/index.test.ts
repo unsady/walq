@@ -507,7 +507,7 @@ describe('SQLite retention', () => {
 })
 
 describe('SQLite integration', () => {
-  it('migrates v2 jobs, leases, and indexes to the v5 schema', async () => {
+  it('migrates v2 jobs, leases, and indexes through v5 to the v6 schema', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -548,7 +548,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 6 })
     expectPartialDedupeIndex(db)
     expect(
       db
@@ -618,9 +618,15 @@ describe('SQLite integration', () => {
       ]),
     )
     expect(db.prepare('PRAGMA index_info(walq_active)').all()).toEqual([
-      { seqno: 0, cid: 1, name: 'queue' },
-      { seqno: 1, cid: 14, name: 'expiresAt' },
-      { seqno: 2, cid: 0, name: 'id' },
+      { seqno: 0, cid: 2, name: 'queue' },
+      { seqno: 1, cid: 15, name: 'expiresAt' },
+      { seqno: 2, cid: 1, name: 'id' },
+    ])
+    expect(db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all()).toEqual([
+      { id: 'pending-id', seq: 1 },
+      { id: 'active-id', seq: 2 },
+      { id: 'completed-id', seq: 3 },
+      { id: 'failed-id', seq: 4 },
     ])
     expect(
       await storage.heartbeat({
@@ -632,7 +638,7 @@ describe('SQLite integration', () => {
     ).toBe('applied')
   })
 
-  it('migrates v3 jobs to the priority and dedupe schema with zero priority', async () => {
+  it('migrates v3 jobs through v5 to v6 with zero priority', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -668,7 +674,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 6 })
     expectPartialDedupeIndex(db)
     expect(db.prepare('SELECT priority FROM walq_jobs WHERE id = ?').get('legacy')).toEqual({
       priority: 0,
@@ -678,7 +684,7 @@ describe('SQLite integration', () => {
     expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([10, 0])
   })
 
-  it('migrates schema v4 to v5 and preserves existing jobs', async () => {
+  it('migrates schema v4 through v5 to v6 and preserves existing jobs', async () => {
     const { db } = open()
     const legacy = await betterSqlite3(db).enqueue(input)
     db.exec(`
@@ -688,7 +694,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 5 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 6 })
     expectPartialDedupeIndex(db)
     expect(await storage.inspect({ queue: 'email', id: legacy.id })).toMatchObject({
       id: legacy.id,
@@ -702,6 +708,149 @@ describe('SQLite integration', () => {
       dedupe: 'migrated-key',
     })
     expect(duplicate).toMatchObject({ id: first.id, data: input.data })
+  })
+
+  it('migrates v5 rows with deterministic approximate enqueue order', async () => {
+    const db = new Database(':memory:')
+    databases.push(db)
+    db.exec(`
+      CREATE TABLE walq_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
+      INSERT INTO walq_schema (id, version) VALUES (1, 5);
+      CREATE TABLE walq_jobs (
+        id TEXT PRIMARY KEY NOT NULL COLLATE BINARY,
+        queue TEXT NOT NULL COLLATE BINARY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'completed', 'failed', 'cancelled')),
+        createdAt INTEGER NOT NULL CHECK (createdAt >= 0),
+        availableAt INTEGER NOT NULL CHECK (availableAt >= 0),
+        priority INTEGER NOT NULL CHECK (priority >= -9007199254740991 AND priority <= 9007199254740991),
+        dedupe TEXT,
+        finishedAt INTEGER CHECK (finishedAt IS NULL OR finishedAt >= 0),
+        attemptsMade INTEGER NOT NULL CHECK (attemptsMade >= 0 AND attemptsMade <= attempts),
+        attempts INTEGER NOT NULL CHECK (attempts > 0),
+        error TEXT,
+        leaseToken TEXT,
+        expiresAt INTEGER,
+        CHECK (
+          (status = 'active' AND leaseToken IS NOT NULL AND expiresAt IS NOT NULL AND expiresAt >= 0)
+          OR (status != 'active' AND leaseToken IS NULL AND expiresAt IS NULL)
+        ),
+        CHECK (
+          (status IN ('completed', 'failed', 'cancelled') AND finishedAt IS NOT NULL)
+          OR (status NOT IN ('completed', 'failed', 'cancelled') AND finishedAt IS NULL)
+        )
+      );
+      CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, id)
+        WHERE status = 'pending';
+      CREATE INDEX walq_active ON walq_jobs (queue, expiresAt, id) WHERE status = 'active';
+      CREATE INDEX walq_terminal ON walq_jobs (queue, status, finishedAt DESC, id DESC)
+        WHERE finishedAt IS NOT NULL;
+      CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
+      INSERT INTO walq_jobs (
+        id, queue, name, data, status, createdAt, availableAt, priority, dedupe,
+        attemptsMade, attempts
+      ) VALUES
+        ('z-later', 'email', 'send', '{}', 'pending', 20, 10, 4, NULL, 0, 2),
+        ('b-earlier', 'email', 'send', '{}', 'pending', 10, 10, 3, NULL, 0, 2),
+        ('a-earlier', 'email', 'send', '{}', 'pending', 10, 10, 2, NULL, 0, 2);
+    `)
+
+    const storage = betterSqlite3(db)
+
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 6 })
+    expect(db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all()).toEqual([
+      { id: 'a-earlier', seq: 1 },
+      { id: 'b-earlier', seq: 2 },
+      { id: 'z-later', seq: 3 },
+    ])
+    expect(
+      db.prepare("SELECT sql FROM sqlite_master WHERE name = 'walq_pending'").get(),
+    ).toMatchObject({
+      sql: expect.stringContaining('availableAt, seq'),
+    })
+    const claimPlan = db
+      .prepare(`
+        EXPLAIN QUERY PLAN SELECT id FROM walq_jobs INDEXED BY walq_pending
+        WHERE queue = 'email' AND status = 'pending' AND availableAt <= 10
+          AND attemptsMade < attempts
+        ORDER BY priority DESC, availableAt, seq LIMIT 10
+      `)
+      .all() as { detail: string }[]
+    expect(claimPlan.map(({ detail }) => detail).join('; ')).not.toContain('TEMP B-TREE')
+    const next = await storage.enqueue(input)
+    expect(db.prepare('SELECT seq FROM walq_jobs WHERE id = ?').get(next.id)).toEqual({ seq: 4 })
+  })
+
+  it('uses insertion order for tied claims and pending lists without exposing sequence', async () => {
+    const { db, storage } = open()
+    const first = await storage.enqueue({ ...input, dedupe: 'first-key' })
+    const [deduplicated, second, third] = await storage.enqueueMany([
+      { ...input, dedupe: 'first-key' },
+      { ...input, dedupe: 'batch-key' },
+      input,
+    ])
+
+    expect(deduplicated?.id).toBe(first.id)
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 3 })
+
+    const rename = db.prepare('UPDATE walq_jobs SET id = ? WHERE id = ?')
+    rename.run('z-first', first.id)
+    rename.run('a-second', second!.id)
+    rename.run('m-third', third!.id)
+
+    expect(db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all()).toEqual([
+      { id: 'z-first', seq: 1 },
+      { id: 'a-second', seq: 2 },
+      { id: 'm-third', seq: 3 },
+    ])
+    expect(
+      (await storage.list({ queue: 'email', status: 'pending', limit: 10 })).map(({ id }) => id),
+    ).toEqual(['z-first', 'a-second', 'm-third'])
+    expect((await storage.claim(claimInput)).map(({ id }) => id)).toEqual([
+      'z-first',
+      'a-second',
+      'm-third',
+    ])
+    expect(first).not.toHaveProperty('seq')
+    expect(await storage.inspect({ queue: 'email', id: 'z-first' })).not.toHaveProperty('seq')
+  })
+
+  it('does not reuse deleted enqueue positions and persists sequence across reopen', async () => {
+    const path = filename()
+    const { db, storage } = open(path)
+    const first = await storage.enqueue(input)
+    const deleted = await storage.enqueue(input)
+    const deletedSeq = (
+      db.prepare('SELECT seq FROM walq_jobs WHERE id = ?').get(deleted.id) as { seq: number }
+    ).seq
+
+    expect(await storage.remove({ queue: 'email', id: deleted.id })).toBe(true)
+    const replacement = await storage.enqueue(input)
+    const replacementSeq = (
+      db.prepare('SELECT seq FROM walq_jobs WHERE id = ?').get(replacement.id) as { seq: number }
+    ).seq
+    expect(replacementSeq).toBeGreaterThan(deletedSeq)
+    db.close()
+
+    const reopened = open(path)
+    const afterReopen = await reopened.storage.enqueue(input)
+    const afterReopenSeq = (
+      reopened.db.prepare('SELECT seq FROM walq_jobs WHERE id = ?').get(afterReopen.id) as {
+        seq: number
+      }
+    ).seq
+    expect(afterReopenSeq).toBeGreaterThan(replacementSeq)
+
+    const rename = reopened.db.prepare('UPDATE walq_jobs SET id = ? WHERE id = ?')
+    rename.run('z-first', first.id)
+    rename.run('a-replacement', replacement.id)
+    rename.run('m-after-reopen', afterReopen.id)
+    expect(
+      (await reopened.storage.list({ queue: 'email', status: 'pending', limit: 10 })).map(
+        ({ id }) => id,
+      ),
+    ).toEqual(['z-first', 'a-replacement', 'm-after-reopen'])
   })
 
   it('persists signed safe-integer priority boundaries', async () => {
@@ -751,7 +900,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 6')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 7')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 
@@ -1041,6 +1190,33 @@ describe('SQLite integration', () => {
         .prepare("SELECT status, attemptsMade, attempts FROM walq_jobs WHERE id = 'overflow'")
         .get(),
     ).toEqual({ status: 'failed', attemptsMade: max, attempts: max })
+  })
+
+  it('assigns concurrent inserts distinct enqueue positions in serialized order', async () => {
+    const path = filename()
+    const { db } = open(path)
+    db.pragma('journal_mode = WAL')
+    const results = await race(
+      path,
+      Array.from({ length: 4 }, () => ({ method: 'enqueue', input })),
+    )
+    const jobs = results as StoredJob[]
+    const rows = db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all() as {
+      id: string
+      seq: number
+    }[]
+
+    expect(rows.map(({ seq }) => seq)).toEqual([1, 2, 3, 4])
+    const rename = db.prepare('UPDATE walq_jobs SET id = ? WHERE id = ?')
+    for (const [index, row] of rows.entries()) {
+      rename.run(['z-job', 'm-job', 'c-job', 'a-job'][index]!, row.id)
+    }
+    expect(jobs).toHaveLength(4)
+    expect(
+      (await betterSqlite3(db).list({ queue: 'email', status: 'pending', limit: 10 })).map(
+        ({ id }) => id,
+      ),
+    ).toEqual(['z-job', 'm-job', 'c-job', 'a-job'])
   })
 
   it('deduplicates concurrent enqueue calls across database connections', async () => {

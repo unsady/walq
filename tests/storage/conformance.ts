@@ -350,17 +350,14 @@ export function runStorageConformance(
       ])
     })
 
-    it('claims due jobs ordered by priority, then availableAt and id', async () => {
+    it('claims due jobs ordered by priority, then availableAt and enqueue order', async () => {
       const first = await storage.enqueue(enqueueInput())
       const second = await storage.enqueue(enqueueInput())
       const future = await storage.enqueue(enqueueInput({ availableAt: 11 }))
       const early = await storage.enqueue(enqueueInput({ availableAt: 0 }))
 
       const jobs = await storage.claim(claimInput())
-      const orderedIds = [first.id, second.id].sort((left, right) =>
-        Buffer.compare(Buffer.from(left), Buffer.from(right)),
-      )
-      expect(jobs.map((job) => job.id)).toEqual([early.id, ...orderedIds])
+      expect(jobs.map((job) => job.id)).toEqual([early.id, first.id, second.id])
       expect(jobs.every((job) => job.attemptsMade === 1 && job.expiresAt === expiresAt)).toBe(true)
       expect(first.attemptsMade).toBe(0)
 

@@ -151,7 +151,7 @@ class BetterSqlite3Storage implements Storage {
       `
         SELECT id FROM walq_jobs
         WHERE queue = @queue AND status = 'pending' AND availableAt <= @now AND attemptsMade < attempts
-        ORDER BY priority DESC, availableAt, id COLLATE BINARY LIMIT @limit
+        ORDER BY priority DESC, availableAt, seq LIMIT @limit
       `,
     )
     this.acquire = prepare(
@@ -172,7 +172,7 @@ class BetterSqlite3Storage implements Storage {
         db,
         `SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'pending'
-         ORDER BY availableAt, id COLLATE BINARY LIMIT @limit`,
+         ORDER BY availableAt, seq LIMIT @limit`,
       ),
       active: prepare(
         db,
