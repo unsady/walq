@@ -62,6 +62,7 @@ interface NextGroup {
   id: string
 }
 
+const maxGroupLookupsBeforeIndexScan = 8
 const maxScheduleBatchSize = 100
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
@@ -133,7 +134,10 @@ class BetterSqlite3Storage implements Storage {
   private readonly recover: Database.Statement
   private readonly selectUngrouped: Database.Statement
   private readonly selectGrouped: Database.Statement
+  private readonly hasDueGrouped: Database.Statement
   private readonly nextGroup: Database.Statement
+  private readonly nextDueGroup: Database.Statement
+  private readonly isGroupEligible: Database.Statement
   private readonly groupCursor: Database.Statement
   private readonly advanceGroupCursor: Database.Statement
   private readonly acquire: Database.Statement
@@ -225,7 +229,7 @@ class BetterSqlite3Storage implements Storage {
         SELECT id FROM walq_jobs INDEXED BY walq_pending
         WHERE queue = @queue AND status = 'pending' AND groupId IS NULL
           AND availableAt <= @now AND attemptsMade < attempts
-        ORDER BY priority DESC, availableAt, seq LIMIT 1
+        ORDER BY priority DESC, availableAt, seq LIMIT @limit
       `,
     )
     this.selectGrouped = prepare(
@@ -237,6 +241,14 @@ class BetterSqlite3Storage implements Storage {
         ORDER BY priority DESC, availableAt, seq LIMIT 1
       `,
     )
+    this.hasDueGrouped = prepare(
+      db,
+      `
+        SELECT 1 FROM walq_jobs INDEXED BY walq_pending_grouped
+        WHERE queue = @queue AND status = 'pending' AND groupId IS NOT NULL
+          AND availableAt <= @now AND attemptsMade < attempts LIMIT 1
+      `,
+    )
     this.nextGroup = prepare(
       db,
       `
@@ -244,6 +256,21 @@ class BetterSqlite3Storage implements Storage {
         WHERE queue = @queue AND pendingCount > 0 AND activeCount < concurrency AND id > @after
         ORDER BY id LIMIT 1
       `,
+    )
+    this.nextDueGroup = prepare(
+      db,
+      `
+        SELECT groupId AS id FROM walq_jobs INDEXED BY walq_pending_grouped
+        WHERE queue = @queue AND status = 'pending' AND groupId IS NOT NULL
+          AND groupId > @after AND availableAt <= @now AND attemptsMade < attempts
+        ORDER BY groupId LIMIT 1
+      `,
+    )
+    this.isGroupEligible = prepare(
+      db,
+      `SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
+       WHERE queue = @queue AND id = @groupId
+         AND pendingCount > 0 AND activeCount < concurrency`,
     )
     this.groupCursor = prepare(db, 'SELECT lastGroupId FROM walq_group_cursor WHERE queue = @queue')
     this.advanceGroupCursor = prepare(
@@ -480,18 +507,33 @@ class BetterSqlite3Storage implements Storage {
     if (this.isQueuePaused.get({ queue: input.queue }) !== undefined) return []
 
     const jobs: ClaimedJob[] = []
+    const eligibleGroup = this.nextGroup.get({ queue: input.queue, after: '' }) as
+      | NextGroup
+      | undefined
+    if (eligibleGroup === undefined || this.hasDueGrouped.get(input) === undefined) {
+      const candidates = this.selectUngrouped.all(input) as { id: string }[]
+      for (const { id } of candidates) {
+        jobs.push(this.acquire.get({ id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob)
+      }
+      if (jobs.length > 0) this.advanceGroupCursor.run({ queue: input.queue, groupId: '' })
+      return jobs
+    }
+
     // Group IDs are nonempty; the empty cursor ID is the ungrouped stream.
     const previous = this.groupCursor.get(input) as { lastGroupId: string } | undefined
     let after = previous?.lastGroupId ?? ''
     let offerUngrouped = previous === undefined
     let wrapped = false
+    let skippedGroups = 0
     const visited = new Set<string>()
 
     while (jobs.length < input.limit) {
       if (offerUngrouped) {
         offerUngrouped = false
         visited.add('')
-        const candidate = this.selectUngrouped.get(input) as { id: string } | undefined
+        const candidate = this.selectUngrouped.get({ ...input, limit: 1 }) as
+          | { id: string }
+          | undefined
 
         if (candidate !== undefined) {
           jobs.push(
@@ -504,12 +546,18 @@ class BetterSqlite3Storage implements Storage {
           this.advanceGroupCursor.run({ queue: input.queue, groupId: '' })
           after = ''
           wrapped = false
+          skippedGroups = 0
           visited.clear()
           continue
         }
       }
 
-      const group = this.nextGroup.get({ queue: input.queue, after }) as NextGroup | undefined
+      const scanDue = skippedGroups >= maxGroupLookupsBeforeIndexScan
+      const group = (
+        scanDue
+          ? this.nextDueGroup.get({ ...input, after })
+          : this.nextGroup.get({ queue: input.queue, after })
+      ) as NextGroup | undefined
       if (group === undefined) {
         if (wrapped) break
         after = ''
@@ -522,10 +570,20 @@ class BetterSqlite3Storage implements Storage {
       visited.add(group.id)
       after = group.id
 
+      // Seek past the entire saturated group before looking for the next due job.
+      if (
+        scanDue &&
+        this.isGroupEligible.get({ queue: input.queue, groupId: group.id }) === undefined
+      )
+        continue
+
       const candidate = this.selectGrouped.get({ ...input, groupId: group.id }) as
         | { id: string }
         | undefined
-      if (candidate === undefined) continue
+      if (candidate === undefined) {
+        skippedGroups++
+        continue
+      }
 
       jobs.push(
         this.acquire.get({ id: candidate.id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
@@ -533,6 +591,7 @@ class BetterSqlite3Storage implements Storage {
       this.advanceGroupCursor.run({ queue: input.queue, groupId: group.id })
       visited.clear()
       wrapped = false
+      skippedGroups = 0
     }
 
     return jobs

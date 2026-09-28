@@ -792,6 +792,28 @@ describe('SQLite groups', () => {
     expect((await storage.claim(claimInput)).map(({ id }) => id)).toEqual([blocked!.id])
   })
 
+  it('keeps the round-robin turn after batching ungrouped jobs past a full group', async () => {
+    const { storage } = open()
+    const [first, blocked] = await storage.enqueueMany(
+      Array.from({ length: 2 }, () => ({
+        ...input,
+        group: { id: 'full', concurrency: 1 },
+      })),
+    )
+    const [active] = await storage.claim({ ...claimInput, limit: 1 })
+    expect(active?.id).toBe(first!.id)
+
+    const plain = await storage.enqueueMany(Array.from({ length: 2 }, () => ({ ...input })))
+    expect((await storage.claim({ ...claimInput, limit: 2 })).map(({ id }) => id)).toEqual(
+      plain.map(({ id }) => id),
+    )
+
+    expect(await storage.complete({ ...active!, now: input.now })).toBe('applied')
+    const later = await storage.enqueue(input)
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(blocked!.id)
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(later.id)
+  })
+
   it('does not advance the turn for groups whose jobs are not yet due', async () => {
     const { storage } = open()
     const due = await storage.enqueue({ ...input, group: { id: 'a', concurrency: 1 } })
@@ -804,6 +826,81 @@ describe('SQLite groups', () => {
     expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(due.id)
     expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
     expect((await storage.claim({ ...claimInput, now: 20, limit: 1 }))[0]?.id).toBe(later.id)
+  })
+
+  it('skips future-only groups without losing later claims when now moves backward', async () => {
+    const { storage } = open()
+    await storage.enqueueMany(
+      Array.from({ length: 100 }, (_, index) => ({
+        ...input,
+        availableAt: 20,
+        group: { id: `future-${index}`, concurrency: 1 },
+      })),
+    )
+    const ordinary = await storage.enqueueMany(Array.from({ length: 2 }, () => ({ ...input })))
+
+    expect((await storage.claim({ ...claimInput, limit: 2 })).map(({ id }) => id)).toEqual(
+      ordinary.map(({ id }) => id),
+    )
+    expect(await storage.claim({ ...claimInput, now: 19, limit: 1 })).toEqual([])
+
+    const [first] = await storage.claim({ ...claimInput, now: 20, limit: 1 })
+    expect(first).toBeDefined()
+    expect(await storage.claim({ ...claimInput, now: 19, limit: 1 })).toEqual([])
+    const [second] = await storage.claim({ ...claimInput, now: 20, limit: 1 })
+    expect(second?.id).not.toBe(first?.id)
+  })
+
+  it('jumps over future-only groups to a ready group without changing turn order', async () => {
+    const { storage } = open()
+    await storage.enqueueMany(
+      Array.from({ length: 100 }, (_, index) => ({
+        ...input,
+        availableAt: 20,
+        group: { id: `future-${index}`, concurrency: 1 },
+      })),
+    )
+    const ready = await storage.enqueue({ ...input, group: { id: 'zz-ready', concurrency: 1 } })
+    const ordinary = await storage.enqueue(input)
+
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ordinary.id)
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ready.id)
+    expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
+  })
+
+  it('skips a saturated group after future-only groups without reading its backlog', async () => {
+    const { db, storage } = open()
+    await storage.enqueueMany(
+      Array.from({ length: 8 }, (_, index) => ({
+        ...input,
+        availableAt: 20,
+        group: { id: `future-${index}`, concurrency: 1 },
+      })),
+    )
+    const blocked = await storage.enqueue({ ...input, group: { id: 'z-blocked', concurrency: 1 } })
+    await storage.enqueueMany(
+      Array.from({ length: 100 }, () => ({
+        ...input,
+        group: { id: 'z-blocked', concurrency: 1 },
+      })),
+    )
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(blocked.id)
+    const ordinary = await storage.enqueue(input)
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ordinary.id)
+
+    const ready = await storage.enqueue({ ...input, group: { id: 'zz-ready', concurrency: 1 } })
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ready.id)
+    expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
+
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT groupId FROM walq_jobs INDEXED BY walq_pending_grouped
+         WHERE queue = 'email' AND groupId > 'z-blocked' AND groupId IS NOT NULL
+           AND status = 'pending' AND availableAt <= 10 AND attemptsMade < attempts
+         ORDER BY groupId LIMIT 1`,
+      )
+      .all() as { detail: string }[]
+    expect(plan.some(({ detail }) => detail.includes('groupId>?'))).toBe(true)
   })
 
   it('uses separate pending indexes for grouped and ungrouped claims', () => {
@@ -820,8 +917,21 @@ describe('SQLite groups', () => {
       `SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
        WHERE queue = 'email' AND pendingCount > 0 AND activeCount < concurrency
          AND id > 'one' ORDER BY id LIMIT 1`,
+      `SELECT groupId FROM walq_jobs INDEXED BY walq_pending_grouped
+       WHERE queue = 'email' AND status = 'pending' AND groupId IS NOT NULL
+         AND groupId > 'one' AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY groupId LIMIT 1`,
+      `SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
+       WHERE queue = 'email' AND id = 'one'
+         AND pendingCount > 0 AND activeCount < concurrency`,
     ]
-    const indexes = ['walq_pending', 'walq_pending_grouped', 'walq_groups_eligible']
+    const indexes = [
+      'walq_pending',
+      'walq_pending_grouped',
+      'walq_groups_eligible',
+      'walq_pending_grouped',
+      'walq_groups_eligible',
+    ]
     expect(
       db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'walq_active_group'").get(),
     ).toBeUndefined()

@@ -50,6 +50,13 @@ The [chunk-size decision](reports/grouped-claim-chunk-size.md) records why the a
 The standalone [round-robin write-cost experiment](claim-write-cost.mjs) compares identical
 writes on the old v10 and new v12 SQLite schemas. Run `pnpm build && node benchmarks/claim-write-cost.mjs`.
 
+The [group scheduling experiment](group-scheduling.mjs) measures ready ungrouped batches,
+saturated groups, future-due groups, and group fairness. Run
+`pnpm build && BENCH_FUTURE_GROUPS=20000 node benchmarks/group-scheduling.mjs`.
+For the saturated-group-plus-future-groups regression, run
+`BENCH_JOBS=100001 BENCH_FUTURE_GROUPS=8 node benchmarks/group-scheduling.mjs`
+and inspect `blocked-future`.
+
 ## Reading results
 
 The summary shows throughput, spread across runs, and selected suite-specific metrics. JSON contains the remaining metrics and individual runs. Compare like-for-like scenarios on the same idle machine; small differences (roughly below 10%) need more repeats. `synchronous=NORMAL` and `FULL` can produce different absolute rates. The coordinator suite is in-memory and does not measure disk contention.
