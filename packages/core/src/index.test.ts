@@ -16,7 +16,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { StorageCoordinator } from './coordinator.js'
 import { deferred } from './delay.js'
-import { Queue, type ProcessErrorContext, type ProcessErrorHandler } from './index.js'
+import {
+  Queue,
+  type ProcessErrorContext,
+  type ProcessErrorHandler,
+  type ProcessManyJob,
+} from './index.js'
 
 const now = 1_000
 
@@ -52,6 +57,7 @@ class TestStorage implements Storage {
   readonly failErrors: unknown[] = []
   readonly heartbeatErrors: unknown[] = []
   heartbeatResult: LeaseMutationResult = 'applied'
+  readonly heartbeatResults = new Map<string, LeaseMutationResult>()
   jobs: ClaimedJob[] = []
   maxConcurrentCalls = 0
   #runningCalls = 0
@@ -144,7 +150,7 @@ class TestStorage implements Storage {
     this.#enter()
     this.heartbeats.push(input)
     this.#maybeThrow(this.heartbeatErrors)
-    return this.#leave(this.heartbeatResult)
+    return this.#leave(this.heartbeatResults.get(input.id) ?? this.heartbeatResult)
   }
 
   async cleanup(_input: CleanupInput): Promise<CleanupResult> {
@@ -513,6 +519,139 @@ describe('Queue', () => {
 
     expect(maximumActive).toBe(2)
     expect(storage.completions.map(({ id }) => id).sort()).toEqual(['1', '2', '3'])
+  })
+
+  it('runs processMany handlers in bounded batches and completes every job', async () => {
+    const storage = new TestStorage()
+    storage.jobs.push(
+      claimedJob('1', { data: '{"index":1}' }),
+      claimedJob('2', { data: '{"index":2}' }),
+      claimedJob('3', { data: '{"index":3}' }),
+      claimedJob('4', { data: '{"index":4}' }),
+    )
+    const gates = [deferred(), deferred()]
+    const batches: string[][] = []
+    let active = 0
+    let maximumActive = 0
+    const queue = new Queue<{ index: number }>('email', { storage })
+    const worker = queue.processMany(
+      async (jobs) => {
+        const index = batches.length
+        batches.push(jobs.map(({ context }) => context.jobId))
+        active += 1
+        maximumActive = Math.max(maximumActive, active)
+        await gates[index]!.promise
+        active -= 1
+      },
+      { batch: 2, concurrency: 2 },
+    )
+
+    await vi.waitFor(() => expect(batches).toHaveLength(2))
+    expect(storage.claims[0]!.limit).toBe(4)
+    expect(batches).toEqual([
+      ['1', '2'],
+      ['3', '4'],
+    ])
+    gates[0]!.resolve()
+    gates[1]!.resolve()
+    await vi.waitFor(() => expect(storage.completions).toHaveLength(4))
+    await worker.close()
+
+    expect(maximumActive).toBe(2)
+    expect(storage.completions.map(({ id }) => id).sort()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it.each([
+    null,
+    [],
+    { concurrency: null },
+    { concurrency: 0 },
+    { concurrency: -1 },
+    { concurrency: 1.5 },
+    { concurrency: Number.MAX_SAFE_INTEGER + 1 },
+    { batch: null },
+    { batch: 0 },
+    { batch: -1 },
+    { batch: 1.5 },
+    { batch: Number.POSITIVE_INFINITY },
+    { batch: Number.MAX_SAFE_INTEGER + 1 },
+    { batch: { size: 2 } },
+    { concurrency: 2, batch: Number.MAX_SAFE_INTEGER },
+  ])('rejects invalid processMany options %o', (options) => {
+    const queue = new Queue('email', { storage: new TestStorage() })
+
+    expect(() => queue.processMany(async () => {}, options as never)).toThrow(TypeError)
+  })
+
+  it('fails and retries each job when a processMany batch handler rejects', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('1'), { ...claimedJob('2'), attemptsMade: 3 })
+    const errors: ProcessErrorContext[] = []
+    const queue = new Queue('email', {
+      storage,
+      attempts: 3,
+      retry: { backoff: { type: 'fixed', delay: 250 } },
+      onError: (_error, context) => {
+        errors.push(context)
+      },
+    })
+    const worker = queue.processMany(async () => {
+      throw new Error('batch failed')
+    })
+
+    await vi.waitFor(() => expect(storage.failures).toHaveLength(2))
+    expect(storage.claims[0]!.limit).toBe(10)
+    await worker.close()
+
+    expect(storage.failures.map(({ id, retryAt, error }) => ({ id, retryAt, error }))).toEqual([
+      { id: '1', retryAt: now + 250, error: expect.stringContaining('batch failed') },
+      { id: '2', retryAt: now, error: expect.stringContaining('batch failed') },
+    ])
+    expect(errors).toEqual([
+      expect.objectContaining({
+        operation: 'handler',
+        jobId: '1',
+        attempt: 1,
+        attemptsExhausted: false,
+      }),
+      expect.objectContaining({
+        operation: 'handler',
+        jobId: '2',
+        attempt: 3,
+        attemptsExhausted: true,
+      }),
+    ])
+  })
+
+  it('heartbeats and loses leases independently within a processMany batch', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('lost'), claimedJob('owned'))
+    storage.heartbeatResults.set('lost', 'lease_lost')
+    const gate = deferred()
+    let received: ProcessManyJob<unknown>[] | undefined
+    const queue = new Queue('email', { storage })
+    const worker = queue.processMany(
+      async (jobs) => {
+        received = jobs
+        await gate.promise
+      },
+      { batch: 2 },
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(received).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(storage.heartbeats.map(({ id }) => id)).toEqual(['lost', 'owned'])
+    expect(received?.map(({ context }) => context.signal.aborted)).toEqual([true, false])
+
+    gate.resolve()
+    await worker.close()
+
+    expect(storage.completions.map(({ id }) => id)).toEqual(['owned'])
+    expect(storage.failures).toHaveLength(0)
   })
 
   it('records handler errors for immediate retry', async () => {

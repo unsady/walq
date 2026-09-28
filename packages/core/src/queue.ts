@@ -14,8 +14,10 @@ import type {
   JobStatus,
   ListOptions,
   ProcessErrorHandler,
+  ProcessManyOptions,
   ProcessOptions,
   Processor,
+  ProcessorMany,
   QueueOptions,
   RetentionStatus,
   RetryBackoff,
@@ -26,6 +28,7 @@ import { QueueWorker } from './worker.js'
 const defaultCompletedRetention = 0
 const defaultFailedRetention = 100
 const defaultListLimit = 100
+const defaultProcessManyBatchSize = 10
 const maxListLimit = 1_000
 const jobStatuses: readonly JobStatus[] = ['pending', 'active', 'completed', 'failed', 'cancelled']
 
@@ -332,9 +335,39 @@ export class Queue<Data> {
     const concurrency = options.concurrency ?? 1
     positiveInteger(concurrency, 'concurrency')
 
+    return this.#startWorker(processor, {
+      concurrency,
+      batchSize: 1,
+      processMany: false,
+    })
+  }
+
+  /** Process claimed jobs in batches; concurrency counts simultaneous batch calls. */
+  processMany(processor: ProcessorMany<Data>, options: ProcessManyOptions = {}): WorkerHandle {
+    if (this.#worker) throw new Error(`Queue ${this.#name} is already being processed`)
+    if (typeof processor !== 'function') throw new TypeError('processor must be a function')
+    if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+      throw new TypeError('processMany options must be an object')
+    }
+
+    const concurrency = options.concurrency === undefined ? 1 : options.concurrency
+    const batch = options.batch === undefined ? defaultProcessManyBatchSize : options.batch
+    positiveInteger(concurrency, 'concurrency')
+    positiveInteger(batch, 'batch')
+    if (batch > Math.floor(Number.MAX_SAFE_INTEGER / concurrency)) {
+      throw new TypeError('concurrency times batch must be a safe integer')
+    }
+
+    return this.#startWorker(processor, { concurrency, batchSize: batch, processMany: true })
+  }
+
+  #startWorker(
+    processor: Processor<Data> | ProcessorMany<Data>,
+    options: { concurrency: number; batchSize: number; processMany: boolean },
+  ): WorkerHandle {
     const coordinator = getCoordinator(this.#storage)
     const worker = new QueueWorker(coordinator, this.#name, processor, {
-      concurrency,
+      ...options,
       retryBackoff: this.#retryBackoff,
       onError: this.#onError,
       retention: this.#retention,

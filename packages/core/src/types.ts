@@ -71,6 +71,13 @@ export interface ProcessOptions {
   concurrency?: number
 }
 
+export interface ProcessManyOptions {
+  /** Maximum number of batches running at once. Defaults to 1. */
+  concurrency?: number
+  /** Maximum number of jobs passed to one handler call. Defaults to 10. */
+  batch?: number
+}
+
 /** Scheduling options for `queue.add()` and `queue.addMany()`; `delay` and `runAt` are mutually exclusive. */
 export interface AddOptions {
   /** Relative delay in nonnegative safe-integer milliseconds. */
@@ -171,6 +178,15 @@ export type ProcessErrorHandler = (
 ) => void | Promise<void>
 
 export type Processor<Data> = (data: Data, context: ProcessContext) => void | Promise<void>
+
+/** One job and its independent execution context passed to `queue.processMany()`. */
+export interface ProcessManyJob<Data> {
+  data: Data
+  context: ProcessContext
+}
+
+/** A batch handler rejection fails every job in that batch independently. */
+export type ProcessorMany<Data> = (jobs: ProcessManyJob<Data>[]) => void | Promise<void>
 
 export interface WorkerHandle {
   /** Stop claiming jobs and wait for active handlers to finish. */

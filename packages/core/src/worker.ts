@@ -2,7 +2,14 @@ import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/stor
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
 import { deferred, delay, type Delay } from './delay.js'
-import type { ProcessErrorContext, ProcessErrorHandler, Processor, RetryBackoff } from './types.js'
+import type {
+  ProcessErrorContext,
+  ProcessErrorHandler,
+  ProcessManyJob,
+  Processor,
+  ProcessorMany,
+  RetryBackoff,
+} from './types.js'
 
 const leaseDuration = 30_000
 const heartbeatInterval = 10_000
@@ -11,9 +18,22 @@ const cleanupBatch = 500
 
 export interface WorkerOptions {
   concurrency: number
+  batchSize: number
+  processMany: boolean
   retryBackoff: RetryBackoff | undefined
   retention: RetentionPolicy
   onError: ProcessErrorHandler | undefined
+}
+
+interface ActiveJob {
+  job: ClaimedJob
+  controller: AbortController
+  data: unknown
+  succeeded: boolean
+  failure: unknown
+  leaseLost: boolean
+  stopped: boolean
+  heartbeatDelay: Delay | undefined
 }
 
 function retryAt(now: number, attemptsMade: number, backoff: RetryBackoff | undefined): number {
@@ -76,8 +96,10 @@ function safeConsoleCallbackError(error: unknown, context: ProcessErrorContext):
 export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #coordinator: StorageCoordinator
   readonly #queue: string
-  readonly #processor: Processor<Data>
+  readonly #processor: Processor<Data> | ProcessorMany<Data>
   readonly #concurrency: number
+  readonly #batchSize: number
+  readonly #processMany: boolean
   readonly #retryBackoff: RetryBackoff | undefined
   readonly #onError: ProcessErrorHandler | undefined
   readonly #retention: RetentionPolicy
@@ -94,13 +116,15 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   constructor(
     coordinator: StorageCoordinator,
     queue: string,
-    processor: Processor<Data>,
+    processor: Processor<Data> | ProcessorMany<Data>,
     options: WorkerOptions,
   ) {
     this.#coordinator = coordinator
     this.#queue = queue
     this.#processor = processor
     this.#concurrency = options.concurrency
+    this.#batchSize = options.batchSize
+    this.#processMany = options.processMany
     this.#retryBackoff = options.retryBackoff
     this.#onError = options.onError
     this.#retention = options.retention
@@ -119,8 +143,9 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   async poll(): Promise<number> {
     if (this.#closing || this.#polling) return 0
 
-    const limit = this.#concurrency - this.#active.size
-    if (limit <= 0) return 0
+    const availableBatches = this.#concurrency - this.#active.size
+    if (availableBatches <= 0) return 0
+    const limit = availableBatches * this.#batchSize
 
     this.#polling = true
     try {
@@ -139,7 +164,9 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       // A claim also recovers expired leases, which can produce terminal rows
       // that no complete() or fail() call in this process observes.
       this.#scheduleCleanup()
-      for (const job of jobs) this.#start(job)
+      for (let index = 0; index < jobs.length; index += this.#batchSize) {
+        this.#start(jobs.slice(index, index + this.#batchSize))
+      }
       return jobs.length
     } finally {
       this.#polling = false
@@ -164,8 +191,8 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     if (this.#closing && !this.#polling && this.#active.size === 0) this.#done.resolve()
   }
 
-  #start(job: ClaimedJob): void {
-    const task = this.#process(job)
+  #start(jobs: ClaimedJob[]): void {
+    const task = this.#process(jobs)
     this.#active.add(task)
     void task.finally(() => {
       this.#active.delete(task)
@@ -174,75 +201,121 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     })
   }
 
-  async #process(job: ClaimedJob): Promise<void> {
-    const controller = new AbortController()
-    let stopped = false
-    let leaseLost = false
-    let heartbeatDelay: Delay | undefined
+  async #process(jobs: ClaimedJob[]): Promise<void> {
+    const states: ActiveJob[] = jobs.map((job) => ({
+      job,
+      controller: new AbortController(),
+      data: undefined,
+      succeeded: false,
+      failure: undefined,
+      leaseLost: false,
+      stopped: false,
+      heartbeatDelay: undefined,
+    }))
+    const heartbeatTasks = states.map((state) => this.#heartbeat(state))
+    const validStates: ActiveJob[] = []
 
-    const heartbeat = async (): Promise<void> => {
-      while (!stopped) {
-        heartbeatDelay = delay(heartbeatInterval)
-        await heartbeatDelay.promise
-        if (stopped) return
-
-        try {
-          const result = await this.#coordinator.heartbeat({
-            id: job.id,
-            leaseToken: job.leaseToken,
-            now: Date.now(),
-            leaseDuration,
-          })
-          if (result === 'lease_lost') {
-            leaseLost = true
-            controller.abort()
-            return
-          }
-        } catch (error) {
-          // A later heartbeat or lease mutation can still establish the outcome.
-          this.#report(error, {
-            queue: this.#queue,
-            operation: 'heartbeat',
-            jobId: job.id,
-            attempt: job.attemptsMade,
-          })
-        }
+    for (const state of states) {
+      try {
+        state.data = JSON.parse(state.job.data) as Data
+        validStates.push(state)
+      } catch (error) {
+        state.failure = error
       }
     }
 
-    const heartbeatTask = heartbeat()
-    let succeeded = false
-    let failure: unknown
     try {
-      const data = JSON.parse(job.data) as Data
-      await this.#processor(data, {
-        signal: controller.signal,
-        jobId: job.id,
-        attempt: job.attemptsMade,
-      })
-      succeeded = true
-    } catch (error) {
-      failure = error
+      if (this.#processMany) {
+        const batch = validStates.map((state): ProcessManyJob<Data> => ({
+          data: state.data as Data,
+          context: {
+            signal: state.controller.signal,
+            jobId: state.job.id,
+            attempt: state.job.attemptsMade,
+          },
+        }))
+        if (batch.length > 0) {
+          try {
+            await (this.#processor as ProcessorMany<Data>)(batch)
+            for (const state of validStates) state.succeeded = true
+          } catch (error) {
+            for (const state of validStates) state.failure = error
+          }
+        }
+      } else {
+        const state = validStates[0]
+        if (state !== undefined) {
+          try {
+            await (this.#processor as Processor<Data>)(state.data as Data, {
+              signal: state.controller.signal,
+              jobId: state.job.id,
+              attempt: state.job.attemptsMade,
+            })
+            state.succeeded = true
+          } catch (error) {
+            state.failure = error
+          }
+        }
+      }
     } finally {
-      stopped = true
-      heartbeatDelay?.finish()
-      await heartbeatTask
+      for (const state of states) {
+        state.stopped = true
+        state.heartbeatDelay?.finish()
+      }
+      await Promise.all(heartbeatTasks)
     }
 
-    if (!succeeded) {
-      this.#report(failure, {
-        queue: this.#queue,
-        operation: 'handler',
-        jobId: job.id,
-        attempt: job.attemptsMade,
-        attemptsExhausted: job.attemptsMade >= job.attempts,
-      })
+    for (const state of states) {
+      if (!state.succeeded) {
+        this.#report(state.failure, {
+          queue: this.#queue,
+          operation: 'handler',
+          jobId: state.job.id,
+          attempt: state.job.attemptsMade,
+          attemptsExhausted: state.job.attemptsMade >= state.job.attempts,
+        })
+      }
     }
 
-    if (leaseLost) return
+    await Promise.all(states.map((state) => this.#finish(state)))
+  }
 
+  async #heartbeat(state: ActiveJob): Promise<void> {
+    while (!state.stopped) {
+      state.heartbeatDelay = delay(heartbeatInterval)
+      await state.heartbeatDelay.promise
+      if (state.stopped) return
+
+      try {
+        const result = await this.#coordinator.heartbeat({
+          id: state.job.id,
+          leaseToken: state.job.leaseToken,
+          now: Date.now(),
+          leaseDuration,
+        })
+        if (result === 'lease_lost') {
+          state.leaseLost = true
+          state.controller.abort()
+          return
+        }
+      } catch (error) {
+        // A later heartbeat or lease mutation can still establish the outcome.
+        this.#report(error, {
+          queue: this.#queue,
+          operation: 'heartbeat',
+          jobId: state.job.id,
+          attempt: state.job.attemptsMade,
+        })
+      }
+    }
+  }
+
+  async #finish(state: ActiveJob): Promise<void> {
+    if (state.leaseLost) return
+
+    const { job } = state
     try {
-      if (succeeded) {
+      if (state.succeeded) {
         const context = { id: job.id, leaseToken: job.leaseToken, now: Date.now() }
         if ((await this.#coordinator.complete(context)) === 'applied') this.#scheduleCleanup()
       } else {
@@ -253,7 +326,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
           id: job.id,
           leaseToken: job.leaseToken,
           now,
-          error: errorMessage(failure),
+          error: errorMessage(state.failure),
           retryAt: retryTimestamp,
         })
         // The adapter schedules a retry while attempts remain, so only an
@@ -264,7 +337,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       // The lease will be recovered if the final mutation did not commit.
       this.#report(error, {
         queue: this.#queue,
-        operation: succeeded ? 'complete' : 'fail',
+        operation: state.succeeded ? 'complete' : 'fail',
         jobId: job.id,
         attempt: job.attemptsMade,
       })
