@@ -242,6 +242,51 @@ describe('Queue', () => {
     expect(storage.enqueueManyCalls[0]![0]!.priority).toBe(Number.MIN_SAFE_INTEGER)
   })
 
+  it('normalizes group shorthand and defaults concurrency in single and batch enqueue', async () => {
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await queue.add({}, { group: 'account:1' })
+    await queue.addMany([
+      { data: {}, options: { group: { id: 'account:2' } } },
+      { data: {}, options: { group: { id: 'account:3', concurrency: 4 } } },
+    ])
+
+    expect(storage.enqueues[0]!.group).toEqual({ id: 'account:1', concurrency: 1 })
+    expect(storage.enqueueManyCalls[0]!.map(({ group }) => group)).toEqual([
+      { id: 'account:2', concurrency: 1 },
+      { id: 'account:3', concurrency: 4 },
+    ])
+  })
+
+  it.each([
+    '',
+    null,
+    1,
+    {},
+    [],
+    { id: '' },
+    { concurrency: 2 },
+    { id: 'account', concurrency: 0 },
+    { id: 'account', concurrency: -1 },
+    { id: 'account', concurrency: 1.5 },
+    { id: 'account', concurrency: NaN },
+    { id: 'account', concurrency: Infinity },
+    { id: 'account', concurrency: null },
+    { id: 'account', concurrency: Number.MAX_SAFE_INTEGER + 1 },
+  ])('rejects invalid group %o before storage access', async (group) => {
+    const storage = new TestStorage()
+    const queue = new Queue('email', { storage })
+
+    await expect(queue.add({}, { group: group as never })).rejects.toThrow(TypeError)
+    await expect(
+      queue.addMany([{ data: {} }, { data: {}, options: { group: group as never } }]),
+    ).rejects.toThrow(TypeError)
+
+    expect(storage.enqueues).toEqual([])
+    expect(storage.enqueueManyCalls).toEqual([])
+  })
+
   it('forwards dedupe keys and returns duplicate IDs from single and batch enqueue', async () => {
     const storage = new TestStorage()
     const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')

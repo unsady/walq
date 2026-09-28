@@ -42,6 +42,22 @@ interface ClaimStep {
   expiresAt: number
 }
 
+interface PendingCandidate {
+  id: string
+  groupId: string | null
+  priority: number
+  availableAt: number
+  seq: number
+}
+
+interface GroupCapacity {
+  id: string
+  concurrency: number
+  activeCount: number
+}
+
+const maxClaimScanPageSize = 256
+
 function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)
 }
@@ -73,6 +89,7 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
     availableAt: input.availableAt,
     priority: input.priority,
     ...(input.dedupe !== undefined ? { dedupe: input.dedupe } : {}),
+    ...(input.group !== undefined ? { group: input.group } : {}),
     attempts: input.attempts,
   }
   text(validated.queue, 'queue')
@@ -83,6 +100,13 @@ function validateEnqueue(input: EnqueueInput): EnqueueInput {
   integer(validated.availableAt, 'availableAt')
   integer(validated.priority, 'priority', -maxSafeInteger)
   if (validated.dedupe !== undefined) text(validated.dedupe, 'dedupe')
+  if (validated.group !== undefined) {
+    validateObject(validated.group, 'group')
+    const group = { id: validated.group.id, concurrency: validated.group.concurrency }
+    text(group.id, 'group.id')
+    integer(group.concurrency, 'group.concurrency', 1)
+    validated.group = group
+  }
   integer(validated.attempts, 'attempts', 1)
 
   return validated
@@ -92,11 +116,15 @@ class BetterSqlite3Storage implements Storage {
   private readonly db: Database.Database
   private readonly insert: Database.Statement
   private readonly findDeduplicated: Database.Statement
+  private readonly findGroup: Database.Statement
+  private readonly insertGroup: Database.Statement
   private readonly enqueueManyTransaction: Database.Transaction<
     (inputs: EnqueueInput[]) => StoredJob[]
   >
   private readonly recover: Database.Statement
-  private readonly select: Database.Statement
+  private readonly selectPending: Database.Statement
+  private readonly selectPendingAtPriorityAfter: Database.Statement
+  private readonly selectPendingBelowPriority: Database.Statement
   private readonly acquire: Database.Statement
   private readonly inspectStatement: Database.Statement
   private readonly listStatements: Record<JobStatus, Database.Statement>
@@ -122,15 +150,27 @@ class BetterSqlite3Storage implements Storage {
       db,
       `
         INSERT INTO walq_jobs (
-          id, queue, name, data, status, createdAt, availableAt, priority, dedupe, attemptsMade, attempts
+          id, queue, name, data, status, createdAt, availableAt, priority, dedupe, groupId,
+          attemptsMade, attempts
         )
-        VALUES (@id, @queue, @name, @data, 'pending', @now, @availableAt, @priority, @dedupe, 0, @attempts)
+        VALUES (
+          @id, @queue, @name, @data, 'pending', @now, @availableAt, @priority, @dedupe,
+          @groupId, 0, @attempts
+        )
         RETURNING ${metadata}
       `,
     )
     this.findDeduplicated = prepare(
       db,
       `SELECT ${metadata} FROM walq_jobs WHERE queue = @queue AND dedupe = @dedupe`,
+    )
+    this.findGroup = prepare(
+      db,
+      'SELECT concurrency FROM walq_groups WHERE queue = @queue AND id = @id',
+    )
+    this.insertGroup = prepare(
+      db,
+      'INSERT INTO walq_groups (queue, id, concurrency) VALUES (@queue, @id, @concurrency) ON CONFLICT (queue, id) DO NOTHING',
     )
     this.enqueueManyTransaction = db.transaction((inputs: EnqueueInput[]) =>
       inputs.map((input) => this.insertOrGet(input)),
@@ -146,12 +186,38 @@ class BetterSqlite3Storage implements Storage {
         WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
       `,
     )
-    this.select = prepare(
+    this.selectPending = prepare(
       db,
       `
-        SELECT id FROM walq_jobs
-        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now AND attemptsMade < attempts
-        ORDER BY priority DESC, availableAt, seq LIMIT @limit
+        SELECT id, groupId, priority, availableAt, seq
+        FROM walq_jobs INDEXED BY walq_pending
+        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
+          AND attemptsMade < attempts
+        ORDER BY priority DESC, availableAt, seq
+        LIMIT @limit
+      `,
+    )
+    this.selectPendingAtPriorityAfter = prepare(
+      db,
+      `
+        SELECT id, groupId, priority, availableAt, seq
+        FROM walq_jobs INDEXED BY walq_pending
+        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
+          AND attemptsMade < attempts AND priority = @priority
+          AND (availableAt, seq) > (@availableAt, @seq)
+        ORDER BY priority DESC, availableAt, seq
+        LIMIT @limit
+      `,
+    )
+    this.selectPendingBelowPriority = prepare(
+      db,
+      `
+        SELECT id, groupId, priority, availableAt, seq
+        FROM walq_jobs INDEXED BY walq_pending
+        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
+          AND attemptsMade < attempts AND priority < @priority
+        ORDER BY priority DESC, availableAt, seq
+        LIMIT @limit
       `,
     )
     this.acquire = prepare(
@@ -288,14 +354,111 @@ class BetterSqlite3Storage implements Storage {
    */
   private claimStep(input: ClaimInput, expiresAt: number): ClaimedJob[] {
     this.recover.run(input)
-    const jobs = this.select.all(input) as { id: string }[]
-    return jobs.map(
-      ({ id }) => this.acquire.get({ id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
-    )
+
+    const jobs: ClaimedJob[] = []
+    const availableSlots = new Map<string, number>()
+    let cursor: PendingCandidate | undefined
+    let pageSize = Math.min(input.limit, maxClaimScanPageSize)
+
+    while (jobs.length < input.limit) {
+      let candidates: PendingCandidate[]
+      if (cursor === undefined) {
+        candidates = this.selectPending.all({ ...input, limit: pageSize }) as PendingCandidate[]
+      } else {
+        candidates = this.selectPendingAtPriorityAfter.all({
+          ...input,
+          ...cursor,
+          limit: pageSize,
+        }) as PendingCandidate[]
+        if (candidates.length < pageSize) {
+          candidates.push(
+            ...(this.selectPendingBelowPriority.all({
+              ...input,
+              priority: cursor.priority,
+              limit: pageSize - candidates.length,
+            }) as PendingCandidate[]),
+          )
+        }
+      }
+      if (candidates.length === 0) break
+
+      const uncachedGroups = [
+        ...new Set(
+          candidates.flatMap(({ groupId }) =>
+            groupId !== null && !availableSlots.has(groupId) ? [groupId] : [],
+          ),
+        ),
+      ]
+      if (uncachedGroups.length > 0) {
+        const placeholders = uncachedGroups.map(() => '?').join(', ')
+        const groups = prepare(
+          this.db,
+          `
+            SELECT id, concurrency,
+              (
+                SELECT count(*) FROM walq_jobs AS active INDEXED BY walq_active_group
+                WHERE active.queue = walq_groups.queue AND active.groupId = walq_groups.id
+                  AND active.status = 'active' AND active.groupId IS NOT NULL
+              ) AS activeCount
+            FROM walq_groups
+            WHERE queue = ? AND id IN (${placeholders})
+          `,
+        ).all(input.queue, ...uncachedGroups) as GroupCapacity[]
+
+        for (const { id, concurrency, activeCount } of groups) {
+          availableSlots.set(id, Math.max(0, concurrency - activeCount))
+        }
+        for (const id of uncachedGroups) {
+          if (!availableSlots.has(id)) availableSlots.set(id, 0)
+        }
+      }
+
+      const previousJobCount = jobs.length
+      for (const candidate of candidates) {
+        cursor = candidate
+
+        if (candidate.groupId !== null) {
+          const slots = availableSlots.get(candidate.groupId) ?? 0
+          if (slots === 0) continue
+          availableSlots.set(candidate.groupId, slots - 1)
+        }
+
+        jobs.push(
+          this.acquire.get({
+            id: candidate.id,
+            leaseToken: randomUUID(),
+            expiresAt,
+          }) as ClaimedJob,
+        )
+        if (jobs.length === input.limit) break
+      }
+
+      if (jobs.length === input.limit || candidates.length < pageSize) break
+
+      const claimedFromPage = jobs.length - previousJobCount
+      pageSize =
+        claimedFromPage === 0
+          ? Math.min(maxClaimScanPageSize, Math.max(pageSize * 2, 32))
+          : Math.min(input.limit - jobs.length, maxClaimScanPageSize)
+    }
+
+    return jobs
   }
 
-  /** Deduplicated checks must run inside an immediate transaction for a stable winner. */
+  /** Group registration and deduplication checks must share an immediate transaction. */
   private insertOrGet(input: EnqueueInput): StoredJob {
+    if (input.group !== undefined) {
+      const existingGroup = this.findGroup.get({
+        queue: input.queue,
+        id: input.group.id,
+      }) as { concurrency: number } | undefined
+      if (existingGroup !== undefined && existingGroup.concurrency !== input.group.concurrency) {
+        throw new TypeError(
+          `Group "${input.group.id}" in queue "${input.queue}" already uses concurrency ${existingGroup.concurrency}`,
+        )
+      }
+    }
+
     if (input.dedupe !== undefined) {
       const existing = this.findDeduplicated.get({
         queue: input.queue,
@@ -304,9 +467,17 @@ class BetterSqlite3Storage implements Storage {
       if (existing !== undefined) return existing
     }
 
+    if (input.group !== undefined) {
+      this.insertGroup.run({
+        queue: input.queue,
+        ...input.group,
+      })
+    }
+
     return this.insert.get({
       ...input,
       dedupe: input.dedupe ?? null,
+      groupId: input.group?.id ?? null,
       id: randomUUID(),
     }) as StoredJob
   }
@@ -319,11 +490,7 @@ class BetterSqlite3Storage implements Storage {
   async enqueue(input: EnqueueInput): Promise<StoredJob> {
     this.assertAutocommit()
     const validated = validateEnqueue(input)
-    if (validated.dedupe !== undefined) {
-      return this.enqueueManyTransaction.immediate([validated])[0]!
-    }
-
-    return this.insertOrGet(validated)
+    return this.enqueueManyTransaction.immediate([validated])[0]!
   }
 
   async enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]> {

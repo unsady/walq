@@ -114,6 +114,23 @@ function availability(now: number, options: AddOptions): number {
   return availableAt
 }
 
+function normalizeGroup(value: unknown): { id: string; concurrency: number } | undefined {
+  if (value === undefined) return undefined
+
+  const group = typeof value === 'string' ? { id: value } : value
+  if (typeof group !== 'object' || group === null || Array.isArray(group)) {
+    throw new TypeError('group must be a nonempty string or a group object')
+  }
+
+  const { id, concurrency = 1 } = group as { id?: unknown; concurrency?: unknown }
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new TypeError('group.id must be a nonempty string')
+  }
+  positiveInteger(concurrency as number, 'group.concurrency')
+
+  return { id, concurrency: concurrency as number }
+}
+
 function buildEnqueueInput(
   queue: string,
   attempts: number,
@@ -132,6 +149,7 @@ function buildEnqueueInput(
     throw new TypeError('dedupe must be a nonempty string')
   }
 
+  const group = normalizeGroup(options?.group)
   const serialized = JSON.stringify(data)
   if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
@@ -143,6 +161,7 @@ function buildEnqueueInput(
     availableAt: availability(now, schedule),
     priority,
     ...(dedupe !== undefined ? { dedupe } : {}),
+    ...(group !== undefined ? { group } : {}),
     attempts,
   }
 }

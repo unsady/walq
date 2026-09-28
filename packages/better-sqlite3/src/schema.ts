@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 6
+const schemaVersion = 8
 const legacySchemaVersion = 5
 const maxPriority = Number.MAX_SAFE_INTEGER
 
@@ -105,7 +105,28 @@ function migrateV5(db: Database.Database): void {
     DROP TABLE walq_jobs;
     ALTER TABLE walq_jobs_v6 RENAME TO walq_jobs;
     ${indexes}
-    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = ${legacySchemaVersion};
+    UPDATE walq_schema SET version = 6 WHERE id = 1 AND version = ${legacySchemaVersion};
+  `)
+}
+
+function migrateV6(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE walq_jobs ADD COLUMN groupId TEXT;
+    CREATE TABLE walq_groups (
+      queue TEXT NOT NULL COLLATE BINARY,
+      id TEXT NOT NULL COLLATE BINARY,
+      concurrency INTEGER NOT NULL CHECK (concurrency > 0),
+      PRIMARY KEY (queue, id)
+    ) WITHOUT ROWID;
+    UPDATE walq_schema SET version = 7 WHERE id = 1 AND version = 6;
+  `)
+}
+
+function migrateV7(db: Database.Database): void {
+  db.exec(`
+    CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
+      WHERE status = 'active' AND groupId IS NOT NULL;
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 7;
   `)
 }
 
@@ -129,17 +150,35 @@ export function initialize(db: Database.Database): void {
       if (row.version === 2) migrateV2(db)
       else if (row.version === 3) migrateV3(db)
       else if (row.version === 4) migrateV4(db)
-      else if (row.version !== legacySchemaVersion && row.version !== schemaVersion) {
+      else if (
+        row.version !== legacySchemaVersion &&
+        row.version !== 6 &&
+        row.version !== 7 &&
+        row.version !== schemaVersion
+      ) {
         throw new Error(`Unsupported walq schema version: ${row.version}`)
       }
 
-      if (row.version !== schemaVersion) migrateV5(db)
+      if (row.version === 2 || row.version === 3 || row.version === 4 || row.version === 5) {
+        migrateV5(db)
+      }
+      if (row.version <= 6) migrateV6(db)
+      if (row.version <= 7) migrateV7(db)
       return
     }
 
     db.exec(`
       ${jobsTable('walq_jobs')}
       ${indexes}
+      ALTER TABLE walq_jobs ADD COLUMN groupId TEXT;
+      CREATE TABLE walq_groups (
+        queue TEXT NOT NULL COLLATE BINARY,
+        id TEXT NOT NULL COLLATE BINARY,
+        concurrency INTEGER NOT NULL CHECK (concurrency > 0),
+        PRIMARY KEY (queue, id)
+      ) WITHOUT ROWID;
+      CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
+        WHERE status = 'active' AND groupId IS NOT NULL;
       INSERT INTO walq_schema (id, version) VALUES (1, ${schemaVersion});
     `)
   }).immediate()

@@ -46,6 +46,8 @@ export interface EnqueueInput {
   priority: number
   /** Optional nonempty key; an existing job with this key is returned unchanged. */
   dedupe?: string
+  /** Optional queue-scoped group with its fixed positive concurrency limit. */
+  group?: { id: string; concurrency: number }
   attempts: number
 }
 

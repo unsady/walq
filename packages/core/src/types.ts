@@ -84,6 +84,8 @@ export interface AddOptions {
   priority?: number
   /** Optional nonempty key; a matching persisted job in this queue is returned unchanged. */
   dedupe?: string
+  /** Optional queue-scoped group; concurrency defaults to 1. */
+  group?: string | { id: string; concurrency?: number }
 }
 
 export interface AddedJob {

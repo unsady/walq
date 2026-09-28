@@ -174,6 +174,37 @@ it('adds scheduled jobs as one ordered SQLite batch', async () => {
   ])
 })
 
+it('applies a group limit to jobs claimed for processMany batches', async () => {
+  const { storage } = openStorage()
+  const queue = new Queue('grouped-batches', { storage, retention: { completed: null } })
+  let handled = 0
+  let largestBatch = 0
+  let resolveHandled: () => void
+  const allHandled = new Promise<void>((resolve) => {
+    resolveHandled = resolve
+  })
+  const worker = queue.processMany(
+    async (jobs) => {
+      handled += jobs.length
+      largestBatch = Math.max(largestBatch, jobs.length)
+      if (handled === 7) resolveHandled()
+    },
+    { batch: 4, concurrency: 3 },
+  )
+
+  await queue.addMany(
+    Array.from({ length: 7 }, (_, value) => ({
+      data: { value },
+      options: { group: { id: 'same-account', concurrency: 2 } },
+    })),
+  )
+  await allHandled
+  await worker.close()
+
+  expect(handled).toBe(7)
+  expect(largestBatch).toBeLessThanOrEqual(2)
+})
+
 it('immediately retries failed handlers while attempts remain', async () => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const { storage } = openStorage()
