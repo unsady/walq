@@ -253,8 +253,8 @@ function seedHistory(db: Database.Database, rows: number): void {
     .prepare(
       `
         INSERT INTO walq_jobs (
-          id, queue, name, data, status, createdAt, availableAt, finishedAt, attemptsMade, attempts, error
-        ) VALUES (@id, @queue, 'history', '{}', @status, @now, @now, @now, 1, 1, @error)
+          id, queue, name, data, status, createdAt, availableAt, priority, finishedAt, attemptsMade, attempts, error
+        ) VALUES (@id, @queue, 'history', '{}', @status, @now, @now, 0, @now, 1, 1, @error)
       `,
     )
     .safeIntegers(false)

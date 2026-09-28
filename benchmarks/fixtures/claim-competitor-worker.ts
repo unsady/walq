@@ -40,15 +40,15 @@ async function main(): Promise<void> {
   db.pragma('busy_timeout = 2000')
   const insert = db.prepare(`
     INSERT INTO walq_jobs (
-      id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts
-    ) VALUES (@id, 'competitor', 'job', '{}', 'pending', @now, @now, 0, 1)
+      id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
+    ) VALUES (@id, 'competitor', 'job', '{}', 'pending', @now, @now, 0, 0, 1)
   `)
   const insertActive = db.prepare(`
     INSERT INTO walq_jobs (
-      id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts,
+      id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts,
       leaseToken, expiresAt
     ) VALUES (
-      @id, 'competitor-complete', 'job', '{}', 'active', @now, @now, 1, 1,
+      @id, 'competitor-complete', 'job', '{}', 'active', @now, @now, 0, 1, 1,
       @leaseToken, @expiresAt
     )
   `)

@@ -102,6 +102,7 @@ async function warmup(): Promise<void> {
         data: '{}',
         now: timestamp,
         availableAt: timestamp,
+        priority: 0,
         attempts: 1,
       })
       const claimed = await storage.claim({
@@ -141,6 +142,7 @@ async function runEnqueue(): Promise<EnqueueReport> {
         data: '{}',
         now: timestamp,
         availableAt: timestamp,
+        priority: 0,
         attempts: 1,
       })
       samples.push(performance.now() - started)

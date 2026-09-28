@@ -93,8 +93,8 @@ class BatchedCompleter {
 function seedLeases(db: Database.Database, jobs: number): Lease[] {
   const insert = db.prepare(`
     INSERT INTO walq_jobs (
-      id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts, leaseToken, expiresAt
-    ) VALUES (@id, @queue, 'job', '{}', 'active', @now, @now, 1, 1, @leaseToken, @expiresAt)
+      id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts, leaseToken, expiresAt
+    ) VALUES (@id, @queue, 'job', '{}', 'active', @now, @now, 0, 1, 1, @leaseToken, @expiresAt)
   `)
   const leases: Lease[] = []
   const now = Date.now()

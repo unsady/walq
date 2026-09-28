@@ -302,8 +302,8 @@ function claimChunkLabel(scenario: ClaimGroupingScenario): string | number {
 function prepareJobs(db: Database.Database, queues: string[], jobs: number): void {
   const insert = db.prepare(`
     INSERT INTO walq_jobs (
-      id, queue, name, data, status, createdAt, availableAt, attemptsMade, attempts
-    ) VALUES (@id, @queue, 'job', '{}', 'pending', @now, @now, 0, 1)
+      id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
+    ) VALUES (@id, @queue, 'job', '{}', 'pending', @now, @now, 0, 0, 1)
   `)
   const counts = distribute(jobs, queues.length)
   const now = Date.now()
