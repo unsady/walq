@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 9
+const schemaVersion = 10
 const legacySchemaVersion = 5
 const maxPriority = Number.MAX_SAFE_INTEGER
 
@@ -130,6 +130,12 @@ function migrateV7(db: Database.Database): void {
   `)
 }
 
+const pausedQueuesTable = `
+  CREATE TABLE walq_paused_queues (
+    queue TEXT NOT NULL COLLATE BINARY PRIMARY KEY
+  ) WITHOUT ROWID;
+`
+
 const schedulesTable = `
   CREATE TABLE walq_schedules (
     queue TEXT NOT NULL COLLATE BINARY,
@@ -147,7 +153,14 @@ const schedulesTable = `
 function migrateV8(db: Database.Database): void {
   db.exec(`
     ${schedulesTable}
-    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 8;
+    UPDATE walq_schema SET version = 9 WHERE id = 1 AND version = 8;
+  `)
+}
+
+function migrateV9(db: Database.Database): void {
+  db.exec(`
+    ${pausedQueuesTable}
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 9;
   `)
 }
 
@@ -176,6 +189,7 @@ export function initialize(db: Database.Database): void {
         row.version !== 6 &&
         row.version !== 7 &&
         row.version !== 8 &&
+        row.version !== 9 &&
         row.version !== schemaVersion
       ) {
         throw new Error(`Unsupported walq schema version: ${row.version}`)
@@ -187,6 +201,7 @@ export function initialize(db: Database.Database): void {
       if (row.version <= 6) migrateV6(db)
       if (row.version <= 7) migrateV7(db)
       if (row.version <= 8) migrateV8(db)
+      if (row.version <= 9) migrateV9(db)
       return
     }
 
@@ -203,6 +218,7 @@ export function initialize(db: Database.Database): void {
       CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
         WHERE status = 'active' AND groupId IS NOT NULL;
       ${schedulesTable}
+      ${pausedQueuesTable}
       INSERT INTO walq_schema (id, version) VALUES (1, ${schemaVersion});
     `)
   }).immediate()

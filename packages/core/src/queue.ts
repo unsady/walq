@@ -420,6 +420,15 @@ export class Queue<Data> {
     return this.#storage.count({ queue: this.#name })
   }
 
+  async pause(): Promise<void> {
+    await this.#storage.pause({ queue: this.#name })
+  }
+
+  async resume(): Promise<void> {
+    await this.#storage.resume({ queue: this.#name })
+    getCoordinator(this.#storage).wakeQueue(this.#name)
+  }
+
   async retry(id: string): Promise<boolean> {
     validateJobId(id)
     const retried = await this.#storage.retry({ queue: this.#name, id, now: Date.now() })

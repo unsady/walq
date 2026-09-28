@@ -179,6 +179,16 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 
       return inner.remove(input)
     },
+    async pause(input) {
+      tracker.onOperation()
+
+      return inner.pause(input)
+    },
+    async resume(input) {
+      tracker.onOperation()
+
+      return inner.resume(input)
+    },
     async claim(input) {
       tracker.onOperation()
       const started = performance.now()

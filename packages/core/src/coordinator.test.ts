@@ -77,6 +77,8 @@ function groupedStorage(
       calls.push(requests)
       return handler(requests)
     },
+    async pause() {},
+    async resume() {},
     async inspect() {
       return null
     },
@@ -156,6 +158,8 @@ function gatedStorage(): GatedStorage {
       await gate.promise
       return []
     },
+    async pause() {},
+    async resume() {},
     async inspect() {
       started.push('inspect')
       await gate.promise

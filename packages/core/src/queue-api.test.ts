@@ -5,6 +5,7 @@ import type {
   JobSnapshot,
   ListInput,
   QueueStats,
+  QueueInput,
   RemoveInput,
   RescheduleInput,
   RetryInput,
@@ -53,6 +54,8 @@ function storageMock() {
     cancel: vi.fn<(input: CancelInput) => Promise<boolean>>(async (_input) => false),
     reschedule: vi.fn<(input: RescheduleInput) => Promise<boolean>>(async (_input) => false),
     remove: vi.fn<(input: RemoveInput) => Promise<boolean>>(async (_input) => false),
+    pause: vi.fn<(input: QueueInput) => Promise<void>>(async (_input) => {}),
+    resume: vi.fn<(input: QueueInput) => Promise<void>>(async (_input) => {}),
     upsertSchedule: vi.fn<(input: UpsertScheduleInput) => Promise<StoredSchedule>>(
       async (input) => ({
         queue: input.queue,
@@ -270,6 +273,30 @@ describe('Queue durable schedules', () => {
 })
 
 describe('Queue public mutations', () => {
+  it('pauses and resumes the exact queue, waking local workers after resume', async () => {
+    const methods = storageMock()
+    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
+    const queue = new Queue(' email ', { storage: methods.storage })
+
+    await queue.pause()
+    await queue.resume()
+
+    expect(methods.pause).toHaveBeenCalledExactlyOnceWith({ queue: ' email ' })
+    expect(methods.resume).toHaveBeenCalledExactlyOnceWith({ queue: ' email ' })
+    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith(' email ')
+  })
+
+  it('does not wake local workers when resuming fails', async () => {
+    const methods = storageMock()
+    const error = new Error('database unavailable')
+    methods.resume.mockRejectedValue(error)
+    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
+    const queue = new Queue('email', { storage: methods.storage })
+
+    await expect(queue.resume()).rejects.toBe(error)
+    expect(wakeQueue).not.toHaveBeenCalled()
+  })
+
   it('forwards retry, cancel, and remove with exact queue-scoped arguments', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const methods = storageMock()

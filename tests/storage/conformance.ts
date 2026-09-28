@@ -88,6 +88,82 @@ export function runStorageConformance(
       expect(await storage.enqueueMany([])).toEqual([])
     })
 
+    it('pauses and resumes claims idempotently for one exact queue', async () => {
+      const first = await storage.enqueue(enqueueInput())
+      const second = await storage.enqueue(enqueueInput())
+      const other = await storage.enqueue(enqueueInput({ queue: otherQueue }))
+
+      await storage.pause({ queue })
+      await storage.pause({ queue })
+      expect(await storage.claim(claimInput())).toEqual([])
+      expect(await storage.claim(claimInput({ queue: otherQueue }))).toMatchObject([
+        { id: other.id },
+      ])
+
+      // Enqueue remains available during pause, and resume is safe to repeat.
+      const addedWhilePaused = await storage.enqueue(enqueueInput())
+      await storage.resume({ queue })
+      await storage.resume({ queue })
+      expect((await storage.claim(claimInput())).map(({ id }) => id)).toEqual([
+        first.id,
+        second.id,
+        addedWhilePaused.id,
+      ])
+    })
+
+    it('leaves live leases mutable while paused', async () => {
+      const source = await storage.enqueue(enqueueInput())
+      const [job] = await storage.claim(claimInput())
+      expect(job?.id).toBe(source.id)
+
+      await storage.pause({ queue })
+      expect(
+        await storage.heartbeat({
+          id: job!.id,
+          leaseToken: job!.leaseToken,
+          now: now + 1,
+          leaseDuration,
+        }),
+      ).toBe('applied')
+      expect(
+        await storage.complete({ id: job!.id, leaseToken: job!.leaseToken, now: now + 2 }),
+      ).toBe('applied')
+    })
+
+    it('recovers expired leases while paused without issuing new claims', async () => {
+      const exhausted = await storage.enqueue(enqueueInput({ attempts: 1 }))
+      const retryable = await storage.enqueue(enqueueInput({ attempts: 2 }))
+      expect(await storage.claim(claimInput())).toMatchObject([
+        { id: exhausted.id },
+        { id: retryable.id },
+      ])
+
+      await storage.pause({ queue })
+      expect(await storage.claim(claimInput({ now: expiresAt }))).toEqual([])
+      expect(await storage.inspect({ queue, id: exhausted.id })).toMatchObject({
+        status: 'failed',
+        finishedAt: expiresAt,
+      })
+      expect(await storage.inspect({ queue, id: retryable.id })).toMatchObject({
+        status: 'pending',
+        availableAt: expiresAt,
+        attemptsMade: 1,
+      })
+
+      await storage.resume({ queue })
+      expect(await storage.claim(claimInput({ now: expiresAt }))).toMatchObject([
+        { id: retryable.id, attemptsMade: 2 },
+      ])
+    })
+
+    it('rejects invalid pause and resume inputs', async () => {
+      await expect(storage.pause(null as never)).rejects.toThrow(/.+/)
+      await expect(storage.resume(null as never)).rejects.toThrow(/.+/)
+      await expect(storage.pause({ queue: '' })).rejects.toThrow(/.+/)
+      await expect(storage.resume({ queue: 1 as never })).rejects.toThrow(/.+/)
+      expect(await storage.claim(claimInput())).toEqual([])
+    })
+
     it('counts persisted jobs by status without recovering expired active leases', async () => {
       const emptyStats = {
         pending: 0,
@@ -1039,6 +1115,22 @@ export function runStorageConformance(
       ])
 
       expect(results).toEqual([[], []])
+    })
+
+    it('guards paused queues in grouped claims while allowing other queues through', async () => {
+      const pausedJob = await storage.enqueue(enqueueInput({ queue: 'paused' }))
+      const liveJob = await storage.enqueue(enqueueInput({ queue: 'live' }))
+      await storage.pause({ queue: 'paused' })
+
+      const results = await claimQueues([
+        claimInput({ queue: 'paused' }),
+        claimInput({ queue: 'live' }),
+      ])
+      expect(results.map((jobs) => jobs.map(({ id }) => id))).toEqual([[], [liveJob.id]])
+      await storage.resume({ queue: 'paused' })
+      expect(await storage.claim(claimInput({ queue: 'paused' }))).toMatchObject([
+        { id: pausedJob.id },
+      ])
     })
 
     it('accepts an empty batch without touching storage', async () => {

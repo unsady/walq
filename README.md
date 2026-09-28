@@ -30,7 +30,7 @@ queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
 await queue.add({ name: 'Ada' })
 ```
 
-Jobs are delivered at least once. Make handlers idempotent if repeating side effects is unsafe. Stop workers before closing the caller-owned database. Durable repeating schedules can be registered with `queue.schedule(data, { id, every })` or `{ id, cron }`; schedules are materialized as ordinary jobs while a worker polls the queue.
+Jobs are delivered at least once. Make handlers idempotent if repeating side effects is unsafe. Stop workers before closing the caller-owned database. `queue.pause()` and `queue.resume()` durably stop and restart new claims for one exact queue, even across process restarts. Active handlers continue; paused claims recover expired leases but do not start new handlers. Durable repeating schedules can be registered with `queue.schedule(data, { id, every })` or `{ id, cron }`; schedules are materialized as ordinary jobs while a worker polls the queue, except while paused.
 
 ## Docs
 

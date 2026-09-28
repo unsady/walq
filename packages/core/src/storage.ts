@@ -23,6 +23,7 @@ import type {
   UpsertScheduleInput,
   RetryInput,
   QueueStats,
+  QueueInput,
   StoredJob,
 } from './storage-types.js'
 
@@ -38,6 +39,12 @@ export interface Storage {
 
   /** Atomically enqueue all inputs; repeated dedupe keys resolve to the same row. */
   enqueueMany(inputs: EnqueueInput[]): Promise<StoredJob[]>
+
+  /** Persistently pause new claims for this exact queue; idempotent. */
+  pause(input: QueueInput): Promise<void>
+
+  /** Resume new claims for this exact queue; idempotent. */
+  resume(input: QueueInput): Promise<void>
 
   /** Recover expired leases and atomically claim up to limit eligible jobs. */
   claim(input: ClaimInput): Promise<ClaimedJob[]>

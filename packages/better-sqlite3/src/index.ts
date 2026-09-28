@@ -26,6 +26,7 @@ import type {
   UpsertScheduleInput,
   RetryInput,
   QueueStats,
+  QueueInput,
   Storage,
   StoredJob,
 } from '@walq/core/storage'
@@ -137,6 +138,9 @@ class BetterSqlite3Storage implements Storage {
   private readonly enqueueManyTransaction: Database.Transaction<
     (inputs: EnqueueInput[]) => StoredJob[]
   >
+  private readonly pauseQueueStatement: Database.Statement
+  private readonly resumeQueueStatement: Database.Statement
+  private readonly isQueuePaused: Database.Statement
   private readonly recover: Database.Statement
   private readonly selectPending: Database.Statement
   private readonly selectPendingAtPriorityAfter: Database.Statement
@@ -203,6 +207,15 @@ class BetterSqlite3Storage implements Storage {
     )
     this.enqueueManyTransaction = db.transaction((inputs: EnqueueInput[]) =>
       inputs.map((input) => this.insertOrGet(input)),
+    )
+    this.pauseQueueStatement = prepare(
+      db,
+      'INSERT INTO walq_paused_queues (queue) VALUES (@queue) ON CONFLICT (queue) DO NOTHING',
+    )
+    this.resumeQueueStatement = prepare(db, 'DELETE FROM walq_paused_queues WHERE queue = @queue')
+    this.isQueuePaused = prepare(
+      db,
+      'SELECT 1 AS paused FROM walq_paused_queues WHERE queue = @queue',
     )
     this.recover = prepare(
       db,
@@ -431,6 +444,8 @@ class BetterSqlite3Storage implements Storage {
       return scheduleRow(this.findSchedule.get(input))
     })
     this.materializeSchedulesTransaction = db.transaction((input: MaterializeSchedulesInput) => {
+      if (this.isQueuePaused.get({ queue: input.queue }) !== undefined) return 0
+
       const due = this.dueSchedules.all({
         ...input,
         limit: maxScheduleBatchSize,
@@ -473,6 +488,7 @@ class BetterSqlite3Storage implements Storage {
    */
   private claimStep(input: ClaimInput, expiresAt: number): ClaimedJob[] {
     this.recover.run(input)
+    if (this.isQueuePaused.get({ queue: input.queue }) !== undefined) return []
 
     const jobs: ClaimedJob[] = []
     const availableSlots = new Map<string, number>()
@@ -620,6 +636,22 @@ class BetterSqlite3Storage implements Storage {
     if (validated.length === 0) return []
 
     return this.enqueueManyTransaction.immediate(validated)
+  }
+
+  async pause(input: QueueInput): Promise<void> {
+    this.assertAutocommit()
+    validateObject(input, 'input')
+    const validated = { queue: input.queue }
+    text(validated.queue, 'queue')
+    this.pauseQueueStatement.run(validated)
+  }
+
+  async resume(input: QueueInput): Promise<void> {
+    this.assertAutocommit()
+    validateObject(input, 'input')
+    const validated = { queue: input.queue }
+    text(validated.queue, 'queue')
+    this.resumeQueueStatement.run(validated)
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {

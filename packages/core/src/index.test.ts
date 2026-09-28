@@ -9,6 +9,7 @@ import type {
   FailInput,
   HeartbeatInput,
   LeaseMutationResult,
+  QueueInput,
   Storage,
   StoredJob,
 } from '@walq/core/storage'
@@ -48,6 +49,8 @@ class TestStorage implements Storage {
   readonly enqueues: EnqueueInput[] = []
   readonly enqueueManyCalls: EnqueueInput[][] = []
   readonly enqueueManyErrors: unknown[] = []
+  readonly pauses: QueueInput[] = []
+  readonly resumes: QueueInput[] = []
   readonly claims: ClaimInput[] = []
   readonly completions: CompleteInput[] = []
   readonly failures: FailInput[] = []
@@ -97,6 +100,14 @@ class TestStorage implements Storage {
     this.enqueueManyCalls.push(inputs)
     this.#maybeThrow(this.enqueueManyErrors)
     return this.#leave(inputs.map((input) => this.#enqueue(input)))
+  }
+
+  async pause(input: QueueInput): Promise<void> {
+    this.pauses.push(input)
+  }
+
+  async resume(input: QueueInput): Promise<void> {
+    this.resumes.push(input)
   }
 
   async claim(input: ClaimInput): Promise<ClaimedJob[]> {

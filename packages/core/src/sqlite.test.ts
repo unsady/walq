@@ -121,6 +121,34 @@ it('wakes a sleeping worker after a pending job is rescheduled', async () => {
   await worker.close()
 })
 
+it('does not start new handlers while paused and wakes the worker on resume', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(10_000)
+  const { storage } = openStorage()
+  const queue = new Queue<number>('paused', {
+    storage,
+    retention: { completed: null, failed: null },
+  })
+  const handled = deferred()
+  const seen: number[] = []
+
+  await queue.pause()
+  const worker = queue.process(async (value: number) => {
+    seen.push(value)
+    handled.resolve()
+  })
+  await queue.add(1)
+  await vi.advanceTimersByTimeAsync(2_000)
+  expect(seen).toEqual([])
+  expect(await queue.stats()).toMatchObject({ pending: 1, active: 0 })
+
+  await queue.resume()
+  await vi.advanceTimersByTimeAsync(0)
+  await expect(handled.promise).resolves.toBeUndefined()
+  expect(seen).toEqual([1])
+  await worker.close()
+})
+
 it('materializes durable schedules through worker polling', async () => {
   vi.useFakeTimers()
   vi.setSystemTime(1_000)

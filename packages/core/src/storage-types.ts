@@ -68,6 +68,11 @@ export interface ClaimInput {
   leaseDuration: number
 }
 
+/** Queue-scoped pause or resume operation. */
+export interface QueueInput {
+  queue: QueueName
+}
+
 /**
  * A grouped claim over several queues. Requests are applied in order and the
  * result at each index corresponds to the request at the same index.
