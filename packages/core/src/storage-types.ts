@@ -5,6 +5,15 @@ export type LeaseToken = string
 
 export type JobStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled'
 
+/** Persisted job counts for one queue, split by lifecycle status. */
+export interface QueueStats {
+  pending: number
+  active: number
+  completed: number
+  failed: number
+  cancelled: number
+}
+
 /** All timestamps are Unix time in milliseconds. Data is serialized JSON. */
 export interface StoredJob {
   id: JobId
@@ -74,6 +83,10 @@ export type ClaimQueuesResult = ClaimedJob[][]
 export interface InspectInput {
   queue: QueueName
   id: JobId
+}
+
+export interface CountInput {
+  queue: QueueName
 }
 
 /** List persisted jobs of one required status, ordered deterministically by status. */

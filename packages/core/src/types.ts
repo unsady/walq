@@ -1,4 +1,10 @@
-import type { JobStatus as StoredJobStatus, Storage } from '@walq/core/storage'
+import type {
+  JobStatus as StoredJobStatus,
+  QueueStats as StoredQueueStats,
+  Storage,
+} from '@walq/core/storage'
+
+export type QueueStats = StoredQueueStats
 
 export type JobStatus = StoredJobStatus
 

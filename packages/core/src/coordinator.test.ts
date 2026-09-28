@@ -80,6 +80,9 @@ function groupedStorage(
     async inspect() {
       return null
     },
+    async count() {
+      return { pending: 0, active: 0, completed: 0, failed: 0, cancelled: 0 }
+    },
     async list() {
       return []
     },
@@ -157,6 +160,11 @@ function gatedStorage(): GatedStorage {
       started.push('inspect')
       await gate.promise
       return null
+    },
+    async count() {
+      started.push('count')
+      await gate.promise
+      return { pending: 0, active: 0, completed: 0, failed: 0, cancelled: 0 }
     },
     async list() {
       started.push('list')

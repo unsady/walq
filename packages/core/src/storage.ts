@@ -1,6 +1,7 @@
 import type {
   CancelInput,
   ClaimedJob,
+  CountInput,
   ClaimInput,
   ClaimQueuesInput,
   ClaimQueuesResult,
@@ -21,6 +22,7 @@ import type {
   StoredSchedule,
   UpsertScheduleInput,
   RetryInput,
+  QueueStats,
   StoredJob,
 } from './storage-types.js'
 
@@ -51,6 +53,9 @@ export interface Storage {
 
   /** Inspect one job by its exact queue and ID; return null when absent. */
   inspect(input: InspectInput): Promise<JobSnapshot | null>
+
+  /** Count persisted jobs by status for one exact queue; do not recover expired leases. */
+  count(input: CountInput): Promise<QueueStats>
 
   /** List jobs in one required status, with a positive safe-integer limit. */
   list(input: ListInput): Promise<JobSnapshot[]>

@@ -19,6 +19,7 @@ export type {
   Processor,
   ProcessorMany,
   QueueOptions,
+  QueueStats,
   RetentionOptions,
   RetentionStatus,
   RetryBackoff,

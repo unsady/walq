@@ -4,6 +4,7 @@ import type {
   CancelInput,
   ClaimedJob,
   ClaimInput,
+  CountInput,
   ClaimQueuesInput,
   ClaimQueuesResult,
   CleanupInput,
@@ -24,6 +25,7 @@ import type {
   StoredSchedule,
   UpsertScheduleInput,
   RetryInput,
+  QueueStats,
   Storage,
   StoredJob,
 } from '@walq/core/storage'
@@ -141,6 +143,7 @@ class BetterSqlite3Storage implements Storage {
   private readonly selectPendingBelowPriority: Database.Statement
   private readonly acquire: Database.Statement
   private readonly inspectStatement: Database.Statement
+  private readonly countStatement: Database.Statement
   private readonly listStatements: Record<JobStatus, Database.Statement>
   private readonly retryStatement: Database.Statement
   private readonly retryOverflowStatement: Database.Statement
@@ -258,6 +261,19 @@ class BetterSqlite3Storage implements Storage {
     this.inspectStatement = prepare(
       db,
       `SELECT ${snapshotMetadata} FROM walq_jobs WHERE queue = @queue AND id = @id`,
+    )
+    this.countStatement = prepare(
+      db,
+      `
+        SELECT
+          COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending,
+          COUNT(CASE WHEN status = 'active' THEN 1 END) AS active,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed,
+          COUNT(CASE WHEN status = 'failed' THEN 1 END) AS failed,
+          COUNT(CASE WHEN status = 'cancelled' THEN 1 END) AS cancelled
+        FROM walq_jobs
+        WHERE queue = @queue
+      `,
     )
     this.listStatements = {
       pending: prepare(
@@ -633,6 +649,14 @@ class BetterSqlite3Storage implements Storage {
     this.assertAutocommit()
     const validated = validateInspect(input)
     return (this.inspectStatement.get(validated) as JobSnapshot | undefined) ?? null
+  }
+
+  async count(input: CountInput): Promise<QueueStats> {
+    this.assertAutocommit()
+    validateObject(input, 'input')
+    const validated = { queue: input.queue }
+    text(validated.queue, 'queue')
+    return this.countStatement.get(validated) as QueueStats
   }
 
   async list(input: ListInput): Promise<JobSnapshot[]> {

@@ -149,6 +149,11 @@ function instrument(inner: Storage, tracker: Tracker): Storage {
 
       return inner.inspect(input)
     },
+    async count(input) {
+      tracker.onOperation()
+
+      return inner.count(input)
+    },
     async list(input) {
       tracker.onOperation()
 

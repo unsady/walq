@@ -1,8 +1,10 @@
 import type {
   CancelInput,
+  CountInput,
   InspectInput,
   JobSnapshot,
   ListInput,
+  QueueStats,
   RemoveInput,
   RescheduleInput,
   RetryInput,
@@ -39,6 +41,13 @@ function snapshot(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 function storageMock() {
   const methods = {
     inspect: vi.fn<(input: InspectInput) => Promise<JobSnapshot | null>>(async (_input) => null),
+    count: vi.fn<(input: CountInput) => Promise<QueueStats>>(async (_input) => ({
+      pending: 0,
+      active: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    })),
     list: vi.fn<(input: ListInput) => Promise<JobSnapshot[]>>(async (_input) => []),
     retry: vi.fn<(input: RetryInput) => Promise<boolean>>(async (_input) => false),
     cancel: vi.fn<(input: CancelInput) => Promise<boolean>>(async (_input) => false),
@@ -96,6 +105,16 @@ describe('Queue public job API', () => {
 
     await expect(queue.get('missing')).resolves.toBeNull()
     expect(methods.inspect).toHaveBeenCalledExactlyOnceWith({ queue: 'email', id: 'missing' })
+  })
+
+  it('returns persisted status counts scoped to the exact queue name', async () => {
+    const methods = storageMock()
+    const stats = { pending: 2, active: 1, completed: 3, failed: 4, cancelled: 5 }
+    methods.count.mockResolvedValue(stats)
+    const queue = new Queue(' email ', { storage: methods.storage })
+
+    await expect(queue.stats()).resolves.toEqual(stats)
+    expect(methods.count).toHaveBeenCalledExactlyOnceWith({ queue: ' email ' })
   })
 
   it('lists parsed jobs with the default limit and forwards an explicit limit', async () => {

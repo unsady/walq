@@ -88,6 +88,93 @@ export function runStorageConformance(
       expect(await storage.enqueueMany([])).toEqual([])
     })
 
+    it('counts persisted jobs by status without recovering expired active leases', async () => {
+      const emptyStats = {
+        pending: 0,
+        active: 0,
+        completed: 0,
+        failed: 0,
+        cancelled: 0,
+      }
+      expect(await storage.count({ queue })).toEqual(emptyStats)
+
+      await storage.enqueue(enqueueInput({ queue: otherQueue }))
+      const pending = await storage.enqueue(enqueueInput({ availableAt: 1_000, attempts: 2 }))
+      const activeSource = await storage.enqueue(enqueueInput({ attempts: 1 }))
+      const completedSource = await storage.enqueue(enqueueInput({ attempts: 1 }))
+      const failedSource = await storage.enqueue(enqueueInput({ attempts: 1 }))
+      const cancelledSource = await storage.enqueue(enqueueInput())
+      expect(await storage.cancel({ queue, id: cancelledSource.id, now: now + 1 })).toBe(true)
+
+      const claimed = await storage.claim(claimInput({ limit: 10 }))
+      const active = claimed.find(({ id }) => id === activeSource.id)
+      const completed = claimed.find(({ id }) => id === completedSource.id)
+      const failed = claimed.find(({ id }) => id === failedSource.id)
+      expect(active).toBeDefined()
+      expect(completed).toBeDefined()
+      expect(failed).toBeDefined()
+      expect(
+        await storage.complete({
+          id: completed!.id,
+          leaseToken: completed!.leaseToken,
+          now: now + 1,
+        }),
+      ).toBe('applied')
+      expect(
+        await storage.fail({
+          id: failed!.id,
+          leaseToken: failed!.leaseToken,
+          now: now + 1,
+          error: 'terminal',
+          retryAt: null,
+        }),
+      ).toBe('applied')
+
+      const allStatuses = {
+        pending: 1,
+        active: 1,
+        completed: 1,
+        failed: 1,
+        cancelled: 1,
+      }
+      expect(await storage.count({ queue })).toEqual(allStatuses)
+      expect(await storage.count({ queue: otherQueue })).toEqual({
+        ...emptyStats,
+        pending: 1,
+      })
+
+      // Lease expiry is only recovered by claim, never by a count operation.
+      expect(await storage.count({ queue })).toEqual(allStatuses)
+      expect(await storage.claim(claimInput({ now: expiresAt, limit: 10 }))).toEqual([])
+      expect(await storage.count({ queue })).toEqual({ ...allStatuses, active: 0, failed: 2 })
+
+      expect(
+        await storage.cleanup({
+          queue,
+          retention: {
+            completed: { count: 0, maxAge: null },
+            failed: { count: 0, maxAge: null },
+          },
+          now: expiresAt,
+          limit: 10,
+        }),
+      ).toEqual({ removed: 3, more: false })
+      expect(await storage.count({ queue })).toEqual({
+        pending: 1,
+        active: 0,
+        completed: 0,
+        failed: 0,
+        cancelled: 1,
+      })
+      expect(await storage.inspect({ queue, id: pending.id })).not.toBeNull()
+    })
+
+    it('rejects invalid count inputs', async () => {
+      await expect(storage.count(null as never)).rejects.toThrow(/.+/)
+      await expect(storage.count({ queue: '' })).rejects.toThrow(/.+/)
+      await expect(storage.count({ queue: 1 as never })).rejects.toThrow(/.+/)
+    })
+
     it('validates an enqueueMany batch before writing', async () => {
       await expect(
         storage.enqueueMany([

@@ -18,6 +18,7 @@ import type {
   ProcessManyOptions,
   ProcessOptions,
   Processor,
+  QueueStats,
   ProcessorMany,
   QueueOptions,
   RetentionStatus,
@@ -413,6 +414,10 @@ export class Queue<Data> {
     const { status, limit } = normalizeListOptions(options)
     const snapshots = await this.#storage.list({ queue: this.#name, status, limit })
     return snapshots.map((snapshot) => publicJob<Data>(snapshot))
+  }
+
+  async stats(): Promise<QueueStats> {
+    return this.#storage.count({ queue: this.#name })
   }
 
   async retry(id: string): Promise<boolean> {
