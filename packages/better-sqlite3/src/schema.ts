@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 8
+const schemaVersion = 9
 const legacySchemaVersion = 5
 const maxPriority = Number.MAX_SAFE_INTEGER
 
@@ -126,7 +126,28 @@ function migrateV7(db: Database.Database): void {
   db.exec(`
     CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
       WHERE status = 'active' AND groupId IS NOT NULL;
-    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 7;
+    UPDATE walq_schema SET version = 8 WHERE id = 1 AND version = 7;
+  `)
+}
+
+const schedulesTable = `
+  CREATE TABLE walq_schedules (
+    queue TEXT NOT NULL COLLATE BINARY,
+    id TEXT NOT NULL COLLATE BINARY,
+    data TEXT NOT NULL,
+    every INTEGER CHECK (every IS NULL OR every > 0),
+    cron TEXT,
+    nextRunAt INTEGER NOT NULL CHECK (nextRunAt >= 0),
+    CHECK ((every IS NOT NULL AND cron IS NULL) OR (every IS NULL AND cron IS NOT NULL)),
+    PRIMARY KEY (queue, id)
+  ) WITHOUT ROWID;
+  CREATE INDEX walq_schedules_due ON walq_schedules (queue, nextRunAt, id);
+`
+
+function migrateV8(db: Database.Database): void {
+  db.exec(`
+    ${schedulesTable}
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 8;
   `)
 }
 
@@ -154,6 +175,7 @@ export function initialize(db: Database.Database): void {
         row.version !== legacySchemaVersion &&
         row.version !== 6 &&
         row.version !== 7 &&
+        row.version !== 8 &&
         row.version !== schemaVersion
       ) {
         throw new Error(`Unsupported walq schema version: ${row.version}`)
@@ -164,6 +186,7 @@ export function initialize(db: Database.Database): void {
       }
       if (row.version <= 6) migrateV6(db)
       if (row.version <= 7) migrateV7(db)
+      if (row.version <= 8) migrateV8(db)
       return
     }
 
@@ -179,6 +202,7 @@ export function initialize(db: Database.Database): void {
       ) WITHOUT ROWID;
       CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
         WHERE status = 'active' AND groupId IS NOT NULL;
+      ${schedulesTable}
       INSERT INTO walq_schema (id, version) VALUES (1, ${schemaVersion});
     `)
   }).immediate()

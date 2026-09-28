@@ -62,6 +62,15 @@ export interface QueueOptions {
   retention?: RetentionOptions
 }
 
+export type ScheduleOptions =
+  | { id: string; every: number; cron?: never }
+  | { id: string; cron: string; every?: never }
+
+/** Persisted schedule definition returned by `queue.getSchedule()`. */
+export type Schedule<Data> =
+  | { id: string; data: Data; nextRunAt: number; every: number; cron?: never }
+  | { id: string; data: Data; nextRunAt: number; cron: string; every?: never }
+
 export interface ProcessOptions {
   /** Maximum number of handlers running at once. */
   concurrency?: number
@@ -122,6 +131,7 @@ export interface ProcessContext {
 export type ProcessErrorOperation =
   | 'claim'
   | 'cleanup'
+  | 'schedule'
   | 'heartbeat'
   | 'complete'
   | 'fail'
@@ -137,6 +147,12 @@ export interface ClaimErrorContext {
 export interface CleanupErrorContext {
   readonly queue: string
   readonly operation: 'cleanup'
+}
+
+/** A due schedule could not be materialized. */
+export interface ScheduleErrorContext {
+  readonly queue: string
+  readonly operation: 'schedule'
 }
 
 /** A lease mutation failed for a claimed job. */
@@ -167,6 +183,7 @@ export interface HandlerErrorContext {
 export type ProcessErrorContext =
   | ClaimErrorContext
   | CleanupErrorContext
+  | ScheduleErrorContext
   | JobErrorContext
   | HandlerErrorContext
 

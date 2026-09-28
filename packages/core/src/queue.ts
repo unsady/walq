@@ -5,6 +5,7 @@ import type {
   RetentionRule,
   Storage,
 } from '@walq/core/storage'
+import { CronExpressionParser } from 'cron-parser'
 
 import { getCoordinator } from './coordinator.js'
 import type {
@@ -21,6 +22,8 @@ import type {
   QueueOptions,
   RetentionStatus,
   RetryBackoff,
+  Schedule,
+  ScheduleOptions,
   WorkerHandle,
 } from './types.js'
 import { QueueWorker } from './worker.js'
@@ -40,6 +43,30 @@ function validateJobId(id: unknown): asserts id is string {
   if (typeof id !== 'string' || id.length === 0) {
     throw new TypeError('id must be a nonempty string')
   }
+}
+
+function normalizeScheduleRegistration(value: unknown): ScheduleOptions {
+  if (!isRecord(value)) throw new TypeError('schedule options must be an object')
+  validateJobId(value.id)
+
+  const hasEvery = value.every !== undefined
+  const hasCron = value.cron !== undefined
+  if (hasEvery === hasCron) throw new TypeError('exactly one of every or cron must be provided')
+
+  if (hasEvery) {
+    positiveInteger(value.every as number, 'every')
+    return { id: value.id, every: value.every as number }
+  }
+  if (typeof value.cron !== 'string' || value.cron.length === 0) {
+    throw new TypeError('cron must be a nonempty string')
+  }
+  try {
+    CronExpressionParser.parse(value.cron, { tz: 'UTC' })
+  } catch (error) {
+    throw new TypeError(`Invalid cron expression: ${String(error)}`)
+  }
+
+  return { id: value.id, cron: value.cron }
 }
 
 function normalizeListOptions(value: unknown): Required<ListOptions> {
@@ -331,6 +358,57 @@ export class Queue<Data> {
     return snapshot === null ? null : publicJob<Data>(snapshot)
   }
 
+  async schedule(data: Data, options: ScheduleOptions): Promise<void> {
+    const normalized = normalizeScheduleRegistration(options)
+    const serialized = JSON.stringify(data)
+    if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
+    const upsertSchedule = this.#storage.upsertSchedule
+    if (upsertSchedule === undefined) {
+      throw new Error('Storage adapter does not support durable schedules')
+    }
+
+    await upsertSchedule.call(this.#storage, {
+      queue: this.#name,
+      id: normalized.id,
+      data: serialized,
+      now: Date.now(),
+      ...('every' in normalized ? { every: normalized.every } : { cron: normalized.cron }),
+    })
+    getCoordinator(this.#storage).wakeQueue(this.#name)
+  }
+
+  async getSchedule(id: string): Promise<Schedule<Data> | null> {
+    validateJobId(id)
+    const getSchedule = this.#storage.getSchedule
+    if (getSchedule === undefined) {
+      throw new Error('Storage adapter does not support durable schedules')
+    }
+
+    const stored = await getSchedule.call(this.#storage, { queue: this.#name, id })
+    if (stored === null) return null
+
+    const common = {
+      id: stored.id,
+      data: JSON.parse(stored.data) as Data,
+      nextRunAt: stored.nextRunAt,
+    }
+    return stored.every !== undefined
+      ? { ...common, every: stored.every }
+      : { ...common, cron: stored.cron! }
+  }
+
+  async removeSchedule(id: string): Promise<boolean> {
+    validateJobId(id)
+    const removeSchedule = this.#storage.removeSchedule
+    if (removeSchedule === undefined) {
+      throw new Error('Storage adapter does not support durable schedules')
+    }
+
+    const removed = await removeSchedule.call(this.#storage, { queue: this.#name, id })
+    if (removed) getCoordinator(this.#storage).wakeQueue(this.#name)
+    return removed
+  }
+
   async list(options: ListOptions): Promise<Job<Data>[]> {
     const { status, limit } = normalizeListOptions(options)
     const snapshots = await this.#storage.list({ queue: this.#name, status, limit })
@@ -410,6 +488,7 @@ export class Queue<Data> {
       retryBackoff: this.#retryBackoff,
       onError: this.#onError,
       retention: this.#retention,
+      attempts: this.#attempts,
     })
     // Registration can reject a second worker for the same queue name, so it
     // must happen before any maintenance or polling starts.

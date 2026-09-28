@@ -2,6 +2,7 @@ import type {
   ClaimInput,
   ClaimedJob,
   CleanupInput,
+  MaterializeSchedulesInput,
   CleanupResult,
   CompleteInput,
   EnqueueInput,
@@ -160,6 +161,10 @@ export class StorageCoordinator {
 
   cleanup(input: CleanupInput): Promise<CleanupResult> {
     return this.#storage.cleanup(input)
+  }
+
+  materializeSchedules(input: MaterializeSchedulesInput): Promise<number> | undefined {
+    return this.#storage.materializeSchedules?.(input)
   }
 
   async #run(): Promise<void> {

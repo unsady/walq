@@ -6,7 +6,10 @@ import type {
   RemoveInput,
   RescheduleInput,
   RetryInput,
+  ScheduleInput,
+  StoredSchedule,
   Storage,
+  UpsertScheduleInput,
 } from '@walq/core/storage'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -41,6 +44,19 @@ function storageMock() {
     cancel: vi.fn<(input: CancelInput) => Promise<boolean>>(async (_input) => false),
     reschedule: vi.fn<(input: RescheduleInput) => Promise<boolean>>(async (_input) => false),
     remove: vi.fn<(input: RemoveInput) => Promise<boolean>>(async (_input) => false),
+    upsertSchedule: vi.fn<(input: UpsertScheduleInput) => Promise<StoredSchedule>>(
+      async (input) => ({
+        queue: input.queue,
+        id: input.id,
+        data: input.data,
+        nextRunAt: input.now + ('every' in input ? input.every : 1),
+        ...('every' in input ? { every: input.every } : { cron: input.cron }),
+      }),
+    ),
+    getSchedule: vi.fn<(input: ScheduleInput) => Promise<StoredSchedule | null>>(
+      async (_input) => null,
+    ),
+    removeSchedule: vi.fn<(input: ScheduleInput) => Promise<boolean>>(async (_input) => false),
   }
 
   return { storage: methods as unknown as Storage, ...methods }
@@ -153,6 +169,84 @@ describe('Queue public job API', () => {
     expect(methods.cancel).not.toHaveBeenCalled()
     expect(methods.reschedule).not.toHaveBeenCalled()
     expect(methods.remove).not.toHaveBeenCalled()
+  })
+})
+
+describe('Queue durable schedules', () => {
+  it('upserts queue-scoped interval and cron schedules and parses snapshots', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    const methods = storageMock()
+    methods.getSchedule.mockResolvedValue({
+      queue: 'email',
+      id: 'daily',
+      data: '{"task":"digest"}',
+      cron: '0 9 * * *',
+      nextRunAt: 2_000,
+    })
+    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
+    const queue = new Queue('email', { storage: methods.storage })
+
+    await queue.schedule({ task: 'poll' }, { id: 'poller', every: 5_000 })
+    await expect(queue.getSchedule('daily')).resolves.toEqual({
+      id: 'daily',
+      data: { task: 'digest' },
+      cron: '0 9 * * *',
+      nextRunAt: 2_000,
+    })
+
+    expect(methods.upsertSchedule).toHaveBeenCalledExactlyOnceWith({
+      queue: 'email',
+      id: 'poller',
+      data: '{"task":"poll"}',
+      now,
+      every: 5_000,
+    })
+    expect(methods.getSchedule).toHaveBeenCalledExactlyOnceWith({ queue: 'email', id: 'daily' })
+    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith('email')
+  })
+
+  it('validates schedule IDs, repeat options, and serializable payloads before storage access', async () => {
+    const methods = storageMock()
+    const queue = new Queue('email', { storage: methods.storage })
+
+    for (const options of [
+      null,
+      undefined,
+      {},
+      { id: '', every: 1 },
+      { id: 'bad', every: 0 },
+      { id: 'bad', every: 1.5 },
+      { id: 'bad', every: Number.MAX_SAFE_INTEGER + 1 },
+      { id: 'bad', cron: '' },
+      { id: 'bad', cron: '0 0 99 * *' },
+      { id: 'bad', cron: '0 0 * * *', every: 1 },
+    ]) {
+      await expect(queue.schedule({ task: 'x' }, options as never)).rejects.toThrow(TypeError)
+    }
+    await expect(queue.schedule(undefined as never, { id: 'bad', every: 1 })).rejects.toThrow(
+      TypeError,
+    )
+    await expect(queue.getSchedule('')).rejects.toThrow(TypeError)
+    await expect(queue.removeSchedule('')).rejects.toThrow(TypeError)
+    expect(methods.upsertSchedule).not.toHaveBeenCalled()
+    expect(methods.getSchedule).not.toHaveBeenCalled()
+    expect(methods.removeSchedule).not.toHaveBeenCalled()
+  })
+
+  it('removes schedules without altering their already-created jobs', async () => {
+    const methods = storageMock()
+    methods.removeSchedule.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
+    const queue = new Queue('email', { storage: methods.storage })
+
+    await expect(queue.removeSchedule('repeat')).resolves.toBe(true)
+    await expect(queue.removeSchedule('missing')).resolves.toBe(false)
+
+    expect(methods.removeSchedule.mock.calls).toEqual([
+      [{ queue: 'email', id: 'repeat' }],
+      [{ queue: 'email', id: 'missing' }],
+    ])
+    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith('email')
   })
 })
 

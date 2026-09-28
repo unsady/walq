@@ -22,5 +22,8 @@ export type {
   RetentionOptions,
   RetentionStatus,
   RetryBackoff,
+  Schedule,
+  ScheduleErrorContext,
+  ScheduleOptions,
   WorkerHandle,
 } from './types.js'

@@ -40,7 +40,8 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@types/better-sqlite3": "^9.6.0"
+    "@types/better-sqlite3": "^9.6.0",
+    "cron-parser": "^5.10.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.3",

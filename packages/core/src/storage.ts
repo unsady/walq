@@ -14,8 +14,12 @@ import type {
   JobSnapshot,
   LeaseMutationResult,
   ListInput,
+  MaterializeSchedulesInput,
   RemoveInput,
   RescheduleInput,
+  ScheduleInput,
+  StoredSchedule,
+  UpsertScheduleInput,
   RetryInput,
   StoredJob,
 } from './storage-types.js'
@@ -78,4 +82,10 @@ export interface Storage {
 
   /** Bounded removal of terminal jobs beyond a queue's retention policy. */
   cleanup(input: CleanupInput): Promise<CleanupResult>
+
+  /** Optional durable repeating-schedule operations. */
+  upsertSchedule?(input: UpsertScheduleInput): Promise<StoredSchedule>
+  getSchedule?(input: ScheduleInput): Promise<StoredSchedule | null>
+  removeSchedule?(input: ScheduleInput): Promise<boolean>
+  materializeSchedules?(input: MaterializeSchedulesInput): Promise<number>
 }

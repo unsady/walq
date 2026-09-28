@@ -50,52 +50,54 @@ async function race(path: string, operations: { method: string; input: object }[
   try {
     const tasks = operations.map(
       (operation) =>
-        new Promise<ClaimedJob[] | StoredJob | LeaseMutationResult | boolean>((resolve, reject) => {
-          let settled = false
-          const timer = setTimeout(() => {
-            settled = true
-            reject(new Error(`Timed out waiting for worker ${operation.method}`))
-          }, raceTimeout)
-          timers.push(timer)
-          const worker = new Worker(new URL('./fixtures/claim-worker.ts', import.meta.url), {
-            workerData: { path, gate, count: operations.length, ...operation },
-          })
-          workers.push(worker)
-          worker.on(
-            'message',
-            (
-              message:
-                | {
-                    ready: true
-                  }
-                | { result: ClaimedJob[] | StoredJob | LeaseMutationResult | boolean },
-            ) => {
-              if (!('result' in message)) {
-                Atomics.add(new Int32Array(gate), 0, 1)
-                if (Atomics.load(new Int32Array(gate), 0) === operations.length)
-                  Atomics.notify(new Int32Array(gate), 0)
-              } else if (!settled) {
+        new Promise<ClaimedJob[] | StoredJob | LeaseMutationResult | boolean | number>(
+          (resolve, reject) => {
+            let settled = false
+            const timer = setTimeout(() => {
+              settled = true
+              reject(new Error(`Timed out waiting for worker ${operation.method}`))
+            }, raceTimeout)
+            timers.push(timer)
+            const worker = new Worker(new URL('./fixtures/claim-worker.ts', import.meta.url), {
+              workerData: { path, gate, count: operations.length, ...operation },
+            })
+            workers.push(worker)
+            worker.on(
+              'message',
+              (
+                message:
+                  | {
+                      ready: true
+                    }
+                  | { result: ClaimedJob[] | StoredJob | LeaseMutationResult | boolean | number },
+              ) => {
+                if (!('result' in message)) {
+                  Atomics.add(new Int32Array(gate), 0, 1)
+                  if (Atomics.load(new Int32Array(gate), 0) === operations.length)
+                    Atomics.notify(new Int32Array(gate), 0)
+                } else if (!settled) {
+                  settled = true
+                  clearTimeout(timer)
+                  resolve(message.result)
+                }
+              },
+            )
+            worker.on('error', (error) => {
+              if (!settled) {
                 settled = true
                 clearTimeout(timer)
-                resolve(message.result)
+                reject(error)
               }
-            },
-          )
-          worker.on('error', (error) => {
-            if (!settled) {
-              settled = true
-              clearTimeout(timer)
-              reject(error)
-            }
-          })
-          worker.on('exit', (code) => {
-            if (!settled) {
-              settled = true
-              clearTimeout(timer)
-              reject(new Error(`Worker exited before result: ${code}`))
-            }
-          })
-        }),
+            })
+            worker.on('exit', (code) => {
+              if (!settled) {
+                settled = true
+                clearTimeout(timer)
+                reject(new Error(`Worker exited before result: ${code}`))
+              }
+            })
+          },
+        ),
     )
     return await Promise.all(tasks)
   } finally {
@@ -750,10 +752,184 @@ describe('SQLite groups', () => {
     expect(claimed).toHaveLength(3)
     expect(new Set(claimed.map(({ id }) => id)).size).toBe(3)
   })
+
+  it('materializes a due schedule only once across SQLite connections', async () => {
+    const path = filename()
+    const { db, storage } = open(path)
+    await storage.upsertSchedule!({
+      queue: 'email',
+      id: 'concurrent',
+      data: '{}',
+      now: 100,
+      every: 10,
+    })
+    db.close()
+
+    const results = await race(
+      path,
+      Array.from({ length: 4 }, () => ({
+        method: 'materializeSchedules',
+        input: { queue: 'email', now: 150, attempts: 1 },
+      })),
+    )
+    expect(results.filter((result) => result === 1)).toHaveLength(1)
+
+    const reopened = open(path)
+    expect(reopened.db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({
+      count: 1,
+    })
+    expect(await reopened.storage.getSchedule!({ queue: 'email', id: 'concurrent' })).toMatchObject(
+      {
+        nextRunAt: 160,
+      },
+    )
+  })
 })
 
 describe('SQLite integration', () => {
-  it('migrates v2 jobs, leases, and indexes through v7 to the v8 schema', async () => {
+  it('persists, coalesces missed schedule runs, and leaves materialized jobs unchanged', async () => {
+    const { db, storage } = open()
+    const registration = {
+      queue: 'email',
+      id: 'repeat',
+      data: '{"version":1}',
+      now: 100,
+      every: 10,
+    } as const
+
+    await expect(storage.upsertSchedule!(registration)).resolves.toMatchObject({ nextRunAt: 110 })
+    await storage.upsertSchedule!({ ...registration, now: 120 })
+    expect(await storage.getSchedule!({ queue: 'email', id: 'repeat' })).toMatchObject({
+      data: '{"version":1}',
+      nextRunAt: 110,
+    })
+
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 135, attempts: 3 })).toBe(1)
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 135, attempts: 3 })).toBe(0)
+    await storage.upsertSchedule!({ ...registration, data: '{"version":2}', now: 150 })
+    expect(await storage.list({ queue: 'email', status: 'pending', limit: 10 })).toMatchObject([
+      { data: '{"version":1}', availableAt: 110, createdAt: 135, attempts: 3 },
+    ])
+    expect(await storage.getSchedule!({ queue: 'email', id: 'repeat' })).toMatchObject({
+      data: '{"version":2}',
+      nextRunAt: 160,
+    })
+    await storage.upsertSchedule!({
+      ...registration,
+      data: '{"version":2}',
+      every: 20,
+      now: 170,
+    })
+    expect(await storage.getSchedule!({ queue: 'email', id: 'repeat' })).toMatchObject({
+      every: 20,
+      nextRunAt: 190,
+    })
+
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 200, attempts: 1 })).toBe(1)
+    expect(await storage.removeSchedule!({ queue: 'email', id: 'repeat' })).toBe(true)
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 1_000, attempts: 1 })).toBe(0)
+    expect(db.prepare('SELECT data, availableAt FROM walq_jobs ORDER BY seq').all()).toEqual([
+      { data: '{"version":1}', availableAt: 110 },
+      { data: '{"version":2}', availableAt: 190 },
+    ])
+  })
+
+  it('materializes overdue schedules in bounded batches', async () => {
+    const { db, storage } = open()
+    for (let index = 0; index < 105; index += 1) {
+      await storage.upsertSchedule!({
+        queue: 'email',
+        id: `schedule-${index}`,
+        data: '{}',
+        now: 0,
+        every: 10,
+      })
+    }
+
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 10, attempts: 1 })).toBe(100)
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 10, attempts: 1 })).toBe(5)
+    expect(await storage.materializeSchedules!({ queue: 'email', now: 10, attempts: 1 })).toBe(0)
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 105 })
+  })
+
+  it('rejects invalid schedule storage inputs and rolls back timestamp overflow', async () => {
+    const { db, storage } = open()
+    for (const every of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(
+        storage.upsertSchedule!({ queue: 'email', id: 'invalid', data: '{}', now: 0, every }),
+      ).rejects.toThrow(TypeError)
+    }
+    await expect(
+      storage.upsertSchedule!({
+        queue: 'email',
+        id: 'invalid-cron',
+        data: '{}',
+        now: 0,
+        cron: 'not a cron expression',
+      }),
+    ).rejects.toThrow(TypeError)
+
+    await storage.upsertSchedule!({
+      queue: 'email',
+      id: 'overflow',
+      data: '{}',
+      now: 0,
+      every: Number.MAX_SAFE_INTEGER,
+    })
+    await expect(
+      storage.materializeSchedules!({
+        queue: 'email',
+        now: Number.MAX_SAFE_INTEGER,
+        attempts: 1,
+      }),
+    ).rejects.toThrow(TypeError)
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 0 })
+    expect(await storage.getSchedule!({ queue: 'email', id: 'overflow' })).toMatchObject({
+      nextRunAt: Number.MAX_SAFE_INTEGER,
+    })
+  })
+
+  it('uses UTC cron occurrences and resumes overdue schedules after restart', async () => {
+    const path = filename()
+    const first = open(path)
+    const midnight = Date.UTC(2024, 0, 1)
+    await first.storage.upsertSchedule!({
+      queue: 'email',
+      id: 'daily',
+      data: '{}',
+      now: midnight,
+      cron: '0 0 * * *',
+    })
+    expect(await first.storage.getSchedule!({ queue: 'email', id: 'daily' })).toMatchObject({
+      nextRunAt: midnight + 24 * 60 * 60 * 1_000,
+    })
+    first.db.close()
+
+    const reopened = open(path)
+    const restartNow = midnight + 5 * 24 * 60 * 60 * 1_000
+    expect(
+      await reopened.storage.materializeSchedules!({
+        queue: 'email',
+        now: restartNow,
+        attempts: 2,
+      }),
+    ).toBe(1)
+    expect(
+      await reopened.storage.materializeSchedules!({
+        queue: 'email',
+        now: restartNow,
+        attempts: 2,
+      }),
+    ).toBe(0)
+    expect(await reopened.storage.getSchedule!({ queue: 'email', id: 'daily' })).toMatchObject({
+      nextRunAt: midnight + 6 * 24 * 60 * 60 * 1_000,
+    })
+    expect(
+      await reopened.storage.list({ queue: 'email', status: 'pending', limit: 10 }),
+    ).toMatchObject([{ availableAt: midnight + 24 * 60 * 60 * 1_000, createdAt: restartNow }])
+  })
+
+  it('migrates v2 jobs, leases, and indexes through v8 to the v9 schema', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -794,7 +970,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expectPartialDedupeIndex(db)
     expect(
       db
@@ -884,7 +1060,7 @@ describe('SQLite integration', () => {
     ).toBe('applied')
   })
 
-  it('migrates v3 jobs through v7 to v8 with zero priority', async () => {
+  it('migrates v3 jobs through v8 to v9 with zero priority', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -920,7 +1096,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expectPartialDedupeIndex(db)
     expect(db.prepare('SELECT priority FROM walq_jobs WHERE id = ?').get('legacy')).toEqual({
       priority: 0,
@@ -930,12 +1106,14 @@ describe('SQLite integration', () => {
     expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([10, 0])
   })
 
-  it('migrates schema v4 through v7 to v8 and preserves existing jobs', async () => {
+  it('migrates schema v4 through v8 to v9 and preserves existing jobs', async () => {
     const { db } = open()
     const legacy = await betterSqlite3(db).enqueue(input)
     db.exec(`
       DROP INDEX walq_dedupe;
       DROP INDEX walq_active_group;
+      DROP INDEX walq_schedules_due;
+      DROP TABLE walq_schedules;
       ALTER TABLE walq_jobs DROP COLUMN dedupe;
       DROP TABLE walq_groups;
       ALTER TABLE walq_jobs DROP COLUMN groupId;
@@ -943,7 +1121,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expectPartialDedupeIndex(db)
     expect(await storage.inspect({ queue: 'email', id: legacy.id })).toMatchObject({
       id: legacy.id,
@@ -964,13 +1142,15 @@ describe('SQLite integration', () => {
     const legacy = await storage.enqueue(input)
     db.exec(`
       DROP INDEX walq_active_group;
+      DROP INDEX walq_schedules_due;
+      DROP TABLE walq_schedules;
       DROP TABLE walq_groups;
       ALTER TABLE walq_jobs DROP COLUMN groupId;
       UPDATE walq_schema SET version = 6;
     `)
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expect(db.prepare('SELECT groupId FROM walq_jobs WHERE id = ?').get(legacy.id)).toEqual({
       groupId: null,
     })
@@ -985,10 +1165,12 @@ describe('SQLite integration', () => {
     const { db, storage } = open()
     const grouped = await storage.enqueue({ ...input, group: { id: 'v7-group', concurrency: 2 } })
     await storage.claim({ ...claimInput, limit: 1 })
-    db.exec('DROP INDEX walq_active_group; UPDATE walq_schema SET version = 7')
+    db.exec(
+      'DROP INDEX walq_active_group; DROP INDEX walq_schedules_due; DROP TABLE walq_schedules; UPDATE walq_schema SET version = 7',
+    )
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expect(
       db
         .prepare(
@@ -1001,6 +1183,22 @@ describe('SQLite integration', () => {
     expect(await migrated.inspect({ queue: input.queue, id: grouped.id })).toMatchObject({
       id: grouped.id,
     })
+  })
+
+  it('migrates the v8 schema by adding durable schedules', async () => {
+    const { db, storage } = open()
+    const job = await storage.enqueue(input)
+    db.exec(
+      `DROP INDEX walq_schedules_due; DROP TABLE walq_schedules; UPDATE walq_schema SET version = 8`,
+    )
+
+    const migrated = betterSqlite3(db)
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
+    expect(await migrated.inspect({ queue: input.queue, id: job.id })).toMatchObject({
+      id: job.id,
+      data: input.data,
+    })
+    await expect(migrated.getSchedule!({ queue: 'email', id: 'not-created' })).resolves.toBeNull()
   })
 
   it('persists group configuration across storage reopen', async () => {
@@ -1021,7 +1219,7 @@ describe('SQLite integration', () => {
     expect((await reopened.storage.claim({ ...claimInput, limit: 5 })).length).toBe(2)
   })
 
-  it('migrates v5 rows through v8 with deterministic approximate enqueue order', async () => {
+  it('migrates v5 rows through v9 with deterministic approximate enqueue order', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -1069,7 +1267,7 @@ describe('SQLite integration', () => {
 
     const storage = betterSqlite3(db)
 
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 8 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 9 })
     expect(db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all()).toEqual([
       { id: 'a-earlier', seq: 1 },
       { id: 'b-earlier', seq: 2 },
@@ -1211,7 +1409,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 9')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 10')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 

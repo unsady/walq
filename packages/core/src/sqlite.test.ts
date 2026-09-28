@@ -121,6 +121,33 @@ it('wakes a sleeping worker after a pending job is rescheduled', async () => {
   await worker.close()
 })
 
+it('materializes durable schedules through worker polling', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_000)
+  const { storage } = openStorage()
+  const queue = new Queue<{ task: string }>('scheduled', {
+    storage,
+    attempts: 3,
+    retention: { completed: null, failed: null },
+  })
+  let resolveHandled: (task: string) => void
+  const handled = new Promise<string>((resolve) => {
+    resolveHandled = resolve
+  })
+
+  await queue.schedule({ task: 'refresh' }, { id: 'refresh', every: 50 })
+  const worker = queue.process(async ({ task }) => resolveHandled(task))
+  await vi.advanceTimersByTimeAsync(1_000)
+  await vi.advanceTimersByTimeAsync(0)
+  await expect(handled).resolves.toBe('refresh')
+  await worker.close()
+
+  await expect(
+    storage.list({ queue: 'scheduled', status: 'completed', limit: 10 }),
+  ).resolves.toMatchObject([{ data: '{"task":"refresh"}', attempts: 3, availableAt: 1_050 }])
+  await expect(queue.getSchedule('refresh')).resolves.toMatchObject({ nextRunAt: 2_050 })
+})
+
 it('processes a job through the SQLite storage adapter', async () => {
   const { storage } = openStorage()
   const queue = new Queue<{ userId: string }>('email', { storage })

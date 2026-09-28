@@ -22,6 +22,7 @@ export interface WorkerOptions {
   processMany: boolean
   retryBackoff: RetryBackoff | undefined
   retention: RetentionPolicy
+  attempts: number
   onError: ProcessErrorHandler | undefined
 }
 
@@ -68,7 +69,11 @@ function errorMessage(error: unknown): string {
 
 function describeContext(context: ProcessErrorContext): string {
   const parts = [`walq queue "${context.queue}" ${context.operation} failed`]
-  if (context.operation !== 'claim' && context.operation !== 'cleanup') {
+  if (
+    context.operation !== 'claim' &&
+    context.operation !== 'cleanup' &&
+    context.operation !== 'schedule'
+  ) {
     parts.push(`job ${context.jobId}`, `attempt ${context.attempt}`)
   }
   return parts.join(', ')
@@ -103,6 +108,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   readonly #retryBackoff: RetryBackoff | undefined
   readonly #onError: ProcessErrorHandler | undefined
   readonly #retention: RetentionPolicy
+  readonly #attempts: number
   readonly #cleanupEnabled: boolean
   readonly #active = new Set<Promise<void>>()
   readonly #done = deferred()
@@ -128,6 +134,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     this.#retryBackoff = options.retryBackoff
     this.#onError = options.onError
     this.#retention = options.retention
+    this.#attempts = options.attempts
     this.#cleanupEnabled = (['completed', 'failed'] as const).some((status) => {
       const rule = options.retention[status]
       return rule.count !== null || rule.maxAge !== null
@@ -143,12 +150,23 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   async poll(): Promise<number> {
     if (this.#closing || this.#polling) return 0
 
-    const availableBatches = this.#concurrency - this.#active.size
-    if (availableBatches <= 0) return 0
-    const limit = availableBatches * this.#batchSize
-
     this.#polling = true
     try {
+      try {
+        const materialization = this.#coordinator.materializeSchedules({
+          queue: this.#queue,
+          now: Date.now(),
+          attempts: this.#attempts,
+        })
+        if (materialization !== undefined) await materialization
+      } catch (error) {
+        this.#report(error, { queue: this.#queue, operation: 'schedule' })
+      }
+
+      const availableBatches = this.#concurrency - this.#active.size
+      if (availableBatches <= 0) return 0
+      const limit = availableBatches * this.#batchSize
+
       let jobs: ClaimedJob[]
       try {
         jobs = await this.#coordinator.claim({

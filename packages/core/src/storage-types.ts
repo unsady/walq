@@ -158,5 +158,34 @@ export interface HeartbeatInput {
   leaseDuration: number
 }
 
+export type ScheduleRepeat = { every: number; cron?: never } | { cron: string; every?: never }
+
+/** Queue-scoped durable schedule registration. */
+export type UpsertScheduleInput = {
+  queue: QueueName
+  id: string
+  data: string
+  now: number
+} & ScheduleRepeat
+
+/** Stored schedule state, including its next due time. */
+export type StoredSchedule = {
+  queue: QueueName
+  id: string
+  data: string
+  nextRunAt: number
+} & ScheduleRepeat
+
+export interface ScheduleInput {
+  queue: QueueName
+  id: string
+}
+
+export interface MaterializeSchedulesInput {
+  queue: QueueName
+  now: number
+  attempts: number
+}
+
 /** Missing, expired, or superseded leases all produce lease_lost. */
 export type LeaseMutationResult = 'applied' | 'lease_lost'

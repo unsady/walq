@@ -17,8 +17,12 @@ import type {
   JobStatus,
   LeaseMutationResult,
   ListInput,
+  MaterializeSchedulesInput,
   RemoveInput,
   RescheduleInput,
+  ScheduleInput,
+  StoredSchedule,
+  UpsertScheduleInput,
   RetryInput,
   Storage,
   StoredJob,
@@ -28,6 +32,14 @@ import type Database from 'better-sqlite3'
 import { chunkClaims } from './chunking.js'
 import { TerminalCleanup } from './cleanup.js'
 import { isRecord } from './is-record.js'
+import {
+  getNextRunAt,
+  nextAfterMissedRun,
+  scheduleRow,
+  validateMaterializeInput,
+  validateScheduleInput,
+  validateUpsertSchedule,
+} from './schedules.js'
 import { initialize } from './schema.js'
 import { expiry, integer, lease, retentionRule, text } from './validation.js'
 
@@ -58,6 +70,7 @@ interface GroupCapacity {
 }
 
 const maxClaimScanPageSize = 256
+const maxScheduleBatchSize = 100
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
   return db.prepare(sql).safeIntegers(false)
@@ -142,6 +155,18 @@ class BetterSqlite3Storage implements Storage {
   private readonly heartbeatStatement: Database.Statement
   private readonly claimTransaction: Database.Transaction<(steps: ClaimStep[]) => ClaimedJob[][]>
   private readonly terminalCleanup: TerminalCleanup
+  private readonly findSchedule: Database.Statement
+  private readonly upsertScheduleStatement: Database.Statement
+  private readonly getScheduleStatement: Database.Statement
+  private readonly removeScheduleStatement: Database.Statement
+  private readonly dueSchedules: Database.Statement
+  private readonly updateScheduleNextRunAt: Database.Statement
+  private readonly upsertScheduleTransaction: Database.Transaction<
+    (input: UpsertScheduleInput) => StoredSchedule
+  >
+  private readonly materializeSchedulesTransaction: Database.Transaction<
+    (input: MaterializeSchedulesInput) => number
+  >
 
   constructor(db: Database.Database) {
     this.db = db
@@ -341,6 +366,83 @@ class BetterSqlite3Storage implements Storage {
       steps.map(({ input, expiresAt }) => this.claimStep(input, expiresAt)),
     )
     this.terminalCleanup = new TerminalCleanup(db)
+    this.findSchedule = prepare(
+      db,
+      'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND id = @id',
+    )
+    this.upsertScheduleStatement = prepare(
+      db,
+      `INSERT INTO walq_schedules (queue, id, data, every, cron, nextRunAt)
+       VALUES (@queue, @id, @data, @every, @cron, @nextRunAt)
+       ON CONFLICT (queue, id) DO UPDATE SET
+         data = excluded.data, every = excluded.every, cron = excluded.cron,
+         nextRunAt = excluded.nextRunAt`,
+    )
+    this.getScheduleStatement = prepare(
+      db,
+      'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND id = @id',
+    )
+    this.removeScheduleStatement = prepare(
+      db,
+      'DELETE FROM walq_schedules WHERE queue = @queue AND id = @id',
+    )
+    this.dueSchedules = prepare(
+      db,
+      'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND nextRunAt <= @now ORDER BY nextRunAt, id LIMIT @limit',
+    )
+    this.updateScheduleNextRunAt = prepare(
+      db,
+      'UPDATE walq_schedules SET nextRunAt = @nextRunAt WHERE queue = @queue AND id = @id',
+    )
+    this.upsertScheduleTransaction = db.transaction((input: UpsertScheduleInput) => {
+      const current = this.findSchedule.get(input) as StoredSchedule | undefined
+      const sameRepeat =
+        current !== undefined &&
+        (input.every !== undefined
+          ? current.every === input.every && current.cron === null
+          : current.cron === input.cron && current.every === null)
+      if (current !== undefined && current.data === input.data && sameRepeat) {
+        return scheduleRow(current)
+      }
+
+      const nextRunAt = getNextRunAt(input, input.now)
+      this.upsertScheduleStatement.run({
+        ...input,
+        every: input.every ?? null,
+        cron: input.cron ?? null,
+        nextRunAt,
+      })
+      return scheduleRow(this.findSchedule.get(input))
+    })
+    this.materializeSchedulesTransaction = db.transaction((input: MaterializeSchedulesInput) => {
+      const due = this.dueSchedules.all({
+        ...input,
+        limit: maxScheduleBatchSize,
+      }) as StoredSchedule[]
+      for (const value of due) {
+        const schedule = scheduleRow(value)
+        this.insert.get({
+          id: randomUUID(),
+          queue: schedule.queue,
+          name: schedule.queue,
+          data: schedule.data,
+          now: input.now,
+          availableAt: schedule.nextRunAt,
+          priority: 0,
+          dedupe: null,
+          groupId: null,
+          attempts: input.attempts,
+        })
+        const updated = this.updateScheduleNextRunAt.run({
+          queue: schedule.queue,
+          id: schedule.id,
+          nextRunAt: nextAfterMissedRun(schedule, input.now),
+        })
+        if (updated.changes !== 1) throw new Error('Schedule changed while materializing')
+      }
+
+      return due.length
+    })
   }
 
   private prepareClaim(input: ClaimInput): ClaimStep {
@@ -611,6 +713,31 @@ class BetterSqlite3Storage implements Storage {
     retentionRule(input.retention.completed, 'retention.completed')
     retentionRule(input.retention.failed, 'retention.failed')
     return this.terminalCleanup.run(input)
+  }
+
+  async upsertSchedule(input: UpsertScheduleInput): Promise<StoredSchedule> {
+    this.assertAutocommit()
+    const validated = validateUpsertSchedule(input)
+    return this.upsertScheduleTransaction.immediate(validated)
+  }
+
+  async getSchedule(input: ScheduleInput): Promise<StoredSchedule | null> {
+    this.assertAutocommit()
+    validateScheduleInput(input)
+    const row = this.getScheduleStatement.get(input)
+    return row === undefined ? null : scheduleRow(row)
+  }
+
+  async removeSchedule(input: ScheduleInput): Promise<boolean> {
+    this.assertAutocommit()
+    validateScheduleInput(input)
+    return this.removeScheduleStatement.run(input).changes === 1
+  }
+
+  async materializeSchedules(input: MaterializeSchedulesInput): Promise<number> {
+    this.assertAutocommit()
+    const validated = validateMaterializeInput(input)
+    return this.materializeSchedulesTransaction.immediate(validated)
   }
 }
 
