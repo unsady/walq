@@ -58,21 +58,10 @@ interface ClaimStep {
   expiresAt: number
 }
 
-interface PendingCandidate {
+interface NextGroup {
   id: string
-  groupId: string | null
-  priority: number
-  availableAt: number
-  seq: number
 }
 
-interface GroupCapacity {
-  id: string
-  concurrency: number
-  activeCount: number
-}
-
-const maxClaimScanPageSize = 256
 const maxScheduleBatchSize = 100
 
 function prepare(db: Database.Database, sql: string): Database.Statement {
@@ -142,9 +131,11 @@ class BetterSqlite3Storage implements Storage {
   private readonly resumeQueueStatement: Database.Statement
   private readonly isQueuePaused: Database.Statement
   private readonly recover: Database.Statement
-  private readonly selectPending: Database.Statement
-  private readonly selectPendingAtPriorityAfter: Database.Statement
-  private readonly selectPendingBelowPriority: Database.Statement
+  private readonly selectUngrouped: Database.Statement
+  private readonly selectGrouped: Database.Statement
+  private readonly nextGroup: Database.Statement
+  private readonly groupCursor: Database.Statement
+  private readonly advanceGroupCursor: Database.Statement
   private readonly acquire: Database.Statement
   private readonly inspectStatement: Database.Statement
   private readonly countStatement: Database.Statement
@@ -228,39 +219,37 @@ class BetterSqlite3Storage implements Storage {
         WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
       `,
     )
-    this.selectPending = prepare(
+    this.selectUngrouped = prepare(
       db,
       `
-        SELECT id, groupId, priority, availableAt, seq
-        FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
-          AND attemptsMade < attempts
-        ORDER BY priority DESC, availableAt, seq
-        LIMIT @limit
+        SELECT id FROM walq_jobs INDEXED BY walq_pending
+        WHERE queue = @queue AND status = 'pending' AND groupId IS NULL
+          AND availableAt <= @now AND attemptsMade < attempts
+        ORDER BY priority DESC, availableAt, seq LIMIT 1
       `,
     )
-    this.selectPendingAtPriorityAfter = prepare(
+    this.selectGrouped = prepare(
       db,
       `
-        SELECT id, groupId, priority, availableAt, seq
-        FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
-          AND attemptsMade < attempts AND priority = @priority
-          AND (availableAt, seq) > (@availableAt, @seq)
-        ORDER BY priority DESC, availableAt, seq
-        LIMIT @limit
+        SELECT id FROM walq_jobs INDEXED BY walq_pending_grouped
+        WHERE queue = @queue AND groupId = @groupId AND status = 'pending'
+          AND groupId IS NOT NULL AND availableAt <= @now AND attemptsMade < attempts
+        ORDER BY priority DESC, availableAt, seq LIMIT 1
       `,
     )
-    this.selectPendingBelowPriority = prepare(
+    this.nextGroup = prepare(
       db,
       `
-        SELECT id, groupId, priority, availableAt, seq
-        FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
-          AND attemptsMade < attempts AND priority < @priority
-        ORDER BY priority DESC, availableAt, seq
-        LIMIT @limit
+        SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
+        WHERE queue = @queue AND pendingCount > 0 AND activeCount < concurrency AND id > @after
+        ORDER BY id LIMIT 1
       `,
+    )
+    this.groupCursor = prepare(db, 'SELECT lastGroupId FROM walq_group_cursor WHERE queue = @queue')
+    this.advanceGroupCursor = prepare(
+      db,
+      `INSERT INTO walq_group_cursor (queue, lastGroupId) VALUES (@queue, @groupId)
+       ON CONFLICT (queue) DO UPDATE SET lastGroupId = excluded.lastGroupId`,
     )
     this.acquire = prepare(
       db,
@@ -491,90 +480,59 @@ class BetterSqlite3Storage implements Storage {
     if (this.isQueuePaused.get({ queue: input.queue }) !== undefined) return []
 
     const jobs: ClaimedJob[] = []
-    const availableSlots = new Map<string, number>()
-    let cursor: PendingCandidate | undefined
-    let pageSize = Math.min(input.limit, maxClaimScanPageSize)
+    // Group IDs are nonempty; the empty cursor ID is the ungrouped stream.
+    const previous = this.groupCursor.get(input) as { lastGroupId: string } | undefined
+    let after = previous?.lastGroupId ?? ''
+    let offerUngrouped = previous === undefined
+    let wrapped = false
+    const visited = new Set<string>()
 
     while (jobs.length < input.limit) {
-      let candidates: PendingCandidate[]
-      if (cursor === undefined) {
-        candidates = this.selectPending.all({ ...input, limit: pageSize }) as PendingCandidate[]
-      } else {
-        candidates = this.selectPendingAtPriorityAfter.all({
-          ...input,
-          ...cursor,
-          limit: pageSize,
-        }) as PendingCandidate[]
-        if (candidates.length < pageSize) {
-          candidates.push(
-            ...(this.selectPendingBelowPriority.all({
-              ...input,
-              priority: cursor.priority,
-              limit: pageSize - candidates.length,
-            }) as PendingCandidate[]),
+      if (offerUngrouped) {
+        offerUngrouped = false
+        visited.add('')
+        const candidate = this.selectUngrouped.get(input) as { id: string } | undefined
+
+        if (candidate !== undefined) {
+          jobs.push(
+            this.acquire.get({
+              id: candidate.id,
+              leaseToken: randomUUID(),
+              expiresAt,
+            }) as ClaimedJob,
           )
-        }
-      }
-      if (candidates.length === 0) break
-
-      const uncachedGroups = [
-        ...new Set(
-          candidates.flatMap(({ groupId }) =>
-            groupId !== null && !availableSlots.has(groupId) ? [groupId] : [],
-          ),
-        ),
-      ]
-      if (uncachedGroups.length > 0) {
-        const placeholders = uncachedGroups.map(() => '?').join(', ')
-        const groups = prepare(
-          this.db,
-          `
-            SELECT id, concurrency,
-              (
-                SELECT count(*) FROM walq_jobs AS active INDEXED BY walq_active_group
-                WHERE active.queue = walq_groups.queue AND active.groupId = walq_groups.id
-                  AND active.status = 'active' AND active.groupId IS NOT NULL
-              ) AS activeCount
-            FROM walq_groups
-            WHERE queue = ? AND id IN (${placeholders})
-          `,
-        ).all(input.queue, ...uncachedGroups) as GroupCapacity[]
-
-        for (const { id, concurrency, activeCount } of groups) {
-          availableSlots.set(id, Math.max(0, concurrency - activeCount))
-        }
-        for (const id of uncachedGroups) {
-          if (!availableSlots.has(id)) availableSlots.set(id, 0)
+          this.advanceGroupCursor.run({ queue: input.queue, groupId: '' })
+          after = ''
+          wrapped = false
+          visited.clear()
+          continue
         }
       }
 
-      const previousJobCount = jobs.length
-      for (const candidate of candidates) {
-        cursor = candidate
-
-        if (candidate.groupId !== null) {
-          const slots = availableSlots.get(candidate.groupId) ?? 0
-          if (slots === 0) continue
-          availableSlots.set(candidate.groupId, slots - 1)
-        }
-
-        jobs.push(
-          this.acquire.get({
-            id: candidate.id,
-            leaseToken: randomUUID(),
-            expiresAt,
-          }) as ClaimedJob,
-        )
-        if (jobs.length === input.limit) break
+      const group = this.nextGroup.get({ queue: input.queue, after }) as NextGroup | undefined
+      if (group === undefined) {
+        if (wrapped) break
+        after = ''
+        wrapped = true
+        offerUngrouped = true
+        continue
       }
+      if (visited.has(group.id)) break
 
-      if (jobs.length === input.limit || candidates.length < pageSize) break
+      visited.add(group.id)
+      after = group.id
 
-      const claimedFromPage = jobs.length - previousJobCount
-      pageSize =
-        claimedFromPage === 0
-          ? Math.min(maxClaimScanPageSize, Math.max(pageSize * 2, 32))
-          : Math.min(input.limit - jobs.length, maxClaimScanPageSize)
+      const candidate = this.selectGrouped.get({ ...input, groupId: group.id }) as
+        | { id: string }
+        | undefined
+      if (candidate === undefined) continue
+
+      jobs.push(
+        this.acquire.get({ id: candidate.id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
+      )
+      this.advanceGroupCursor.run({ queue: input.queue, groupId: group.id })
+      visited.clear()
+      wrapped = false
     }
 
     return jobs

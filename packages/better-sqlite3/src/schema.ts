@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 
-const schemaVersion = 10
+// Version 11 was used by an unpublished ready-flag experiment; do not reuse it.
+const schemaVersion = 12
 const legacySchemaVersion = 5
 const maxPriority = Number.MAX_SAFE_INTEGER
 
@@ -157,10 +158,69 @@ function migrateV8(db: Database.Database): void {
   `)
 }
 
+const groupScheduling = `
+  DROP INDEX walq_pending;
+  CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, seq)
+    WHERE status = 'pending' AND groupId IS NULL;
+  CREATE INDEX IF NOT EXISTS walq_pending_grouped
+    ON walq_jobs (queue, groupId, priority DESC, availableAt, seq)
+    WHERE status = 'pending' AND groupId IS NOT NULL;
+  CREATE INDEX walq_groups_eligible ON walq_groups (queue, id)
+    WHERE pendingCount > 0 AND activeCount < concurrency;
+  CREATE TABLE walq_group_cursor (
+    queue TEXT NOT NULL COLLATE BINARY PRIMARY KEY,
+    lastGroupId TEXT NOT NULL COLLATE BINARY
+  ) WITHOUT ROWID;
+  CREATE TRIGGER walq_group_counts_insert AFTER INSERT ON walq_jobs
+    WHEN NEW.groupId IS NOT NULL AND NEW.status IN ('pending', 'active')
+    BEGIN
+      UPDATE walq_groups SET
+        pendingCount = pendingCount + (NEW.status = 'pending'),
+        activeCount = activeCount + (NEW.status = 'active')
+      WHERE queue = NEW.queue AND id = NEW.groupId;
+    END;
+  CREATE TRIGGER walq_group_counts_delete AFTER DELETE ON walq_jobs
+    WHEN OLD.groupId IS NOT NULL AND OLD.status IN ('pending', 'active')
+    BEGIN
+      UPDATE walq_groups SET
+        pendingCount = pendingCount - (OLD.status = 'pending'),
+        activeCount = activeCount - (OLD.status = 'active')
+      WHERE queue = OLD.queue AND id = OLD.groupId;
+    END;
+  CREATE TRIGGER walq_group_counts_update AFTER UPDATE OF status ON walq_jobs
+    WHEN OLD.groupId IS NOT NULL AND OLD.status != NEW.status
+    BEGIN
+      UPDATE walq_groups SET
+        pendingCount = pendingCount + (NEW.status = 'pending') - (OLD.status = 'pending'),
+        activeCount = activeCount + (NEW.status = 'active') - (OLD.status = 'active')
+      WHERE queue = NEW.queue AND id = NEW.groupId;
+    END;
+`
+
+function migrateV10(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE walq_groups ADD COLUMN pendingCount INTEGER NOT NULL DEFAULT 0
+      CHECK (pendingCount >= 0);
+    ALTER TABLE walq_groups ADD COLUMN activeCount INTEGER NOT NULL DEFAULT 0
+      CHECK (activeCount >= 0);
+    CREATE INDEX walq_pending_grouped
+      ON walq_jobs (queue, groupId, priority DESC, availableAt, seq)
+      WHERE status = 'pending' AND groupId IS NOT NULL;
+    UPDATE walq_groups SET
+      pendingCount = (SELECT count(*) FROM walq_jobs WHERE queue = walq_groups.queue
+        AND groupId = walq_groups.id AND status = 'pending'),
+      activeCount = (SELECT count(*) FROM walq_jobs WHERE queue = walq_groups.queue
+        AND groupId = walq_groups.id AND status = 'active');
+    ${groupScheduling}
+    DROP INDEX walq_active_group;
+    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 10;
+  `)
+}
+
 function migrateV9(db: Database.Database): void {
   db.exec(`
     ${pausedQueuesTable}
-    UPDATE walq_schema SET version = ${schemaVersion} WHERE id = 1 AND version = 9;
+    UPDATE walq_schema SET version = 10 WHERE id = 1 AND version = 9;
   `)
 }
 
@@ -190,6 +250,7 @@ export function initialize(db: Database.Database): void {
         row.version !== 7 &&
         row.version !== 8 &&
         row.version !== 9 &&
+        row.version !== 10 &&
         row.version !== schemaVersion
       ) {
         throw new Error(`Unsupported walq schema version: ${row.version}`)
@@ -202,6 +263,7 @@ export function initialize(db: Database.Database): void {
       if (row.version <= 7) migrateV7(db)
       if (row.version <= 8) migrateV8(db)
       if (row.version <= 9) migrateV9(db)
+      if (row.version <= 10) migrateV10(db)
       return
     }
 
@@ -213,12 +275,13 @@ export function initialize(db: Database.Database): void {
         queue TEXT NOT NULL COLLATE BINARY,
         id TEXT NOT NULL COLLATE BINARY,
         concurrency INTEGER NOT NULL CHECK (concurrency > 0),
+        pendingCount INTEGER NOT NULL DEFAULT 0 CHECK (pendingCount >= 0),
+        activeCount INTEGER NOT NULL DEFAULT 0 CHECK (activeCount >= 0),
         PRIMARY KEY (queue, id)
       ) WITHOUT ROWID;
-      CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
-        WHERE status = 'active' AND groupId IS NOT NULL;
       ${schedulesTable}
       ${pausedQueuesTable}
+      ${groupScheduling}
       INSERT INTO walq_schema (id, version) VALUES (1, ${schemaVersion});
     `)
   }).immediate()

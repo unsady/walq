@@ -34,6 +34,24 @@ function filename() {
   return join(directory, 'queue.sqlite')
 }
 
+function revertGroupScheduling(db: Database.Database): void {
+  db.exec(`
+    DROP TRIGGER walq_group_counts_insert;
+    DROP TRIGGER walq_group_counts_delete;
+    DROP TRIGGER walq_group_counts_update;
+    DROP INDEX walq_pending;
+    DROP INDEX walq_pending_grouped;
+    DROP INDEX walq_groups_eligible;
+    DROP TABLE walq_group_cursor;
+    ALTER TABLE walq_groups DROP COLUMN pendingCount;
+    ALTER TABLE walq_groups DROP COLUMN activeCount;
+    CREATE INDEX walq_pending ON walq_jobs (queue, priority DESC, availableAt, seq)
+      WHERE status = 'pending';
+    CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
+      WHERE status = 'active' AND groupId IS NOT NULL;
+  `)
+}
+
 function expectPartialDedupeIndex(db: Database.Database): void {
   const index = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'walq_dedupe'")
@@ -592,9 +610,9 @@ describe('SQLite groups', () => {
     const ungrouped = await storage.enqueue({ ...input, priority: 97 })
 
     expect((await storage.claim({ ...claimInput, limit: 4 })).map(({ id }) => id)).toEqual([
-      first.id,
-      otherGroup.id,
       ungrouped.id,
+      otherGroup.id,
+      first.id,
     ])
     expect(await storage.inspect({ queue: input.queue, id: blocked.id })).toMatchObject({
       status: 'pending',
@@ -645,52 +663,176 @@ describe('SQLite groups', () => {
     expect(blocked).toHaveLength(groupCount)
   })
 
-  it('uses the pending and active-group indexes for incremental claims', () => {
-    const { db } = open()
-    const pendingPlan = db
-      .prepare(`
-        EXPLAIN QUERY PLAN SELECT id, groupId, priority, availableAt, seq
-        FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = 'email' AND status = 'pending' AND availableAt <= 10
-          AND attemptsMade < attempts
-        ORDER BY priority DESC, availableAt, seq LIMIT 10
-      `)
-      .all() as { detail: string }[]
-    const samePriorityPlan = db
-      .prepare(`
-        EXPLAIN QUERY PLAN SELECT id FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = 'email' AND status = 'pending' AND availableAt <= 10
-          AND attemptsMade < attempts AND priority = 5
-          AND (availableAt, seq) > (10, 12)
-        ORDER BY priority DESC, availableAt, seq LIMIT 10
-      `)
-      .all() as { detail: string }[]
-    const lowerPriorityPlan = db
-      .prepare(`
-        EXPLAIN QUERY PLAN SELECT id FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = 'email' AND status = 'pending' AND availableAt <= 10
-          AND attemptsMade < attempts AND priority < 5
-        ORDER BY priority DESC, availableAt, seq LIMIT 10
-      `)
-      .all() as { detail: string }[]
-    const activeGroupPlan = db
-      .prepare(`
-        EXPLAIN QUERY PLAN SELECT count(*) FROM walq_jobs AS active INDEXED BY walq_active_group
-        WHERE active.queue = 'email' AND active.groupId = 'group-1'
-          AND active.status = 'active' AND active.groupId IS NOT NULL
-      `)
-      .all() as { detail: string }[]
+  it('round-robins groups across calls and connections, with ungrouped jobs first', async () => {
+    const path = filename()
+    const { db, storage } = open(path)
+    const grouped = new Map<string, string[]>()
 
-    for (const plan of [pendingPlan, samePriorityPlan, lowerPriorityPlan]) {
+    for (const id of ['a', 'b', 'c']) {
+      const jobs = await storage.enqueueMany(
+        Array.from({ length: id === 'c' ? 2 : 3 }, (_, index) => ({
+          ...input,
+          priority: 100 - index,
+          group: { id, concurrency: 3 },
+        })),
+      )
+      grouped.set(
+        id,
+        jobs.map((job) => job.id),
+      )
+    }
+    const plain = await storage.enqueue({ ...input, priority: -1 })
+    const other = new Database(path)
+    databases.push(other)
+    const otherStorage = betterSqlite3(other)
+
+    expect((await storage.claim({ ...claimInput, limit: 1 })).map(({ id }) => id)).toEqual([
+      plain.id,
+    ])
+
+    const order = ['a', 'b', 'c', 'a', 'b', 'c', 'a', 'b']
+    const positions = new Map<string, number>()
+    for (const [index, groupId] of order.entries()) {
+      const adapter = index % 2 === 0 ? storage : otherStorage
+      const [claimed] = await adapter.claim({ ...claimInput, limit: 1 })
+      expect(claimed?.id).toBe(grouped.get(groupId)?.[positions.get(groupId) ?? 0])
+      positions.set(groupId, (positions.get(groupId) ?? 0) + 1)
+    }
+
+    expect(await otherStorage.claim(claimInput)).toEqual([])
+    expect(
+      db
+        .prepare('SELECT id, pendingCount FROM walq_groups WHERE queue = ? ORDER BY id')
+        .all(input.queue),
+    ).toEqual([
+      { id: 'a', pendingCount: 0 },
+      { id: 'b', pendingCount: 0 },
+      { id: 'c', pendingCount: 0 },
+    ])
+  })
+
+  it('keeps claiming groups under a continuous backlog of ungrouped jobs', async () => {
+    const { storage } = open()
+    const plain = await storage.enqueueMany(
+      Array.from({ length: 8 }, () => ({ ...input, priority: 100 })),
+    )
+    const groups = new Map<string, string[]>()
+    for (const id of ['a', 'b']) {
+      const jobs = await storage.enqueueMany(
+        Array.from({ length: 3 }, () => ({
+          ...input,
+          priority: -100,
+          group: { id, concurrency: 3 },
+        })),
+      )
+      groups.set(
+        id,
+        jobs.map((job) => job.id),
+      )
+    }
+
+    const expected = [
+      plain[0]!.id,
+      groups.get('a')![0]!,
+      groups.get('b')![0]!,
+      plain[1]!.id,
+      groups.get('a')![1]!,
+      groups.get('b')![1]!,
+    ]
+    for (const id of expected) {
+      expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(id)
+    }
+
+    expect((await storage.claim({ ...claimInput, limit: 4 })).map(({ id }) => id)).toEqual([
+      plain[2]!.id,
+      groups.get('a')![2]!,
+      groups.get('b')![2]!,
+      plain[3]!.id,
+    ])
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(plain[4]!.id)
+  })
+
+  it('round-robins inside a multi-job claim and honors priority within each group', async () => {
+    const { storage } = open()
+    const a = await storage.enqueueMany([
+      { ...input, priority: 1, group: { id: 'a', concurrency: 2 } },
+      { ...input, priority: 10, group: { id: 'a', concurrency: 2 } },
+    ])
+    const b = await storage.enqueueMany([
+      { ...input, priority: -1, group: { id: 'b', concurrency: 2 } },
+      { ...input, priority: 0, group: { id: 'b', concurrency: 2 } },
+    ])
+
+    expect((await storage.claim({ ...claimInput, limit: 4 })).map(({ id }) => id)).toEqual([
+      a[1]!.id,
+      b[1]!.id,
+      a[0]!.id,
+      b[0]!.id,
+    ])
+  })
+
+  it('skips saturated groups without advancing their turn', async () => {
+    const { storage } = open()
+    const [first, blocked] = await storage.enqueueMany([
+      { ...input, group: { id: 'a', concurrency: 1 } },
+      { ...input, group: { id: 'a', concurrency: 1 } },
+    ])
+    const [available] = await storage.enqueueMany([
+      { ...input, group: { id: 'b', concurrency: 1 } },
+    ])
+
+    const [active] = await storage.claim({ ...claimInput, limit: 1 })
+    expect(active?.id).toBe(first!.id)
+    expect((await storage.claim({ ...claimInput, limit: 2 })).map(({ id }) => id)).toEqual([
+      available!.id,
+    ])
+    expect(await storage.claim(claimInput)).toEqual([])
+
+    expect(await storage.complete({ ...active!, now: input.now })).toBe('applied')
+    expect((await storage.claim(claimInput)).map(({ id }) => id)).toEqual([blocked!.id])
+  })
+
+  it('does not advance the turn for groups whose jobs are not yet due', async () => {
+    const { storage } = open()
+    const due = await storage.enqueue({ ...input, group: { id: 'a', concurrency: 1 } })
+    const later = await storage.enqueue({
+      ...input,
+      availableAt: 20,
+      group: { id: 'b', concurrency: 1 },
+    })
+
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(due.id)
+    expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
+    expect((await storage.claim({ ...claimInput, now: 20, limit: 1 }))[0]?.id).toBe(later.id)
+  })
+
+  it('uses separate pending indexes for grouped and ungrouped claims', () => {
+    const { db } = open()
+    const queries = [
+      `SELECT id FROM walq_jobs INDEXED BY walq_pending
+       WHERE queue = 'email' AND status = 'pending' AND groupId IS NULL
+         AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY priority DESC, availableAt, seq LIMIT 10`,
+      `SELECT id FROM walq_jobs INDEXED BY walq_pending_grouped
+       WHERE queue = 'email' AND groupId = 'one' AND groupId IS NOT NULL
+         AND status = 'pending' AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY priority DESC, availableAt, seq LIMIT 1`,
+      `SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
+       WHERE queue = 'email' AND pendingCount > 0 AND activeCount < concurrency
+         AND id > 'one' ORDER BY id LIMIT 1`,
+    ]
+    const indexes = ['walq_pending', 'walq_pending_grouped', 'walq_groups_eligible']
+    expect(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'walq_active_group'").get(),
+    ).toBeUndefined()
+
+    for (const [index, query] of queries.entries()) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all() as { detail: string }[]
       const details = plan.map(({ detail }) => detail).join('; ')
-      expect(details).toContain('walq_pending')
+      expect(details).toContain(indexes[index])
       expect(details).not.toContain('TEMP B-TREE')
       expect(details).not.toContain('SCAN walq_jobs')
     }
-
-    const activeGroupDetails = activeGroupPlan.map(({ detail }) => detail).join('; ')
-    expect(activeGroupDetails).toContain('walq_active_group')
-    expect(activeGroupDetails).toContain('queue=? AND groupId=?')
   })
 
   it('applies group capacity across claimQueues requests and releases it on state transitions', async () => {
@@ -969,7 +1111,7 @@ describe('SQLite integration', () => {
     ).toMatchObject([{ availableAt: midnight + 24 * 60 * 60 * 1_000, createdAt: restartNow }])
   })
 
-  it('migrates v2 jobs, leases, and indexes through v10', async () => {
+  it('migrates v2 jobs, leases, and indexes through v12', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -1010,7 +1152,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expectPartialDedupeIndex(db)
     expect(
       db
@@ -1100,7 +1242,7 @@ describe('SQLite integration', () => {
     ).toBe('applied')
   })
 
-  it('migrates v3 jobs through v10 with zero priority', async () => {
+  it('migrates v3 jobs through v12 with zero priority', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -1136,7 +1278,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expectPartialDedupeIndex(db)
     expect(db.prepare('SELECT priority FROM walq_jobs WHERE id = ?').get('legacy')).toEqual({
       priority: 0,
@@ -1146,9 +1288,10 @@ describe('SQLite integration', () => {
     expect((await storage.claim(claimInput)).map(({ priority }) => priority)).toEqual([10, 0])
   })
 
-  it('migrates schema v4 through v10 and preserves existing jobs', async () => {
+  it('migrates schema v4 through v12 and preserves existing jobs', async () => {
     const { db } = open()
     const legacy = await betterSqlite3(db).enqueue(input)
+    revertGroupScheduling(db)
     db.exec(`
       DROP INDEX walq_dedupe;
       DROP INDEX walq_active_group;
@@ -1162,7 +1305,7 @@ describe('SQLite integration', () => {
     `)
 
     const storage = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expectPartialDedupeIndex(db)
     expect(await storage.inspect({ queue: 'email', id: legacy.id })).toMatchObject({
       id: legacy.id,
@@ -1181,6 +1324,7 @@ describe('SQLite integration', () => {
   it('migrates schema v6 in place and preserves existing ungrouped jobs', async () => {
     const { db, storage } = open()
     const legacy = await storage.enqueue(input)
+    revertGroupScheduling(db)
     db.exec(`
       DROP INDEX walq_active_group;
       DROP INDEX walq_schedules_due;
@@ -1192,7 +1336,7 @@ describe('SQLite integration', () => {
     `)
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expect(db.prepare('SELECT groupId FROM walq_jobs WHERE id = ?').get(legacy.id)).toEqual({
       groupId: null,
     })
@@ -1203,39 +1347,39 @@ describe('SQLite integration', () => {
     await migrated.enqueue({ ...input, group: { id: 'new-group', concurrency: 2 } })
   })
 
-  it('migrates the v7 group schema by adding the active-group index', async () => {
+  it('migrates the v7 group schema and removes the obsolete active-group index', async () => {
     const { db, storage } = open()
     const grouped = await storage.enqueue({ ...input, group: { id: 'v7-group', concurrency: 2 } })
     await storage.claim({ ...claimInput, limit: 1 })
+    revertGroupScheduling(db)
     db.exec(
       'DROP INDEX walq_active_group; DROP INDEX walq_schedules_due; DROP TABLE walq_schedules; DROP TABLE walq_paused_queues; UPDATE walq_schema SET version = 7',
     )
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expect(
       db
         .prepare(
           "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'walq_active_group'",
         )
         .get(),
-    ).toEqual({
-      name: 'walq_active_group',
-    })
+    ).toBeUndefined()
     expect(await migrated.inspect({ queue: input.queue, id: grouped.id })).toMatchObject({
       id: grouped.id,
     })
   })
 
-  it('migrates the v8 schema through v10 with schedules and queue pause state', async () => {
+  it('migrates the v8 schema through v12 with schedules and queue pause state', async () => {
     const { db, storage } = open()
     const job = await storage.enqueue(input)
+    revertGroupScheduling(db)
     db.exec(
       `DROP INDEX walq_schedules_due; DROP TABLE walq_schedules; DROP TABLE walq_paused_queues; UPDATE walq_schema SET version = 8`,
     )
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expect(await migrated.inspect({ queue: input.queue, id: job.id })).toMatchObject({
       id: job.id,
       data: input.data,
@@ -1246,10 +1390,11 @@ describe('SQLite integration', () => {
   it('migrates the v9 schema by adding durable queue pause state', async () => {
     const { db, storage } = open()
     const job = await storage.enqueue(input)
+    revertGroupScheduling(db)
     db.exec('DROP TABLE walq_paused_queues; UPDATE walq_schema SET version = 9')
 
     const migrated = betterSqlite3(db)
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expect(
       db
         .prepare(
@@ -1261,6 +1406,40 @@ describe('SQLite integration', () => {
     expect(await migrated.claim(claimInput)).toEqual([])
     expect(await migrated.inspect({ queue: 'email', id: job.id })).toMatchObject({
       status: 'pending',
+    })
+  })
+
+  it('migrates v10 pending groups, backfills counts and drops the old active index', async () => {
+    const { db, storage } = open()
+    const jobs = await storage.enqueueMany(
+      Array.from({ length: 2 }, () => ({
+        ...input,
+        group: { id: 'backfill', concurrency: 1 },
+      })),
+    )
+    const [active] = await storage.claim({ ...claimInput, limit: 1 })
+    revertGroupScheduling(db)
+    db.exec('UPDATE walq_schema SET version = 10')
+
+    const migrated = betterSqlite3(db)
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
+    expect(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'walq_active_group'").get(),
+    ).toBeUndefined()
+    expect(
+      db.prepare("SELECT pendingCount, activeCount FROM walq_groups WHERE id = 'backfill'").get(),
+    ).toEqual({
+      pendingCount: 1,
+      activeCount: 1,
+    })
+    expect(await migrated.claim(claimInput)).toEqual([])
+    expect(await migrated.complete({ ...active!, now: input.now })).toBe('applied')
+    expect((await migrated.claim(claimInput)).map(({ id }) => id)).toEqual([jobs[1]!.id])
+    expect(
+      db.prepare("SELECT pendingCount, activeCount FROM walq_groups WHERE id = 'backfill'").get(),
+    ).toEqual({
+      pendingCount: 0,
+      activeCount: 1,
     })
   })
 
@@ -1282,7 +1461,7 @@ describe('SQLite integration', () => {
     expect((await reopened.storage.claim({ ...claimInput, limit: 5 })).length).toBe(2)
   })
 
-  it('migrates v5 rows through v10 with deterministic approximate enqueue order', async () => {
+  it('migrates v5 rows through v12 with deterministic approximate enqueue order', async () => {
     const db = new Database(':memory:')
     databases.push(db)
     db.exec(`
@@ -1330,7 +1509,7 @@ describe('SQLite integration', () => {
 
     const storage = betterSqlite3(db)
 
-    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 10 })
+    expect(db.prepare('SELECT version FROM walq_schema').get()).toEqual({ version: 12 })
     expect(db.prepare('SELECT id, seq FROM walq_jobs ORDER BY seq').all()).toEqual([
       { id: 'a-earlier', seq: 1 },
       { id: 'b-earlier', seq: 2 },
@@ -1344,8 +1523,8 @@ describe('SQLite integration', () => {
     const claimPlan = db
       .prepare(`
         EXPLAIN QUERY PLAN SELECT id FROM walq_jobs INDEXED BY walq_pending
-        WHERE queue = 'email' AND status = 'pending' AND availableAt <= 10
-          AND attemptsMade < attempts
+        WHERE queue = 'email' AND status = 'pending' AND groupId IS NULL
+          AND availableAt <= 10 AND attemptsMade < attempts
         ORDER BY priority DESC, availableAt, seq LIMIT 10
       `)
       .all() as { detail: string }[]
@@ -1472,7 +1651,7 @@ describe('SQLite integration', () => {
     expect(() => betterSqlite3(db)).toThrow('transaction')
     await expect(storage.enqueue(input)).rejects.toThrow('transaction')
     await expect(storage.enqueueMany([input])).rejects.toThrow('transaction')
-    db.exec('ROLLBACK; UPDATE walq_schema SET version = 11')
+    db.exec('ROLLBACK; UPDATE walq_schema SET version = 13')
     expect(() => betterSqlite3(db)).toThrow('version')
   })
 

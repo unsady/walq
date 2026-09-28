@@ -47,6 +47,9 @@ BENCH_CLAIM_QUEUES=128,256 BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
 
 The [chunk-size decision](reports/grouped-claim-chunk-size.md) records why the adapter uses a 512-job budget.
 
+The standalone [round-robin write-cost experiment](claim-write-cost.mjs) compares identical
+writes on the old v10 and new v12 SQLite schemas. Run `pnpm build && node benchmarks/claim-write-cost.mjs`.
+
 ## Reading results
 
 The summary shows throughput, spread across runs, and selected suite-specific metrics. JSON contains the remaining metrics and individual runs. Compare like-for-like scenarios on the same idle machine; small differences (roughly below 10%) need more repeats. `synchronous=NORMAL` and `FULL` can produce different absolute rates. The coordinator suite is in-memory and does not measure disk contention.
