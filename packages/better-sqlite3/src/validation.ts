@@ -1,5 +1,7 @@
 import type { CompleteInput, RetentionRule } from '@walq/core/storage'
 
+import { isRecord } from './is-record.js'
+
 export function integer(value: number, name: string, minimum = 0): void {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw new TypeError(`${name} must be a safe integer >= ${minimum}`)
@@ -26,7 +28,7 @@ function retentionBound(value: number | null, name: string): void {
 }
 
 export function retentionRule(value: RetentionRule, name: string): void {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError(`${name} must be a retention rule object`)
   }
   retentionBound(value.count, `${name}.count`)

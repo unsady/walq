@@ -27,6 +27,7 @@ import type Database from 'better-sqlite3'
 
 import { chunkClaims } from './chunking.js'
 import { TerminalCleanup } from './cleanup.js'
+import { isRecord } from './is-record.js'
 import { initialize } from './schema.js'
 import { expiry, integer, lease, retentionRule, text } from './validation.js'
 
@@ -63,7 +64,7 @@ function prepare(db: Database.Database, sql: string): Database.Statement {
 }
 
 function validateObject(input: unknown, name: string): asserts input is Record<string, unknown> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+  if (!isRecord(input)) {
     throw new TypeError(`${name} must be an object`)
   }
 }
@@ -77,21 +78,21 @@ function validateInspect(input: InspectInput): InspectInput {
 }
 
 function validateEnqueue(input: EnqueueInput): EnqueueInput {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+  if (!isRecord(input)) {
     throw new TypeError('enqueue input must be an object')
   }
 
-  const validated = {
+  const validated: EnqueueInput = {
     queue: input.queue,
     name: input.name,
     data: input.data,
     now: input.now,
     availableAt: input.availableAt,
     priority: input.priority,
-    ...(input.dedupe !== undefined ? { dedupe: input.dedupe } : {}),
-    ...(input.group !== undefined ? { group: input.group } : {}),
     attempts: input.attempts,
   }
+  if (input.dedupe !== undefined) validated.dedupe = input.dedupe
+  if (input.group !== undefined) validated.group = input.group
   text(validated.queue, 'queue')
   text(validated.name, 'name')
   text(validated.data, 'data')

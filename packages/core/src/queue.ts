@@ -32,6 +32,10 @@ const defaultProcessManyBatchSize = 10
 const maxListLimit = 1_000
 const jobStatuses: readonly JobStatus[] = ['pending', 'active', 'completed', 'failed', 'cancelled']
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function validateJobId(id: unknown): asserts id is string {
   if (typeof id !== 'string' || id.length === 0) {
     throw new TypeError('id must be a nonempty string')
@@ -39,15 +43,21 @@ function validateJobId(id: unknown): asserts id is string {
 }
 
 function normalizeListOptions(value: unknown): Required<ListOptions> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError('list options must be an object')
   }
 
-  const { status, limit = defaultListLimit } = value as ListOptions
-  if (!jobStatuses.includes(status)) {
+  const status = jobStatuses.find((candidate) => candidate === value.status)
+  const limit = value.limit === undefined ? defaultListLimit : value.limit
+  if (status === undefined) {
     throw new TypeError('status must be a supported job status')
   }
-  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > maxListLimit) {
+  if (
+    typeof limit !== 'number' ||
+    !Number.isSafeInteger(limit) ||
+    limit <= 0 ||
+    limit > maxListLimit
+  ) {
     throw new TypeError(`limit must be a positive safe integer no greater than ${maxListLimit}`)
   }
 
@@ -56,11 +66,11 @@ function normalizeListOptions(value: unknown): Required<ListOptions> {
 
 function normalizeScheduleOptions(value: unknown, operation: 'add' | 'reschedule'): AddOptions {
   if (value === undefined && operation === 'add') return {}
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError(`${operation} options must be an object`)
   }
 
-  const { delay, runAt } = value as AddOptions
+  const { delay, runAt } = value
   if (delay !== undefined && runAt !== undefined) {
     throw new TypeError(
       operation === 'add'
@@ -71,17 +81,22 @@ function normalizeScheduleOptions(value: unknown, operation: 'add' | 'reschedule
   if (operation === 'reschedule' && delay === undefined && runAt === undefined) {
     throw new TypeError('exactly one of delay or runAt must be provided')
   }
-  if (delay !== undefined && (!Number.isSafeInteger(delay) || delay < 0)) {
+  if (
+    delay !== undefined &&
+    (typeof delay !== 'number' || !Number.isSafeInteger(delay) || delay < 0)
+  ) {
     throw new TypeError('delay must be a nonnegative safe integer')
   }
-  if (runAt !== undefined && (!Number.isSafeInteger(runAt) || runAt < 0)) {
+  if (
+    runAt !== undefined &&
+    (typeof runAt !== 'number' || !Number.isSafeInteger(runAt) || runAt < 0)
+  ) {
     throw new TypeError('runAt must be a nonnegative safe integer')
   }
 
-  return {
-    ...(delay !== undefined ? { delay } : {}),
-    ...(runAt !== undefined ? { runAt } : {}),
-  }
+  if (delay !== undefined) return { delay }
+  if (runAt !== undefined) return { runAt }
+  return {}
 }
 
 function publicJob<Data>(snapshot: JobSnapshot): Job<Data> {
@@ -118,17 +133,20 @@ function normalizeGroup(value: unknown): { id: string; concurrency: number } | u
   if (value === undefined) return undefined
 
   const group = typeof value === 'string' ? { id: value } : value
-  if (typeof group !== 'object' || group === null || Array.isArray(group)) {
+  if (!isRecord(group)) {
     throw new TypeError('group must be a nonempty string or a group object')
   }
 
-  const { id, concurrency = 1 } = group as { id?: unknown; concurrency?: unknown }
+  const { id, concurrency = 1 } = group
   if (typeof id !== 'string' || id.length === 0) {
     throw new TypeError('group.id must be a nonempty string')
   }
-  positiveInteger(concurrency as number, 'group.concurrency')
+  if (typeof concurrency !== 'number') {
+    throw new TypeError('group.concurrency must be a positive safe integer')
+  }
+  positiveInteger(concurrency, 'group.concurrency')
 
-  return { id, concurrency: concurrency as number }
+  return { id, concurrency }
 }
 
 function buildEnqueueInput(
@@ -153,17 +171,19 @@ function buildEnqueueInput(
   const serialized = JSON.stringify(data)
   if (serialized === undefined) throw new TypeError('Data must be JSON serializable')
 
-  return {
+  const input: EnqueueInput = {
     queue,
     name: queue,
     data: serialized,
     now,
     availableAt: availability(now, schedule),
     priority,
-    ...(dedupe !== undefined ? { dedupe } : {}),
-    ...(group !== undefined ? { group } : {}),
     attempts,
   }
+  if (dedupe !== undefined) input.dedupe = dedupe
+  if (group !== undefined) input.group = group
+
+  return input
 }
 
 function retentionCount(
@@ -191,7 +211,7 @@ function retentionMaxAge(value: number | null | undefined, name: string): number
 
 function normalizeBackoff(value: QueueOptions['backoff']): RetryBackoff | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError('backoff must be an object')
   }
   if (value.type !== 'fixed' && value.type !== 'exponential') {
@@ -219,7 +239,7 @@ function normalizeRetention(
   if (value === null) return { count: null, maxAge: null }
   if (typeof value === 'number')
     return { count: retentionCount(value, fallbackCount, name), maxAge: null }
-  if (typeof value !== 'object' || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError(`${name} must be a number, null, or a retention rule`)
   }
 
@@ -253,12 +273,11 @@ export class Queue<Data> {
     }
 
     const retention = options.retention
-    if (
-      retention !== undefined &&
-      (typeof retention !== 'object' || retention === null || Array.isArray(retention))
-    ) {
+    if (retention !== undefined && !isRecord(retention)) {
       throw new TypeError('retention must be an object')
     }
+
+    const retentionOptions: QueueOptions['retention'] = retention
 
     this.#name = name
     this.#storage = options.storage
@@ -267,11 +286,15 @@ export class Queue<Data> {
     this.#onError = onError
     this.#retention = {
       completed: normalizeRetention(
-        retention?.completed,
+        retentionOptions?.completed,
         defaultCompletedRetention,
         'retention.completed',
       ),
-      failed: normalizeRetention(retention?.failed, defaultFailedRetention, 'retention.failed'),
+      failed: normalizeRetention(
+        retentionOptions?.failed,
+        defaultFailedRetention,
+        'retention.failed',
+      ),
     }
   }
 
@@ -289,7 +312,7 @@ export class Queue<Data> {
 
     const now = Date.now()
     const inputs = Array.from(items, (item) => {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      if (!isRecord(item)) {
         throw new TypeError('addMany items must be objects')
       }
 
@@ -360,12 +383,14 @@ export class Queue<Data> {
   processMany(processor: ProcessorMany<Data>, options: ProcessManyOptions = {}): WorkerHandle {
     if (this.#worker) throw new Error(`Queue ${this.#name} is already being processed`)
     if (typeof processor !== 'function') throw new TypeError('processor must be a function')
-    if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+    if (!isRecord(options)) {
       throw new TypeError('processMany options must be an object')
     }
 
-    const concurrency = options.concurrency === undefined ? 1 : options.concurrency
-    const batch = options.batch === undefined ? defaultProcessManyBatchSize : options.batch
+    const processOptions: ProcessManyOptions = options
+    const concurrency = processOptions.concurrency === undefined ? 1 : processOptions.concurrency
+    const batch =
+      processOptions.batch === undefined ? defaultProcessManyBatchSize : processOptions.batch
     positiveInteger(concurrency, 'concurrency')
     positiveInteger(batch, 'batch')
     if (batch > Math.floor(Number.MAX_SAFE_INTEGER / concurrency)) {
