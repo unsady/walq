@@ -961,6 +961,39 @@ describe('SQLite groups', () => {
     expect(plan.some(({ detail }) => detail.includes('groupId>?'))).toBe(true)
   })
 
+  it('skips multiple saturated due groups after switching to the due index', async () => {
+    const { storage } = open()
+    await storage.enqueueMany(
+      Array.from({ length: 8 }, (_, index) => ({
+        ...input,
+        availableAt: 20,
+        group: { id: `future-${index}`, concurrency: 1 },
+      })),
+    )
+
+    const active = []
+    const blocked = []
+    for (const id of ['group-a', 'group-b']) {
+      const jobs = await storage.enqueueMany(
+        Array.from({ length: 2 }, () => ({ ...input, group: { id, concurrency: 1 } })),
+      )
+      active.push(jobs[0]!)
+      blocked.push(jobs[1]!)
+    }
+    const claimed = await storage.claim({ ...claimInput, limit: 2 })
+    expect(claimed.map(({ id }) => id)).toEqual(active.map(({ id }) => id))
+
+    const ordinary = await storage.enqueue(input)
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ordinary.id)
+
+    const ready = await storage.enqueue({ ...input, group: { id: 'zz-ready', concurrency: 1 } })
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ready.id)
+    expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
+
+    await storage.complete({ ...claimed[0]!, now: input.now })
+    expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(blocked[0]!.id)
+  })
+
   it('uses separate pending indexes for grouped and ungrouped claims', () => {
     const { db } = open()
     const queries = [

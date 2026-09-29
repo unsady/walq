@@ -575,8 +575,10 @@ class BetterSqlite3Storage implements Storage {
       if (
         scanDue &&
         this.isGroupEligible.get({ queue: input.queue, groupId: group.id }) === undefined
-      )
+      ) {
+        skippedGroups = 0
         continue
+      }
 
       const candidate = this.selectGrouped.get({ ...input, groupId: group.id }) as
         | { id: string }
