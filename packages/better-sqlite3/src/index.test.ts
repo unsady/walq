@@ -752,6 +752,64 @@ describe('SQLite groups', () => {
     expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(plain[4]!.id)
   })
 
+  it('writes the round-robin cursor once for a multi-job claim', async () => {
+    const { db, storage } = open()
+    await storage.enqueueMany(
+      ['a', 'b', 'c'].flatMap((id) =>
+        Array.from({ length: 2 }, () => ({ ...input, group: { id, concurrency: 2 } })),
+      ),
+    )
+    db.exec(`
+      CREATE TABLE cursor_writes (count INTEGER NOT NULL);
+      INSERT INTO cursor_writes VALUES (0);
+      CREATE TRIGGER count_cursor_insert AFTER INSERT ON walq_group_cursor
+      BEGIN UPDATE cursor_writes SET count = count + 1; END;
+      CREATE TRIGGER count_cursor_update AFTER UPDATE ON walq_group_cursor
+      BEGIN UPDATE cursor_writes SET count = count + 1; END;
+    `)
+
+    const claimed = await storage.claim({ ...claimInput, limit: 5 })
+
+    expect(claimed).toHaveLength(5)
+    expect(db.prepare('SELECT count FROM cursor_writes').get()).toEqual({ count: 1 })
+  })
+
+  it('validates duplicate inputs without registering an unused group', async () => {
+    const { db, storage } = open()
+    const original = await storage.enqueue({ ...input, dedupe: 'same' })
+
+    await expect(
+      storage.enqueue({ ...input, data: 'invalid JSON', dedupe: 'same' }),
+    ).rejects.toThrow(SyntaxError)
+    await expect(storage.enqueue({ ...input, attempts: 0, dedupe: 'same' })).rejects.toThrow(
+      'attempts',
+    )
+    await expect(
+      storage.enqueue({ ...input, dedupe: 'same', group: { id: 'unused', concurrency: 0 } }),
+    ).rejects.toThrow('group.concurrency')
+
+    const duplicate = await storage.enqueue({
+      ...input,
+      dedupe: 'same',
+      group: { id: 'unused', concurrency: 2 },
+    })
+    expect(duplicate).toEqual(original)
+    expect(db.prepare('SELECT count(*) AS count FROM walq_groups').get()).toEqual({ count: 0 })
+  })
+
+  it('validates every batch input before inserting even when its dedupe key already exists', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, dedupe: 'same' })
+
+    await expect(
+      storage.enqueueMany([
+        { ...input, dedupe: 'new' },
+        { ...input, dedupe: 'same', attempts: 0 },
+      ]),
+    ).rejects.toThrow('attempts')
+    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 1 })
+  })
+
   it('round-robins inside a multi-job claim and honors priority within each group', async () => {
     const { storage } = open()
     const a = await storage.enqueueMany([

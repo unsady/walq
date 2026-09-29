@@ -84,9 +84,7 @@ function validateInspect(input: InspectInput): InspectInput {
 }
 
 function validateEnqueue(input: EnqueueInput): EnqueueInput {
-  if (!isRecord(input)) {
-    throw new TypeError('enqueue input must be an object')
-  }
+  if (!isRecord(input)) throw new TypeError('enqueue input must be an object')
 
   const validated: EnqueueInput = {
     queue: input.queue,
@@ -525,6 +523,8 @@ class BetterSqlite3Storage implements Storage {
     let offerUngrouped = previous === undefined
     let wrapped = false
     let skippedGroups = 0
+    let cursorChanged = false
+    let cursorGroupId = after
     const visited = new Set<string>()
 
     while (jobs.length < input.limit) {
@@ -543,8 +543,9 @@ class BetterSqlite3Storage implements Storage {
               expiresAt,
             }) as ClaimedJob,
           )
-          this.advanceGroupCursor.run({ queue: input.queue, groupId: '' })
           after = ''
+          cursorGroupId = ''
+          cursorChanged = true
           wrapped = false
           skippedGroups = 0
           visited.clear()
@@ -588,16 +589,19 @@ class BetterSqlite3Storage implements Storage {
       jobs.push(
         this.acquire.get({ id: candidate.id, leaseToken: randomUUID(), expiresAt }) as ClaimedJob,
       )
-      this.advanceGroupCursor.run({ queue: input.queue, groupId: group.id })
+      cursorGroupId = group.id
+      cursorChanged = true
       visited.clear()
       wrapped = false
       skippedGroups = 0
     }
 
+    if (cursorChanged) this.advanceGroupCursor.run({ queue: input.queue, groupId: cursorGroupId })
+
     return jobs
   }
 
-  /** Group registration and deduplication checks must share an immediate transaction. */
+  /** Group configuration and deduplication checks share an immediate transaction. */
   private insertOrGet(input: EnqueueInput): StoredJob {
     if (input.group !== undefined) {
       const existingGroup = this.findGroup.get({
@@ -620,10 +624,7 @@ class BetterSqlite3Storage implements Storage {
     }
 
     if (input.group !== undefined) {
-      this.insertGroup.run({
-        queue: input.queue,
-        ...input.group,
-      })
+      this.insertGroup.run({ queue: input.queue, ...input.group })
     }
 
     return this.insert.get({
