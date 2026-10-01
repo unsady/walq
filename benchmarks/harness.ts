@@ -1,4 +1,5 @@
 import { availableParallelism, cpus } from 'node:os'
+import { performance } from 'node:perf_hooks'
 
 export type MetricValue = number | string
 
@@ -56,6 +57,8 @@ export interface Deferred<Value> {
 /** Rejects with `message` once `duration` elapses, so callers can bound their awaits. */
 export interface Guard {
   promise: Promise<never>
+  /** Check between synchronous operations, which cannot be interrupted by the timer. */
+  check: () => void
   dispose: () => void
 }
 
@@ -80,10 +83,17 @@ export function deferred<Value>(): Deferred<Value> {
 
 export function guard(duration: number, message: string): Guard {
   const failure = deferred<never>()
+  const deadline = performance.now() + duration
   const timer = setTimeout(() => failure.reject(new Error(message)), duration)
   timer.unref()
 
-  return { promise: failure.promise, dispose: () => clearTimeout(timer) }
+  return {
+    promise: failure.promise,
+    check: () => {
+      if (performance.now() >= deadline) throw new Error(message)
+    },
+    dispose: () => clearTimeout(timer),
+  }
 }
 
 /** Resolves true when `work` settles first and false once `duration` elapses. */

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { betterSqlite3 } from '@walq/better-sqlite3'
+import Database from 'better-sqlite3'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   claimChunkOverride,
@@ -8,6 +10,7 @@ import {
   claimModeOverride,
   claimQueueOverride,
   fullClaimGroupingGrid,
+  GroupedClaimer,
   invalidReason,
   minimumCompetitorSamples,
   quickClaimGroupingGrid,
@@ -18,6 +21,51 @@ import {
 } from './claim-grouping.js'
 import type { ClaimCompetitorReport } from './fixtures/claim-competitor-worker.js'
 import type { Collected } from './harness.js'
+
+describe('grouped prototype selection', () => {
+  it('uses the pending index and production ordering for ungrouped jobs', () => {
+    const db = new Database(':memory:')
+
+    try {
+      betterSqlite3(db)
+      db.exec(`
+        INSERT INTO walq_groups (queue, id, concurrency) VALUES ('queue', 'group', 1);
+        INSERT INTO walq_jobs (
+          id, queue, name, data, status, createdAt, availableAt, priority,
+          attemptsMade, attempts, groupId
+        ) VALUES
+          ('z-first', 'queue', 'job', '{}', 'pending', 0, 0, 0, 0, 1, NULL),
+          ('a-second', 'queue', 'job', '{}', 'pending', 0, 0, 0, 0, 1, NULL),
+          ('priority', 'queue', 'job', '{}', 'pending', 0, 0, 1, 0, 1, NULL),
+          ('grouped', 'queue', 'job', '{}', 'pending', 0, 0, 2, 0, 1, 'group');
+      `)
+      const prepare = vi.spyOn(db, 'prepare')
+      const claimer = new GroupedClaimer(db)
+      const sql = prepare.mock.calls.find(([query]) => query.includes('SELECT id'))?.[0]
+      prepare.mockRestore()
+
+      expect(sql).toBeDefined()
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all({
+        queue: 'queue',
+        now: 1,
+        limit: 16,
+      }) as { detail: string }[]
+
+      expect(plan.some(({ detail }) => detail.includes('USING INDEX walq_pending'))).toBe(true)
+      expect(plan.some(({ detail }) => /SCAN walq_jobs|TEMP B-TREE/.test(detail))).toBe(false)
+
+      const jobs = claimer.claim(
+        [{ queue: 'queue', now: 1, limit: 16, leaseDuration: 60_000 }],
+        undefined,
+        [],
+      )
+
+      expect(jobs.map(({ id }) => id)).toEqual(['priority', 'z-first', 'a-second'])
+    } finally {
+      db.close()
+    }
+  })
+})
 
 describe('claim grouping scenarios', () => {
   it('builds the quick matrix', () => {

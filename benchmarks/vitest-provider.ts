@@ -98,7 +98,31 @@ const provider: BenchmarkProvider = {
       only: environment.only,
       report: (message) => console.error(message),
     }
-    const { scenarios } = await collectRuns(descriptors, options, (descriptor) => descriptor.run())
+    const attempts = new Map<ScenarioDescriptor, number>()
+    const { scenarios } = await collectRuns(descriptors, options, async (descriptor) => {
+      const attempt = (attempts.get(descriptor) ?? 0) + 1
+      attempts.set(descriptor, attempt)
+      const phase =
+        attempt <= options.warmup
+          ? `warmup ${attempt}/${options.warmup}`
+          : `repeat ${attempt - options.warmup}/${options.repeats}`
+      const label = `${descriptor.scenario} — ${phase}`
+      options.report(`start: ${label}`)
+      const started = performance.now()
+
+      try {
+        const outcome = await descriptor.run()
+        options.report(`done: ${label} (${((performance.now() - started) / 1000).toFixed(2)} s)`)
+
+        return outcome
+      } catch (error) {
+        options.report(
+          `failed: ${label}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+
+        throw error
+      }
+    })
 
     return descriptors.map((descriptor) => {
       const collected = scenarios.get(descriptor) ?? { outcomes: [], failures: [] }

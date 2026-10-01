@@ -101,7 +101,8 @@ export interface ClaimGroupingOutcome {
   competitor: ClaimCompetitorReport
 }
 
-class GroupedClaimer {
+/** Benchmark-only prototype for ungrouped jobs, using production selection semantics. */
+export class GroupedClaimer {
   readonly #recover: Database.Statement
   readonly #select: Database.Statement
   readonly #acquire: Database.Statement
@@ -123,10 +124,10 @@ class GroupedClaimer {
     this.#select = db
       .prepare(
         `
-          SELECT id FROM walq_jobs
-          WHERE queue = @queue AND status = 'pending' AND availableAt <= @now
-            AND attemptsMade < attempts
-          ORDER BY availableAt, id COLLATE BINARY LIMIT @limit
+          SELECT id FROM walq_jobs INDEXED BY walq_pending
+          WHERE queue = @queue AND status = 'pending' AND groupId IS NULL
+            AND availableAt <= @now AND attemptsMade < attempts
+          ORDER BY priority DESC, availableAt, seq LIMIT @limit
         `,
       )
       .safeIntegers(false)
@@ -456,6 +457,8 @@ async function executeRun(
   try {
     if (competitor !== undefined) await Promise.race([competitor.start(), timeout.promise])
     while (claimed < jobs) {
+      timeout.check()
+
       const now = Date.now()
       const requests = queues.map((queue) => ({
         queue,
@@ -472,7 +475,9 @@ async function executeRun(
             ? await claimProduction(storage, requests, calls)
             : claimGrouped(grouped, requests, scenario.chunkSize, calls)
       elapsed += performance.now() - roundStarted
-      eventLoopSamples.push(await turn)
+      eventLoopSamples.push(await Promise.race([turn, timeout.promise]))
+      timeout.check()
+
       for (const job of jobsInRound) claimedIds.add(job.id)
       claimed += jobsInRound.length
       if (jobsInRound.length === 0) throw new Error(`claiming stopped after ${claimed} jobs`)
@@ -482,7 +487,11 @@ async function executeRun(
         await new Promise((resolve) => setTimeout(resolve, 3))
       }
     }
-    if (competitor !== undefined) await competitor.waitForSamples(minimumCompetitorSamples)
+    if (competitor !== undefined) {
+      await Promise.race([competitor.waitForSamples(minimumCompetitorSamples), timeout.promise])
+    }
+    timeout.check()
+
     const competitorReport =
       competitor === undefined
         ? emptyCompetitor()

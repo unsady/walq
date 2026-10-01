@@ -63,4 +63,6 @@ The summary shows throughput, spread across runs, and selected suite-specific me
 
 `claim-grouping` prototype transaction timings and production `claimQueues` call timings are **not** equivalent: one production call may span several transactions. Likewise, `complete-batch` compares production async completion with direct synchronous prototype SQL, not just batch size. In `contention`, separate files also change caches and WAL files, so the throughput gap is not a pure measurement of lock wait.
 
-The harness alternates scenario order between passes, rejects incomplete work, lost leases and duplicate completions, and closes workers/databases after each run. Every run has a 60-second budget. Keep JSON artifacts when comparing changes; the console summary is intentionally compact.
+The grouped claim prototype targets ungrouped jobs and uses the production pending index and ordering. It does not implement all production features, so prototype vs production is not a pure chunk-size comparison.
+
+The harness logs scenario names and warmup/repeat progress, alternates scenario order between passes, rejects incomplete work, lost leases and duplicate completions, and closes workers/databases after each run. Every run has a 60-second budget. Claim-grouping checks that budget between synchronous operations; an individual SQLite call cannot be interrupted by a JavaScript timer. Keep JSON artifacts when comparing changes; the console summary is intentionally compact.

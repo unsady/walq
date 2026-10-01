@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import {
@@ -134,6 +136,21 @@ describe('matches', () => {
 })
 
 describe('guard', () => {
+  it('checks the deadline even before the timer callback runs', () => {
+    const now = vi.spyOn(performance, 'now').mockReturnValue(100)
+    const timeout = guard(1_000, 'run timed out')
+
+    try {
+      now.mockReturnValue(1_099)
+      expect(() => timeout.check()).not.toThrow()
+      now.mockReturnValue(1_100)
+      expect(() => timeout.check()).toThrow('run timed out')
+    } finally {
+      timeout.dispose()
+      now.mockRestore()
+    }
+  })
+
   it('rejects once the duration elapses', async () => {
     vi.useFakeTimers()
     const timeout = guard(1_000, 'run timed out')
