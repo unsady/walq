@@ -13,6 +13,7 @@ import {
   GroupedClaimer,
   invalidReason,
   minimumCompetitorSamples,
+  measureClaimRound,
   quickClaimGroupingGrid,
   summarizeRuns,
   withClaimGroupingTiers,
@@ -64,6 +65,35 @@ describe('grouped prototype selection', () => {
     } finally {
       db.close()
     }
+  })
+})
+
+describe('claim round event-loop probe', () => {
+  it('observes every turn throughout the round', async () => {
+    const samples: number[] = []
+    const result = await measureClaimRound(async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      return 42
+    }, samples)
+
+    expect(result.value).toBe(42)
+    expect(result.duration).toBeGreaterThanOrEqual(0)
+    expect(samples).toHaveLength(3)
+  })
+
+  it('stops the probe when a claim rejects', async () => {
+    const samples: number[] = []
+
+    await expect(
+      measureClaimRound(() => {
+        throw new Error('claim rejected')
+      }, samples),
+    ).rejects.toThrow('claim rejected')
+    expect(samples).toHaveLength(1)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(samples).toHaveLength(1)
   })
 })
 

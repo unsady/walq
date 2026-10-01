@@ -323,6 +323,27 @@ function nextTurn(): Promise<number> {
   return new Promise((resolve) => setImmediate(() => resolve(performance.now() - started)))
 }
 
+/** Observe every event-loop turn throughout a complete claim round. */
+export async function measureClaimRound<Value>(
+  run: () => Value | Promise<Value>,
+  samples: number[],
+): Promise<{ value: Value; duration: number }> {
+  let active = true
+  const probe = (async () => {
+    while (active) samples.push(await nextTurn())
+  })()
+  const started = performance.now()
+
+  try {
+    const value = await run()
+
+    return { value, duration: performance.now() - started }
+  } finally {
+    active = false
+    await probe
+  }
+}
+
 async function claimCurrent(
   storage: Storage,
   requests: ClaimRequest[],
@@ -466,16 +487,17 @@ async function executeRun(
         now,
         leaseDuration: 60_000,
       }))
-      const turn = nextTurn()
-      const roundStarted = performance.now()
-      const jobsInRound =
-        scenario.mode === 'current'
-          ? await claimCurrent(storage, requests, calls)
-          : scenario.mode === 'production'
-            ? await claimProduction(storage, requests, calls)
-            : claimGrouped(grouped, requests, scenario.chunkSize, calls)
-      elapsed += performance.now() - roundStarted
-      eventLoopSamples.push(await Promise.race([turn, timeout.promise]))
+      const measured = await measureClaimRound(
+        () =>
+          scenario.mode === 'current'
+            ? claimCurrent(storage, requests, calls)
+            : scenario.mode === 'production'
+              ? claimProduction(storage, requests, calls)
+              : claimGrouped(grouped, requests, scenario.chunkSize, calls),
+        eventLoopSamples,
+      )
+      const jobsInRound = measured.value
+      elapsed += measured.duration
       timeout.check()
 
       for (const job of jobsInRound) claimedIds.add(job.id)
@@ -589,6 +611,7 @@ export function summarizeRuns(
       limit: scenario.limit,
       chunk: claimChunkLabel(scenario),
       jobs,
+      'event loop probe': 'setImmediate throughout each claim round',
     },
     metrics: {
       'jobs/sec': median(rates),
@@ -598,6 +621,7 @@ export function summarizeRuns(
       [`${labels.duration} p99 (µs)`]: callSummary.p99,
       [labels.jobsPerCall]: jobsPerCall,
       [labels.calls]: median(callCounts),
+      'event loop samples': eventLoop.count,
       'event loop p95 (µs)': eventLoop.p95,
       'event loop p99 (µs)': eventLoop.p99,
       'enqueue p95 (µs)': enqueue.p95,
@@ -613,6 +637,9 @@ export function summarizeRuns(
       duplicates: outcome.duplicates,
       calls: outcome.calls.length,
       'competitor ops': outcome.competitor.operations,
+      'event loop samples': outcome.eventLoopSamples.length,
+      'event loop p95 (µs)': summarizePerRunMicros([outcome.eventLoopSamples]).p95,
+      'event loop p99 (µs)': summarizePerRunMicros([outcome.eventLoopSamples]).p99,
     })),
     notes,
     ok: notes.length === 0,
