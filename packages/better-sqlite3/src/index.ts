@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { setImmediate } from 'node:timers/promises'
 
 import type {
   CancelInput,
@@ -685,16 +686,26 @@ class BetterSqlite3Storage implements Storage {
     if (!Array.isArray(input.requests)) throw new TypeError('requests must be an array')
     // Validate the whole batch before opening a transaction so a bad request
     // cannot mutate a queue that a later request would have touched.
-    const steps = input.requests.map((request) => this.prepareClaim(request))
+    const steps = input.requests.map((request) => this.prepareClaim({ ...request }))
     if (steps.length === 0) return []
 
     // A sweep can cover many queues, so requests are packed until their summed
     // limits reach `claimBudget` (see `chunking.ts`). Chunks commit in order: a
     // failure in a later chunk keeps the earlier ones, which the storage
-    // contract allows.
-    return chunkClaims(steps, (step) => step.input.limit).flatMap((chunk) =>
-      this.claimTransaction.immediate(chunk),
-    )
+    // contract allows. Yield outside transactions so a sweep does not block
+    // the event loop for the combined duration of every chunk.
+    const chunks = chunkClaims(steps, (step) => step.input.limit)
+    const results: ClaimQueuesResult = []
+
+    for (const [index, chunk] of chunks.entries()) {
+      // Caller-owned connections may change while control is yielded.
+      this.assertAutocommit()
+      results.push(...this.claimTransaction.immediate(chunk))
+
+      if (index < chunks.length - 1) await setImmediate()
+    }
+
+    return results
   }
 
   async inspect(input: InspectInput): Promise<JobSnapshot | null> {

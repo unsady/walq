@@ -1,7 +1,8 @@
 /**
  * Grouped claims are split into several transactions so one poller sweep over
- * many queues does not hold the writer lock for the whole round. The budget is
- * internal: the adapter owns the trade-off between lock hold and commit count.
+ * many queues does not hold the writer lock for the whole round. The adapter
+ * yields to the event loop between committed chunks. The budget is internal:
+ * the adapter owns the trade-off between blocking time and commit count.
  */
 export const claimBudget = 512
 

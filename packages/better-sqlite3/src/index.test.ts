@@ -1982,6 +1982,100 @@ describe('SQLite integration', () => {
     ])
   })
 
+  it('yields between committed claim chunks and observes an intervening pause', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, queue: 'a' })
+    await storage.enqueue({ ...input, queue: 'b' })
+    let observed: { transaction: boolean; statuses: unknown } | undefined
+    const turn = new Promise<void>((resolve, reject) => {
+      setImmediate(() => {
+        observed = {
+          transaction: db.inTransaction,
+          statuses: db.prepare('SELECT queue, status FROM walq_jobs ORDER BY queue').all(),
+        }
+        storage.pause({ queue: 'b' }).then(resolve, reject)
+      })
+    })
+    const results = await storage.claimQueues!({
+      requests: ['a', 'b'].map((queue) => ({ ...claimInput, queue, limit: 512 })),
+    })
+    await turn
+
+    expect(observed).toEqual({
+      transaction: false,
+      statuses: [
+        { queue: 'a', status: 'active' },
+        { queue: 'b', status: 'pending' },
+      ],
+    })
+    expect(results.map((jobs) => jobs.length)).toEqual([1, 0])
+  })
+
+  it('does not yield when claims fit in one transaction', async () => {
+    const { storage } = open()
+    await storage.enqueue(input)
+    let yielded = false
+    const turn = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        yielded = true
+        resolve()
+      })
+    })
+
+    const results = await storage.claimQueues!({ requests: [claimInput] })
+    expect(results[0]).toHaveLength(1)
+    expect(yielded).toBe(false)
+    await turn
+  })
+
+  it('snapshots validated requests before yielding between chunks', async () => {
+    const { storage } = open()
+    await storage.enqueue({ ...input, queue: 'a' })
+    await storage.enqueue({ ...input, queue: 'b' })
+    const requests = ['a', 'b'].map((queue) => ({ ...claimInput, queue, limit: 512 }))
+    const second = requests[1]!
+    const turn = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        second.queue = 'changed'
+        second.limit = 0
+        second.now = -1
+        resolve()
+      })
+    })
+    const results = await storage.claimQueues!({ requests })
+    await turn
+
+    expect(results.map((jobs) => jobs.map(({ queue }) => queue))).toEqual([['a'], ['b']])
+  })
+
+  it('rejects a caller transaction started between chunks without joining it', async () => {
+    const { db, storage } = open()
+    await storage.enqueue({ ...input, queue: 'a' })
+    await storage.enqueue({ ...input, queue: 'b' })
+    const turn = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        db.exec('BEGIN')
+        resolve()
+      })
+    })
+
+    try {
+      await expect(
+        storage.claimQueues!({
+          requests: ['a', 'b'].map((queue) => ({ ...claimInput, queue, limit: 512 })),
+        }),
+      ).rejects.toThrow('transaction')
+      await turn
+      expect(db.inTransaction).toBe(true)
+      expect(db.prepare('SELECT queue, status FROM walq_jobs ORDER BY queue').all()).toEqual([
+        { queue: 'a', status: 'active' },
+        { queue: 'b', status: 'pending' },
+      ])
+    } finally {
+      if (db.inTransaction) db.exec('ROLLBACK')
+    }
+  })
+
   it('claims every queue once when a batch spans several transactions', async () => {
     const { db, storage } = open()
     const queues = Array.from({ length: 70 }, (_, index) => `queue-${index}`)
