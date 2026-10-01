@@ -30,11 +30,20 @@ queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
 await queue.add({ name: 'Ada' })
 ```
 
-Jobs are delivered at least once. Make handlers idempotent if repeating side effects is unsafe. Stop workers before closing the caller-owned database. `queue.pause()` and `queue.resume()` durably stop and restart new claims for one exact queue, even across process restarts. Active handlers continue; paused claims recover expired leases but do not start new handlers. Durable repeating schedules can be registered with `queue.schedule(data, { id, every })` or `{ id, cron }`; schedules are materialized as ordinary jobs while a worker polls the queue, except while paused.
+Jobs are delivered at least once; make handlers idempotent when repeating side effects is unsafe. Stop workers before closing the caller-owned database. See the [Core API](packages/core/README.md) for batch processing, groups, durable pause/resume, and repeating schedules.
 
 ## Docs
 
 [Core API](packages/core/README.md) · [`better-sqlite3`](packages/better-sqlite3/README.md) · [Storage adapter contract](docs/storage-contract.md) · [Changelog](CHANGELOG.md)
+
+## Development
+
+Requires pnpm 12.
+
+```sh
+pnpm install
+pnpm check
+```
 
 ## License
 

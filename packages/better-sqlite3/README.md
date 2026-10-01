@@ -24,12 +24,18 @@ queue.process(async ({ to }) => console.log(`Email ${to}`))
 await queue.add({ to: 'user@example.com' })
 ```
 
-The caller owns the connection and must stop workers before closing it. Configure WAL, `synchronous = FULL`, and a suitable busy timeout for durable file-backed use; durability depends on the filesystem and hardware honoring SQLite sync requests. WAL needs a local filesystem with SQLite-compatible locking. SQLite has one writer at a time.
+## Connection and initialization
 
-Ungrouped jobs take turns as one virtual group alongside eligible groups in a persistent round-robin; named groups follow in binary group-ID order. Within each stream, jobs are selected by priority, availability, then insertion order. Claims tied on priority and availability within a stream, and pending-list rows tied on availability, follow successful insertion order. Deduplicated enqueues do not create a new position, and retries/reschedules retain the original position. This is stored internally and is not part of the public job API. Schema v12 migrates schemas 2–10 (version 11 is unsupported); existing pre-v6 rows receive a deterministic approximate historical order by `createdAt`, then binary ID. Queue-scoped group concurrency configurations, round-robin position, and pause state persist independently of jobs, including after deletion and database reopen. Databases created by the earlier v12 implementation can still have the obsolete `walq_active_group` index; after stopping workers, `DROP INDEX IF EXISTS walq_active_group` removes it. Fresh databases and migrations from v10 or earlier do not create or retain it.
+The caller owns the connection. Stop workers and await outstanding storage calls before closing it. For durable file-backed use, configure WAL, `synchronous = FULL`, and a suitable busy timeout. WAL requires a local filesystem with SQLite-compatible locking; durability depends on the filesystem and hardware honoring sync requests. SQLite allows one writer at a time.
 
-Storage methods return promises, but each SQLite transaction is synchronous and blocks the event loop. `claimQueues` splits requests into transactions with a 512-job budget and yields to the event loop between committed chunks; one oversized request cannot be split. Single-chunk calls do not yield. Other operations may run between chunks, so the whole batch is not atomic. Stop workers and await outstanding storage calls before closing the connection. The adapter initializes reserved `walq_schema`, `walq_jobs`, `walq_groups`, `walq_schedules`, and `walq_paused_queues` tables and migrates schema versions 2–10 to v12; use a writable connection and do not call it inside a caller-managed transaction. `enqueueMany` commits the entire batch atomically, including deduplication. Pause state is read and written atomically with claim and schedule-materialization guards.
+Initialization requires a writable connection outside a caller-managed transaction and creates internal `walq_` tables. Schema v12 automatically migrates versions 2–10; v11 is unsupported. See the [1.0.0 migration notes](../../release-notes/v1.0.0.md#sqlite-migration) for backup guidance, historical ordering, and obsolete-index removal.
 
-See the [storage contract](../../docs/storage-contract.md) for adapter semantics, including leases, queue isolation, and error results.
+## Claims and transactions
+
+Claims use persistent round-robin scheduling across eligible groups and the ungrouped stream; within each stream, priority, availability, and insertion order determine selection. Group concurrency, scheduling position, and pause state survive deletion of jobs and database reopen.
+
+Storage methods return promises, but SQLite transactions block the event loop. `claimQueues` commits chunks with a 512-job budget and yields between them; a single oversized request cannot be split. Single-chunk calls do not yield, and multi-chunk calls are not atomic. `enqueueMany` is atomic, including deduplication.
+
+See the [storage contract](../../docs/storage-contract.md) for exact ordering, leases, pause/schedule semantics, and error results.
 
 Run `pnpm test` from the workspace root; the concurrent worker test requires Node.js 24+.
