@@ -32,7 +32,7 @@ const emptyStats = {
 }
 
 function domain(scenario: string, metrics: Record<string, number> = {}): BenchmarkResult {
-  return { suite: 'test', scenario, params: {}, metrics, samples: [], notes: [], ok: true }
+  return { suite: 'coordinator', scenario, params: {}, metrics, samples: [], notes: [], ok: true }
 }
 
 function benchResult(
@@ -153,12 +153,12 @@ describe('executeDefinitions', () => {
 describe('writeArtifact', () => {
   it('writes one JSON file per suite under the BENCH_JSON base path', () => {
     const directory = mkdtempSync(join(tmpdir(), 'walq-bench-artifact-'))
-    const base = join(directory, 'bench.json')
+    const base = join(directory, 'nested', 'bench.json')
     vi.stubEnv('BENCH_JSON', base)
     try {
       const path = writeArtifact([domain('alpha')], 'coordinator')
 
-      expect(path).toBe(join(directory, 'bench.coordinator.json'))
+      expect(path).toBe(join(directory, 'nested', 'bench.coordinator.json'))
       const parsed = JSON.parse(readFileSync(path ?? '', 'utf8')) as { results: BenchmarkResult[] }
       expect(parsed.results.map((result) => result.scenario)).toEqual(['alpha'])
     } finally {

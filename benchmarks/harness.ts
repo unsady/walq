@@ -18,11 +18,6 @@ export interface BenchmarkResult {
   ok: boolean
 }
 
-export interface SuiteResult {
-  results: BenchmarkResult[]
-  abortReason: string | undefined
-}
-
 export interface LatencySummary {
   count: number
   mean: number
@@ -308,17 +303,6 @@ export function formatValue(value: MetricValue): string {
   return value.toFixed(3)
 }
 
-function collectColumns(results: BenchmarkResult[], key: 'params' | 'metrics'): string[] {
-  const columns: string[] = []
-  for (const result of results) {
-    for (const column of Object.keys(result[key])) {
-      if (!columns.includes(column)) columns.push(column)
-    }
-  }
-
-  return columns
-}
-
 /** A column is numeric when it has at least one value and every present value is a number. */
 function isNumericColumn(
   results: BenchmarkResult[],
@@ -381,12 +365,10 @@ function renderTerminalTable(
 }
 
 /** Which metrics best describe each suite, so the compact summary stays narrow. */
-export interface DomainSummaryProfile {
+interface DomainSummaryProfile {
   throughput: string
   spread: string
   highlights: string[]
-  /** Parameters not already encoded in the scenario name. */
-  params: string[]
 }
 
 const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
@@ -394,13 +376,11 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
     throughput: 'jobs/sec',
     spread: 'spread (%)',
     highlights: ['claims/job', 'empty claims', 'claim p95 (µs)', 'first handler (ms)'],
-    params: [],
   },
   contention: {
     throughput: 'drain jobs/sec',
     spread: 'spread (%)',
     highlights: ['enqueue jobs/sec', 'jobs/claim', 'claim p95 (µs)', 'complete p95 (µs)'],
-    params: [],
   },
   'claim-grouping': {
     throughput: 'jobs/sec',
@@ -416,19 +396,22 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
       'transaction p95 (µs)',
       'event loop p95 (µs)',
     ],
-    params: [],
   },
-  'complete-batch': {
-    throughput: 'complete jobs/sec',
+  groups: {
+    throughput: 'claims/sec',
     spread: 'spread (%)',
-    highlights: ['commits', 'commit p95 (µs)', 'per-job mean (µs)'],
-    params: [],
+    highlights: ['first claim (µs)', 'follow-up claim (µs)', 'claimed jobs', 'served groups'],
   },
   retention: {
     throughput: 'active jobs/sec',
     spread: 'spread (%)',
-    highlights: ['cleanup (ms)', 'delete batches', 'delete batch p95 (µs)', 'db after (MiB)'],
-    params: [],
+    highlights: [
+      'cleanup (ms)',
+      'cleanup calls',
+      'cleanup call p95 (µs)',
+      'cleanup stall p95 (µs)',
+      'db after (MiB)',
+    ],
   },
 }
 
@@ -441,22 +424,6 @@ function hasSignal(results: BenchmarkResult[], key: 'params' | 'metrics', column
 
     return value !== 0
   })
-}
-
-function domainProfile(results: BenchmarkResult[], metrics: string[]): DomainSummaryProfile {
-  const suite = results[0]?.suite ?? ''
-  const known = domainSummaryProfiles[suite]
-  if (known !== undefined) return known
-
-  const throughput =
-    metrics.find((metric) => metric.endsWith('jobs/sec') || metric.endsWith('/sec')) ?? ''
-  const spread = metrics.includes('spread (%)') ? 'spread (%)' : ''
-  const highlights = metrics
-    .filter((metric) => metric !== throughput && metric !== spread)
-    .filter((metric) => hasSignal(results, 'metrics', metric))
-    .slice(0, 4)
-
-  return { throughput, spread, highlights, params: collectColumns(results, 'params') }
 }
 
 /**
@@ -473,24 +440,21 @@ export function renderDomainSummary(
 ): string {
   if (results.length === 0) return ''
 
-  const profile = domainProfile(results, collectColumns(results, 'metrics'))
+  const suite = results[0]?.suite ?? ''
+  const profile = domainSummaryProfiles[suite]
+  if (profile === undefined) throw new Error(`no summary profile for suite "${suite}"`)
   const metricColumns = [profile.throughput, profile.spread, ...profile.highlights].filter(
     (column) => column.length > 0 && hasSignal(results, 'metrics', column),
   )
-  const params = profile.params.filter((column) => hasSignal(results, 'params', column))
-  const headers = ['scenario', ...params, ...metricColumns]
+  const headers = ['scenario', ...metricColumns]
   const alignments: Array<'left' | 'right'> = [
     'left',
-    ...params.map((column): 'left' | 'right' =>
-      isNumericColumn(results, 'params', column) ? 'right' : 'left',
-    ),
     ...metricColumns.map((column): 'left' | 'right' =>
       isNumericColumn(results, 'metrics', column) ? 'right' : 'left',
     ),
   ]
   const rows = results.map((result) => [
     flattenCell(result.scenario),
-    ...params.map((column) => flattenCell(formatValue(result.params[column] ?? ''))),
     ...metricColumns.map((column) => flattenCell(formatValue(result.metrics[column] ?? ''))),
   ])
   const settingsLine = Object.entries(settings)

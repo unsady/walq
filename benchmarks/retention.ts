@@ -276,6 +276,7 @@ function seedHistory(db: Database.Database, rows: number): void {
 
 async function runCleanup(
   db: Database.Database,
+  storage: Storage,
   scenario: RetentionScenario,
 ): Promise<RetentionCleanupOutcome> {
   const empty: RetentionCleanupOutcome = {
@@ -289,37 +290,33 @@ async function runCleanup(
   }
   if (scenario.cleanup === 'retained') return empty
 
-  const removeBatch = db
-    .prepare(
-      `
-        DELETE FROM walq_jobs
-        WHERE rowid IN (
-          SELECT rowid FROM walq_jobs
-          WHERE rowid > @after AND queue = @queue AND status IN ('completed', 'failed')
-          ORDER BY rowid LIMIT @batch
-        )
-        RETURNING rowid
-      `,
-    )
-    .safeIntegers(false)
-
   const cleanupBatchSamples: number[] = []
   const cleanupStallSamples: number[] = []
+  const retention = {
+    completed: { count: 0, maxAge: null },
+    failed: { count: 0, maxAge: null },
+  }
+  const now = Date.now()
   const started = performance.now()
-  let after = 0
+  let removed = 0
   let batches = 0
   for (;;) {
     const turn = nextTurn()
     const batchStarted = performance.now()
-    const rows = removeBatch.all({ after, queue, batch: scenario.batch }) as { rowid: number }[]
+    const result = await storage.cleanup({ queue, retention, now, limit: scenario.batch })
     cleanupBatchSamples.push(performance.now() - batchStarted)
     cleanupStallSamples.push(await turn)
     batches += 1
-    if (rows.length === 0) break
-    after = rows[rows.length - 1]?.rowid ?? after
-    if (rows.length < scenario.batch) break
+    if (result.removed > scenario.batch) {
+      throw new Error(`cleanup removed ${result.removed} rows with a ${scenario.batch}-row limit`)
+    }
+    removed += result.removed
+    if (!result.more) break
   }
   const cleanup = performance.now() - started
+  if (removed !== scenario.history) {
+    throw new Error(`cleanup removed ${removed} of ${scenario.history} history rows`)
+  }
 
   let vacuum = 0
   let vacuumStall = 0
@@ -476,7 +473,7 @@ async function executeRun(
     let storage = betterSqlite3(db)
     seedHistory(db, scenario.history)
     const before = snapshot(path, db)
-    const cleanup = await runCleanup(db, scenario)
+    const cleanup = await runCleanup(db, storage, scenario)
     const after = snapshot(path, db)
 
     if (scenario.connection === 'reopened') {
@@ -569,12 +566,12 @@ export function summarizeRetentionRuns(
       'event loop p95 (µs)': eventLoop.p95,
       'event loop p99 (µs)': eventLoop.p99,
       'cleanup (ms)': median(valid.map((outcome) => outcome.cleanup)),
-      'delete batches': median(valid.map((outcome) => outcome.cleanupBatches)),
-      'delete batch p50 (µs)': batch.p50,
-      'delete batch p95 (µs)': batch.p95,
-      'delete batch p99 (µs)': batch.p99,
-      'delete stall p95 (µs)': stall.p95,
-      'delete stall p99 (µs)': stall.p99,
+      'cleanup calls': median(valid.map((outcome) => outcome.cleanupBatches)),
+      'cleanup call p50 (µs)': batch.p50,
+      'cleanup call p95 (µs)': batch.p95,
+      'cleanup call p99 (µs)': batch.p99,
+      'cleanup stall p95 (µs)': stall.p95,
+      'cleanup stall p99 (µs)': stall.p99,
       'vacuum (ms)': median(valid.map((outcome) => outcome.vacuum)),
       'vacuum stall (µs)': median(vacuumStalls),
       'checkpoint (ms)': median(valid.map((outcome) => outcome.checkpoint)),

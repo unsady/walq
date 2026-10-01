@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  defineRetentionScenario,
   formatCount,
   fullRetentionGrid,
   quickRetentionGrid,
@@ -106,6 +107,25 @@ describe('retention grid', () => {
   })
 })
 
+describe('production cleanup workload', () => {
+  it.each(['warm', 'reopened'] as const)(
+    'cleans both terminal statuses in bounded calls (%s)',
+    async (connection) => {
+      const definition = defineRetentionScenario(
+        { history: 17, cleanup: 'delete', batch: 4, connection },
+        5,
+        'normal',
+      )
+      const run = (await definition.descriptor.run()) as RetentionOutcome
+
+      expect(retentionInvalidReason(run, 5)).toBeUndefined()
+      expect(run.cleanupBatches).toBe(5)
+      expect(run.cleanupBatchSamples).toHaveLength(5)
+      expect(run.cleanupStallSamples).toHaveLength(5)
+    },
+  )
+})
+
 describe('retentionInvalidReason', () => {
   it('accepts a complete run', () => {
     expect(retentionInvalidReason(outcome(), 100)).toBeUndefined()
@@ -143,6 +163,8 @@ describe('summarizeRetentionRuns', () => {
     expect(result.metrics['enqueue p50 (µs)']).toBeCloseTo(2_000, 6)
     expect(result.metrics['claim p99 (µs)']).toBeCloseTo(3_000, 6)
     expect(result.metrics['cleanup (ms)']).toBe(10)
+    expect(result.metrics['cleanup call p50 (µs)']).toBeCloseTo(1_000, 6)
+    expect(result.metrics['cleanup stall p95 (µs)']).toBeCloseTo(2_000, 6)
     expect(result.metrics['vacuum (ms)']).toBe(5)
     expect(result.metrics['db before (MiB)']).toBe(1)
     expect(result.metrics['db after (MiB)']).toBe(0.5)

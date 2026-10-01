@@ -1,4 +1,5 @@
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 import { expect, test, type Bench, type BenchResult } from 'vitest'
 
@@ -111,6 +112,7 @@ export function writeArtifact(results: BenchmarkResult[], suite: string): string
   if (environment.json === undefined) return undefined
 
   const path = artifactPath(environment.json, suite)
+  mkdirSync(dirname(path), { recursive: true })
   writeFileSync(
     path,
     renderJson(

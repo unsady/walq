@@ -328,43 +328,36 @@ describe('renderDomainSummary', () => {
     expect(summary).not.toContain('first handler (ms)')
   })
 
-  it('falls back to a generic profile for an unknown suite', () => {
-    const summary = renderDomainSummary('misc', environment, {}, [
-      result({ suite: 'misc', metrics: { 'jobs/sec': 5, 'spread (%)': 2, ops: 3, zero: 0 } }),
-    ])
-
-    expect(summary).toContain('jobs/sec')
-    expect(summary).toContain('spread (%)')
-    expect(summary).toContain('ops')
-    expect(summary).not.toContain('zero')
+  it('requires an explicit profile for each maintained suite', () => {
+    expect(() => renderDomainSummary('misc', environment, {}, [result()])).toThrow(
+      'no summary profile',
+    )
   })
 
   it('aligns text left and numbers right with computed widths', () => {
-    const summary = renderDomainSummary('misc', environment, {}, [
+    const summary = renderDomainSummary('coordinator', environment, {}, [
       result({
-        suite: 'misc',
+        suite: 'coordinator',
         scenario: 'alpha',
-        params: { mode: 'shared', queues: 10 },
-        metrics: { 'jobs/sec': 5, 'spread (%)': 1, ops: 30 },
+        metrics: { 'jobs/sec': 5, 'spread (%)': 1, 'claims/job': 30 },
       }),
       result({
-        suite: 'misc',
+        suite: 'coordinator',
         scenario: 'beta beta',
-        params: { mode: 'grouped', queues: 2 },
-        metrics: { 'jobs/sec': 50, 'spread (%)': 10, ops: 3 },
+        metrics: { 'jobs/sec': 50, 'spread (%)': 10, 'claims/job': 3 },
       }),
     ])
 
     const lines = summary.split('\n')
-    expect(lines).toContain('scenario   mode     queues  jobs/sec  spread (%)  ops')
-    expect(lines).toContain('alpha      shared       10         5           1   30')
-    expect(lines).toContain('beta beta  grouped       2        50          10    3')
+    expect(lines).toContain('scenario   jobs/sec  spread (%)  claims/job')
+    expect(lines).toContain('alpha             5           1          30')
+    expect(lines).toContain('beta beta        50          10           3')
   })
 
   it('collapses line breaks so a value cannot break the table', () => {
     const summary = renderDomainSummary('line\nbreak', environment, {}, [
       result({
-        suite: 'misc',
+        suite: 'coordinator',
         scenario: 'multi\nline',
         metrics: { 'jobs/sec': '1000\nruns', 'spread (%)': 2 },
       }),

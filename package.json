@@ -16,14 +16,8 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm pack:check",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "bench": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/coordinator.bench.ts benchmarks/contention.bench.ts benchmarks/claim-grouping.bench.ts benchmarks/retention.bench.ts",
-    "bench:full": "BENCH_GRID=full vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/coordinator.bench.ts benchmarks/contention.bench.ts benchmarks/claim-grouping.bench.ts benchmarks/retention.bench.ts",
-    "bench:experiments": "BENCH_GRID=full vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/claim-grouping.bench.ts benchmarks/complete-batch.bench.ts",
-    "bench:queue": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/coordinator.bench.ts",
-    "bench:contention": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/contention.bench.ts",
-    "bench:claim-grouping": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/claim-grouping.bench.ts",
-    "bench:complete-batch": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/complete-batch.bench.ts",
-    "bench:retention": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts benchmarks/retention.bench.ts",
+    "bench": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts",
+    "bench:full": "BENCH_GRID=full pnpm bench",
     "bench:help": "vitest bench --help"
   },
   "devDependencies": {
