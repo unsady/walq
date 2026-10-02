@@ -10,7 +10,6 @@ import {
   distribute,
   guard,
   median,
-  numeric,
   settledWithin,
   spread,
   SuiteAbortError,
@@ -496,7 +495,7 @@ export function summarizeRuns(
   }
 }
 
-/** Adapter used by the Vitest benchmark files. */
+/** Bind one workload to its result aggregation. */
 export function defineCoordinatorScenario(
   scenario: CoordinatorScenario,
   jobs: number,
@@ -507,7 +506,5 @@ export function defineCoordinatorScenario(
     jobs,
     run: () => executeRun(scenario, jobs),
     summarize: (collected) => summarizeRuns(scenario, jobs, collected),
-    throughput: (result) => numeric(result.metrics['jobs/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample['elapsed (ms)'])),
   })
 }

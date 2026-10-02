@@ -10,7 +10,6 @@ import { synchronousPragma, type BenchEnvironment, type SynchronousMode } from '
 import {
   guard,
   matches,
-  numeric,
   spread,
   summarizePerRunMicros,
   type BenchmarkResult,
@@ -390,7 +389,5 @@ export function defineAdapterScenario(
     jobs: scenario.jobs,
     run: () => runAdapterScenario(scenario, synchronous, entries),
     summarize: (collected) => summarizeAdapterRuns(scenario, collected),
-    throughput: (result) => numeric(result.metrics['jobs/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample.duration)),
   })
 }

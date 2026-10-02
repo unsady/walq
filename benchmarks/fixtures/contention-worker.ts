@@ -1,25 +1,11 @@
-import { registerHooks } from 'node:module'
 import { performance } from 'node:perf_hooks'
 import { parentPort, workerData } from 'node:worker_threads'
 
+import { betterSqlite3 } from '@walq/better-sqlite3'
 import type { ClaimedJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
 import type { SynchronousMode } from '../bench-options.js'
-
-// Native Node type stripping does not remap the source's NodeNext .js imports.
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('.') && specifier.endsWith('.js')) {
-      return nextResolve(`${specifier.slice(0, -3)}.ts`, context)
-    }
-    return nextResolve(specifier, context)
-  },
-})
-
-const { betterSqlite3 } = await import(
-  new URL('../../packages/better-sqlite3/src/index.ts', import.meta.url).href
-)
 
 export interface ContentionWorkerInput {
   path: string

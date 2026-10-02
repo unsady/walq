@@ -18,7 +18,6 @@ import {
   distribute,
   guard,
   median,
-  numeric,
   spread,
   summarizePerRunMicros,
   type BenchmarkResult,
@@ -113,7 +112,7 @@ function prepareDatabase(path: string, synchronous: SynchronousMode): void {
 }
 
 function startWorker(input: ContentionWorkerInput): Channel {
-  const worker = new Worker(new URL('./fixtures/contention-worker.ts', import.meta.url), {
+  const worker = new Worker(new URL('./fixtures/contention-worker.js', import.meta.url), {
     workerData: input,
   })
   const ready = deferred<void>()
@@ -326,7 +325,7 @@ export function summarizeRuns(
   }
 }
 
-/** Adapter used by the Vitest benchmark files. */
+/** Bind one workload to its result aggregation. */
 export function defineContentionScenario(
   scenario: ContentionScenario,
   jobs: number,
@@ -338,7 +337,5 @@ export function defineContentionScenario(
     jobs,
     run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRuns(scenario, jobs, collected),
-    throughput: (result) => numeric(result.metrics['drain jobs/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample['drain (ms)'])),
   })
 }

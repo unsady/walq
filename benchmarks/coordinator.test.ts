@@ -71,16 +71,14 @@ describe('cleanup', () => {
         defineCoordinatorScenario({ mode, queues: 1, profile: 'saturated' }, 1),
       )
       const pending = collectRuns(
-        definitions.map((definition) => definition.descriptor),
+        definitions,
         { jobs: 1, repeats: 1, warmup: 0, only: undefined, report: () => {} },
-        (descriptor) => descriptor.run(),
+        (definition) => definition.run(),
       )
       await vi.advanceTimersByTimeAsync(1_000)
       const collected = await pending
       const results = definitions.map((definition) =>
-        definition.descriptor.summarize(
-          collected.scenarios.get(definition.descriptor) ?? { outcomes: [], failures: [] },
-        ),
+        definition.summarize(collected.scenarios.get(definition) ?? { outcomes: [], failures: [] }),
       )
 
       expect(collected.abortReason).toBe('workers did not stop within 1000ms')
