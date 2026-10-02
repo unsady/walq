@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -7,6 +7,8 @@ const root = resolve(import.meta.dirname, '..')
 const packageDirectories = {
   adapter: join(root, 'packages/better-sqlite3'),
   core: join(root, 'packages/core'),
+  sqlite: join(root, 'packages/sqlite'),
+  common: join(root, 'packages/sqlite-common'),
 }
 const manifests = Object.fromEntries(
   Object.entries(packageDirectories).map(([key, directory]) => [
@@ -34,97 +36,121 @@ function pack(packageDirectory, tarballName) {
   return tarball
 }
 
-try {
-  run('pnpm', ['build'])
-  run('pnpm', ['exec', 'publint', 'packages/core', '--pack=pnpm', '--strict'])
-  run('pnpm', ['exec', 'publint', 'packages/better-sqlite3', '--pack=pnpm', '--strict'])
-  run('pnpm', ['exec', 'attw', '--pack', 'packages/core', '--profile', 'esm-only', '--quiet'])
-  run('pnpm', [
-    'exec',
-    'attw',
-    '--pack',
-    'packages/better-sqlite3',
-    '--profile',
-    'esm-only',
-    '--quiet',
-  ])
+function writeJson(directory, filename, value) {
+  writeFileSync(join(directory, filename), `${JSON.stringify(value, null, 2)}\n`)
+}
 
-  const core = pack(packageDirectories.core, tarballName(manifests.core))
-  const adapter = pack(packageDirectories.adapter, tarballName(manifests.adapter))
+function checkAdapter(key, tarballs) {
+  const directory = join(temporaryDirectory, key)
+  mkdirSync(directory)
+  const builtin = key === 'sqlite'
+  const name = manifests[key].name
+  const other = builtin ? '@walq/better-sqlite3' : '@walq/sqlite'
+  const imports = builtin
+    ? `import { DatabaseSync } from 'node:sqlite'
+import { sqlite } from '@walq/sqlite'`
+    : `import Database from 'better-sqlite3'
+import { betterSqlite3 } from '@walq/better-sqlite3'`
+  const connection = builtin ? "new DatabaseSync(':memory:')" : "new Database(':memory:')"
+  const factory = builtin ? 'sqlite' : 'betterSqlite3'
 
+  writeJson(directory, 'package.json', {
+    private: true,
+    type: 'module',
+    dependencies: {
+      [name]: `file:${tarballs[key]}`,
+      '@walq/core': `file:${tarballs.core}`,
+      ...(!builtin && { 'better-sqlite3': '^13.0.3' }),
+    },
+    devDependencies: { '@types/node': manifests[key].devDependencies['@types/node'] },
+    // Resolve the unpublished shared dependency from its tarball, not the workspace.
+    overrides: { '@walq/sqlite-common': `file:${tarballs.common}` },
+  })
   writeFileSync(
-    join(temporaryDirectory, 'package.json'),
-    `${JSON.stringify(
-      {
-        private: true,
-        type: 'module',
-        dependencies: {
-          '@walq/better-sqlite3': `file:${adapter}`,
-          '@walq/core': `file:${core}`,
-          'better-sqlite3': '^13.0.3',
-        },
-      },
-      null,
-      2,
-    )}\n`,
-  )
-  writeFileSync(
-    join(temporaryDirectory, 'smoke.mjs'),
-    `import Database from 'better-sqlite3'
-import { betterSqlite3 } from '@walq/better-sqlite3'
+    join(directory, 'smoke.mjs'),
+    `${imports}
+import assert from 'node:assert/strict'
 import { Queue } from '@walq/core'
 
-const db = new Database(':memory:')
-const queue = new Queue('smoke', { storage: betterSqlite3(db) })
+assert.throws(() => import.meta.resolve('${other}'), { code: 'ERR_MODULE_NOT_FOUND' })
+${builtin ? "assert.throws(() => import.meta.resolve('better-sqlite3'), { code: 'ERR_MODULE_NOT_FOUND' })" : ''}
+
+const db = ${connection}
+const queue = new Queue('smoke', { storage: ${factory}(db) })
 let resolveHandled
-const handled = new Promise((resolve) => { resolveHandled = resolve })
+let timeout
+const handled = new Promise((resolve, reject) => {
+  resolveHandled = resolve
+  timeout = setTimeout(() => reject(new Error('Worker timed out')), 5000)
+})
 const worker = queue.process((data) => resolveHandled(data.value))
-await queue.add({ value: 'ok' })
-if (await handled !== 'ok') throw new Error('Unexpected job payload')
-await worker.close()
-db.close()
+
+try {
+  await queue.add({ value: 'ok' })
+  assert.equal(await handled, 'ok')
+} finally {
+  clearTimeout(timeout)
+  await worker.close()
+  db.close()
+}
 `,
   )
   writeFileSync(
-    join(temporaryDirectory, 'types.ts'),
-    `import { betterSqlite3 } from '@walq/better-sqlite3'
+    join(directory, 'types.ts'),
+    `${imports}
 import { Queue } from '@walq/core'
 import type { Storage } from '@walq/core/storage'
 
-const acceptsStorage = (storage: Storage) => new Queue('typed', { storage })
-void acceptsStorage
-void betterSqlite3
+const storage: Storage = ${factory}(${connection})
+new Queue('typed', { storage })
 `,
   )
-  writeFileSync(
-    join(temporaryDirectory, 'tsconfig.json'),
-    `${JSON.stringify(
-      {
-        compilerOptions: {
-          lib: ['ES2022'],
-          module: 'NodeNext',
-          moduleResolution: 'NodeNext',
-          noEmit: true,
-          strict: true,
-        },
-        include: ['types.ts'],
-      },
-      null,
-      2,
-    )}\n`,
-  )
+  writeJson(directory, 'tsconfig.json', {
+    compilerOptions: {
+      lib: ['ES2022'],
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      types: ['node'],
+      noEmit: true,
+      strict: true,
+    },
+    include: ['types.ts'],
+  })
 
-  run('npm', ['install', '--no-audit', '--no-fund'], temporaryDirectory)
-  run(process.execPath, ['smoke.mjs'], temporaryDirectory)
-  run(join(root, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], temporaryDirectory)
+  run('npm', ['install', '--no-audit', '--no-fund'], directory)
+  run(process.execPath, ['smoke.mjs'], directory)
+  run(join(root, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], directory)
 
-  const adapterManifest = readFileSync(
-    join(temporaryDirectory, 'node_modules/@walq/better-sqlite3/package.json'),
-    'utf8',
-  )
-  if (adapterManifest.includes('workspace:')) {
-    throw new Error('Published adapter manifest contains a workspace dependency')
+  for (const manifest of [manifests[key], manifests.common]) {
+    const installed = readFileSync(
+      join(directory, 'node_modules', manifest.name, 'package.json'),
+      'utf8',
+    )
+    if (installed.includes('workspace:')) {
+      throw new Error(`${manifest.name} published manifest contains a workspace dependency`)
+    }
+    const dependencies = JSON.parse(installed).dependencies ?? {}
+    if (other in dependencies || name in dependencies) {
+      throw new Error(`${manifest.name} depends on a SQLite adapter`)
+    }
   }
+}
+
+try {
+  run('pnpm', ['build'])
+  for (const directory of Object.values(packageDirectories)) {
+    run('pnpm', ['exec', 'publint', directory, '--pack=pnpm', '--strict'])
+    run('pnpm', ['exec', 'attw', '--pack', directory, '--profile', 'esm-only', '--quiet'])
+  }
+
+  const tarballs = Object.fromEntries(
+    Object.entries(packageDirectories).map(([key, directory]) => [
+      key,
+      pack(directory, tarballName(manifests[key])),
+    ]),
+  )
+  checkAdapter('adapter', tarballs)
+  checkAdapter('sqlite', tarballs)
 } finally {
   rmSync(temporaryDirectory, { force: true, recursive: true })
 }

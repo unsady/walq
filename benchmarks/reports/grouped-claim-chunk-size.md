@@ -9,7 +9,7 @@ Measured on an Apple M1 Pro (8 cores, Node 24), with 128/256 queues, claim limit
 | **32**                 |              **512** |                    **~18 ms** |        **~10–22 ms** |                       **~91–92%** |
 | 16                     |                  256 |                        ~12 ms |             ~5–23 ms |                           ~88–90% |
 
-**Decision:** split grouped claims at a budget of 512 jobs (`packages/better-sqlite3/src/chunking.ts`). At limit 16 this corresponds to 32 queues per transaction. It substantially shortens writer-lock holds without a large throughput loss; a job budget also adapts to other claim limits. The production path was separately checked against the 32-queue prototype. Adapter tests cover chunk boundaries, rollback within a chunk, and commits across chunks.
+**Decision:** split grouped claims at a budget of 512 jobs (`packages/sqlite-common/src/chunking.ts`). At limit 16 this corresponds to 32 queues per transaction. It substantially shortens writer-lock holds without a large throughput loss; a job budget also adapts to other claim limits. The production path was separately checked against the 32-queue prototype. Adapter tests cover chunk boundaries, rollback within a chunk, and commits across chunks.
 
 To repeat the comparison on current code, run the prototype under both `BENCH_SYNCHRONOUS=normal` and `full` (and save JSON with `BENCH_JSON` if needed):
 

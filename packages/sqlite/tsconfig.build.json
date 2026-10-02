@@ -9,7 +9,7 @@
     "outDir": "dist",
     "rootDir": "src",
     "sourceMap": true,
-    "tsBuildInfoFile": "../../.cache/better-sqlite3.tsbuildinfo",
+    "tsBuildInfoFile": "../../.cache/sqlite.tsbuildinfo",
     "types": ["node"]
   },
   "references": [

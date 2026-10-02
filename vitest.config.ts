@@ -9,6 +9,11 @@ function source(path: string): string {
 export default defineConfig({
   resolve: {
     alias: [
+      {
+        find: /^@walq\/sqlite-common$/,
+        replacement: source('./packages/sqlite-common/src/index.ts'),
+      },
+      { find: /^@walq\/sqlite$/, replacement: source('./packages/sqlite/src/index.ts') },
       { find: /^@walq\/core\/storage$/, replacement: source('./packages/core/src/storage.ts') },
       { find: /^@walq\/core$/, replacement: source('./packages/core/src/index.ts') },
       {
