@@ -19,7 +19,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+      - run: pnpm clean && pnpm check
 
   compatibility:
     strategy:
@@ -28,8 +28,6 @@ jobs:
         include:
           - os: ubuntu-latest
             node: 22
-          - os: ubuntu-latest
-            node: 24
           - os: macos-latest
             node: 22
           - os: windows-latest
