@@ -5,6 +5,7 @@ not run by `pnpm test` or CI; their correctness and reporting tests are.
 
 | Suite            | Question                                                              |
 | ---------------- | --------------------------------------------------------------------- |
+| `adapters`       | SQLite drivers on Node.js; built-in adapter across Node.js, Bun, Deno |
 | `coordinator`    | Shared vs isolated pollers on one in-memory connection                |
 | `contention`     | Shared WAL file vs one file per writer thread                         |
 | `claim-grouping` | Production grouped claims and prototype chunk-size comparisons        |
@@ -23,6 +24,40 @@ Each suite prints one summary table. JSON is optional and contains environment,
 metrics, and per-run samples; the example creates
 `.cache/benchmarks/bench.groups.json` and sibling suite files. Parent directories
 are created automatically. Keep generated artifacts outside tracked source paths.
+
+## Adapter comparisons
+
+On Node.js, compare `better-sqlite3` and `node:sqlite` through Vitest or the standalone CLI:
+
+```sh
+pnpm bench benchmarks/adapters.bench.ts
+pnpm bench:adapters
+```
+
+The CLI reuses the shared scenarios, collector, statistics, and reporting; it does not require Vitest in the target runtime. Build once, then run sequentially on the same idle host:
+
+```sh
+pnpm bench:adapters:build
+BENCH_ADAPTERS=node:sqlite BENCH_JSON=.cache/benchmarks/compare.json node .cache/benchmarks/adapters-cli.js
+BENCH_JSON=.cache/benchmarks/compare.json bun .cache/benchmarks/adapters-cli.js
+BENCH_JSON=.cache/benchmarks/compare.json deno run --allow-read --allow-write --allow-env --allow-sys .cache/benchmarks/adapters-cli.js
+```
+
+The CLI loads built package entry points explicitly, including under Bun. Bun and Deno default to `node:sqlite` only; comparing the native `better-sqlite3` addon is limited to Node.js. CLI artifacts have runtime suffixes, for example `compare.adapters.bun.json`, and include actual runtime and SQLite versions, per-run counts/durations, and raw call timings. `BENCH_ADAPTERS=better-sqlite3,node:sqlite` selects Node.js drivers explicitly. Filter workloads with `BENCH_ONLY=wal/claim` or `BENCH_ONLY=lifecycle`.
+
+Each adapter runs the same five workloads in memory and on a fresh WAL file:
+
+- `enqueueMany`: batches of 64 jobs into an empty queue.
+- `claim`: batches of 64 pre-seeded, ungrouped jobs.
+- `claimQueues-grouped`: 16 queues with 16 eligible groups per queue, requesting 64 jobs per queue per sweep. This exercises multiple 512-job transaction chunks; groups are not saturated.
+- `lifecycle`: enqueue a batch, claim it, then complete each job individually. Counts a job once, not once per operation.
+- `cleanup`: remove pre-seeded completed jobs in batches of 64; creation and completion are outside the measured phase.
+
+Quick runs use 1024 jobs and full runs use 10,000 unless `BENCH_JOBS` is set. File runs use WAL, the selected `BENCH_SYNCHRONOUS` mode, 4096-byte pages, a 2000-KiB cache, a 5000-ms busy timeout, and a 1000-page auto-checkpoint. Connection setup, schema initialization, seeding, correctness checks, and teardown are excluded from operation timings. The in-memory variant does not measure filesystem durability.
+
+`jobs/sec` is actual processed jobs divided by the sum of timed storage-call durations across measured runs; it is **not** end-to-end application throughput. Call p95 is the median of per-run p95 values; lifecycle latency mixes enqueue, claim, and completion calls. The report shows sample counts: short runs, especially grouped sweeps, do not support reliable tail-latency claims. Increase jobs and repeats before drawing conclusions. Paired drivers are adjacent and execution order reverses between passes.
+
+Cross-runtime results compare the whole runtime/driver/SQLite combination, not just JavaScript engines. Different bundled SQLite versions or compile options can contribute to differences. These benchmarks use one connection and no concurrent producers; they do not establish contention or multi-process scaling results.
 
 ## Options
 
@@ -58,7 +93,7 @@ Setup is outside claim timings; claim rates include empty calls, not just jobs.
 
 ## Reading results
 
-Results aggregate per-run metrics by median; latency summaries give each run one
+Most suites aggregate per-run metrics by median; adapter throughput uses total jobs divided by total timed duration. Latency summaries give each run one
 vote rather than pooling unequal sample counts. Compare like-for-like workloads
 on the same idle host, retaining JSON for later analysis. Small differences need
 more repeats; short-run tail percentiles are noisy.

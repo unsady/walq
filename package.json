@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b packages/core/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json packages/sqlite/tsconfig.build.json",
-    "clean": "tsc -b --clean packages/core/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json packages/sqlite/tsconfig.build.json",
+    "clean": "tsc -b --clean packages/core/tsconfig.build.json packages/better-sqlite3/tsconfig.build.json packages/sqlite/tsconfig.build.json benchmarks/tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --config oxlint.config.ts",
     "format": "oxfmt --config oxfmt.config.ts --write .",
@@ -14,11 +14,13 @@
     "test:watch": "vitest --passWithNoTests",
     "test:sqlite": "pnpm build && node tests/sqlite/runtime.mjs && node --experimental-strip-types --test tests/sqlite/*.test.mjs",
     "pack:check": "node scripts/check-packages.mjs",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:sqlite && pnpm pack:check",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:sqlite && tsc -b benchmarks/tsconfig.build.json && pnpm pack:check",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "bench": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts",
     "bench:full": "BENCH_GRID=full pnpm bench",
+    "bench:adapters:build": "pnpm build && tsc -b benchmarks/tsconfig.build.json",
+    "bench:adapters": "pnpm bench:adapters:build && node .cache/benchmarks/adapters-cli.js",
     "bench:help": "vitest bench --help"
   },
   "devDependencies": {
