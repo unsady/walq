@@ -8,7 +8,7 @@ import type { ClaimedJob } from '@walq/core/storage'
 import Database from 'better-sqlite3'
 
 import { synchronousPragma, type SynchronousMode } from './bench-options.js'
-import { median, numeric, spread, type BenchmarkResult, type Collected } from './harness.js'
+import { median, spread, type BenchmarkResult, type Collected } from './harness.js'
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
 export type GroupScenarioName =
@@ -319,7 +319,5 @@ export function defineGroupScenario(
     jobs: scenario.jobs,
     run: () => runGroupScenario(scenario, synchronous),
     summarize: (collected) => summarizeGroupRuns(scenario, collected),
-    throughput: (result) => numeric(result.metrics['claims/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample['first claim (ms)'])),
   })
 }

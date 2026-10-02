@@ -144,9 +144,9 @@ describe('adapter benchmark reporting', () => {
     }
   })
 
-  it('uses the shared descriptor and renders the actual runtime and SQLite version', () => {
+  it('summarizes the scenario and renders the actual runtime and SQLite version', () => {
     const definition = defineAdapterScenario(base, 'normal')
-    const result = definition.descriptor.summarize({ outcomes: [outcome()], failures: [] })
+    const result = definition.summarize({ outcomes: [outcome()], failures: [] })
     const table = renderDomainSummary(
       'adapters',
       {
@@ -162,7 +162,6 @@ describe('adapter benchmark reporting', () => {
       [result],
     )
 
-    expect(definition.descriptor.throughput(result)).toBe(1700)
     expect(table).toContain('bun 1.4.2')
     expect(table).toContain('test-version')
     expect(table).toContain('call samples')

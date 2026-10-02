@@ -116,7 +116,7 @@ describe('production cleanup workload', () => {
         5,
         'normal',
       )
-      const run = (await definition.descriptor.run()) as RetentionOutcome
+      const run = (await definition.run()) as RetentionOutcome
 
       expect(retentionInvalidReason(run, 5)).toBeUndefined()
       expect(run.cleanupBatches).toBe(5)

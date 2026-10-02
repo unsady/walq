@@ -11,5 +11,5 @@
     { "path": "../packages/sqlite/tsconfig.build.json" },
     { "path": "../packages/better-sqlite3/tsconfig.build.json" }
   ],
-  "include": ["adapters-cli.ts"]
+  "include": ["cli.ts", "fixtures/*.ts"]
 }

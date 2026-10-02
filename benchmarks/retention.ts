@@ -12,7 +12,6 @@ import { synchronousPragma, type SynchronousMode } from './bench-options.js'
 import {
   errorMessage,
   median,
-  numeric,
   spread,
   summarizePerRunMicros,
   type BenchmarkResult,
@@ -608,7 +607,5 @@ export function defineRetentionScenario(
     jobs,
     run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRetentionRuns(scenario, jobs, collected),
-    throughput: (result) => numeric(result.metrics['active jobs/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample['workload (ms)'])),
   })
 }

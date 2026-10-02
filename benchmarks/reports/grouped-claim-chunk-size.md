@@ -16,7 +16,7 @@ To repeat the comparison on current code, run the prototype under both `BENCH_SY
 ```sh
 BENCH_REPEATS=5 BENCH_JOBS=131072 BENCH_CLAIM_QUEUES=128,256 \
   BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
-  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench benchmarks/claim-grouping.bench.ts
+  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench claim-grouping
 ```
 
 `BENCH_ONLY=competing BENCH_REPEATS=8` gives more samples for the competing writer. The prototype reports transaction latency; the production `claimQueues` metric covers an entire call, possibly multiple transactions. Neither competitor latency nor p99 should be interpreted as a direct or precise measurement of SQLite lock wait.

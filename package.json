@@ -17,11 +17,11 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:sqlite && tsc -b benchmarks/tsconfig.build.json && pnpm pack:check",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "bench": "vitest bench --run --reporter=./benchmarks/vitest-reporter.ts",
+    "bench": "pnpm bench:build && node .cache/benchmarks/cli.js",
+    "bench:build": "pnpm build && tsc -b benchmarks/tsconfig.build.json",
     "bench:full": "BENCH_GRID=full pnpm bench",
-    "bench:adapters:build": "pnpm build && tsc -b benchmarks/tsconfig.build.json",
-    "bench:adapters": "pnpm bench:adapters:build && node .cache/benchmarks/adapters-cli.js",
-    "bench:help": "vitest bench --help"
+    "bench:adapters": "pnpm bench adapters",
+    "bench:help": "pnpm bench --help"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",

@@ -1,7 +1,8 @@
 # Benchmarks
 
-Run real queue and SQLite workloads through Vitest Bench. Performance suites are
-not run by `pnpm test` or CI; their correctness and reporting tests are.
+Run real queue and SQLite workloads through a standalone CLI and shared harness.
+Performance suites are not run by `pnpm test` or CI; their correctness and
+reporting tests are. Vitest is used only for those tests.
 
 | Suite            | Question                                                              |
 | ---------------- | --------------------------------------------------------------------- |
@@ -15,10 +16,18 @@ not run by `pnpm test` or CI; their correctness and reporting tests are.
 ```sh
 pnpm bench                              # quick grids
 pnpm bench:full                         # full grids
-pnpm bench benchmarks/groups.bench.ts   # one suite
-BENCH_ONLY=blocked-future pnpm bench benchmarks/groups.bench.ts
+pnpm bench groups                      # one suite
+pnpm bench groups contention           # selected suites, sequentially
+pnpm bench --help
+BENCH_ONLY=blocked-future pnpm bench groups
 BENCH_JSON=.cache/benchmarks/bench.json pnpm bench
 ```
+
+`pnpm bench` builds packages, suites, and worker entrypoints before starting
+measurements. To repeat runs without rebuilding, use
+`node .cache/benchmarks/cli.js groups`. Suites run sequentially; a failed suite
+stops the CLI with a nonzero exit code. Unknown suites, empty scenario selections,
+and zero measured repeats are errors.
 
 Each suite prints one summary table. JSON is optional and contains environment,
 metrics, and per-run samples; the example creates
@@ -27,20 +36,22 @@ are created automatically. Keep generated artifacts outside tracked source paths
 
 ## Adapter comparisons
 
-On Node.js, compare `better-sqlite3` and `node:sqlite` through Vitest or the standalone CLI:
+On Node.js, compare `better-sqlite3` and `node:sqlite`:
 
 ```sh
-pnpm bench benchmarks/adapters.bench.ts
+pnpm bench adapters
 pnpm bench:adapters
 ```
 
-The CLI reuses the shared scenarios, collector, statistics, and reporting; it does not require Vitest in the target runtime. Build once, then run sequentially on the same idle host:
+All suites share the same collector and reporting. Suites are loaded only when
+selected, so adapter comparisons do not load Node-only worker workloads under
+Bun or Deno. Build once, then run sequentially on the same idle host:
 
 ```sh
-pnpm bench:adapters:build
-BENCH_ADAPTERS=node:sqlite BENCH_JSON=.cache/benchmarks/compare.json node .cache/benchmarks/adapters-cli.js
-BENCH_JSON=.cache/benchmarks/compare.json bun .cache/benchmarks/adapters-cli.js
-BENCH_JSON=.cache/benchmarks/compare.json deno run --allow-read --allow-write --allow-env --allow-sys .cache/benchmarks/adapters-cli.js
+pnpm bench:build
+BENCH_ADAPTERS=node:sqlite BENCH_JSON=.cache/benchmarks/compare.json node .cache/benchmarks/cli.js adapters
+BENCH_JSON=.cache/benchmarks/compare.json bun .cache/benchmarks/cli.js adapters
+BENCH_JSON=.cache/benchmarks/compare.json deno run --allow-read --allow-write --allow-env --allow-sys .cache/benchmarks/cli.js adapters
 ```
 
 The CLI loads built package entry points explicitly, including under Bun. Bun and Deno default to `node:sqlite` only; comparing the native `better-sqlite3` addon is limited to Node.js. CLI artifacts have runtime suffixes, for example `compare.adapters.bun.json`, and include actual runtime and SQLite versions, per-run counts/durations, and raw call timings. `BENCH_ADAPTERS=better-sqlite3,node:sqlite` selects Node.js drivers explicitly. Filter workloads with `BENCH_ONLY=wal/claim` or `BENCH_ONLY=lifecycle`.
@@ -80,7 +91,7 @@ revisit the [512-job chunk decision](reports/grouped-claim-chunk-size.md):
 
 ```sh
 BENCH_CLAIM_QUEUES=128,256 BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
-  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench benchmarks/claim-grouping.bench.ts
+  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench claim-grouping
 ```
 
 The groups suite preserves distinct scheduling and stress workloads. `ready`

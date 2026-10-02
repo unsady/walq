@@ -19,7 +19,6 @@ import {
   distribute,
   guard,
   median,
-  numeric,
   spread,
   summarizePerRunMicros,
   type BenchmarkResult,
@@ -399,7 +398,7 @@ function startCompetitor(
   const controlBuffer = new SharedArrayBuffer(12)
   const control = new Int32Array(controlBuffer)
   const input: ClaimCompetitorInput = { path, control: controlBuffer, synchronous }
-  const worker = new Worker(new URL('./fixtures/claim-competitor-worker.ts', import.meta.url), {
+  const worker = new Worker(new URL('./fixtures/claim-competitor-worker.js', import.meta.url), {
     workerData: input,
   })
   const ready = deferred<void>()
@@ -657,7 +656,5 @@ export function defineClaimGroupingScenario(
     jobs,
     run: () => executeRun(scenario, jobs, synchronous),
     summarize: (collected) => summarizeRuns(scenario, jobs, collected),
-    throughput: (result) => numeric(result.metrics['jobs/sec']),
-    latency: (result) => result.samples.map((sample) => numeric(sample['elapsed (ms)'])),
   })
 }

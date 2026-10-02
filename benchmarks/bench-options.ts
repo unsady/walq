@@ -3,7 +3,7 @@ export type GridName = 'quick' | 'full'
 /** SQLite `PRAGMA synchronous` durability mode used by every benchmark connection. */
 export type SynchronousMode = 'normal' | 'full'
 
-/** Settings shared by the benchmark files and the custom provider. */
+/** Settings shared by the CLI, suites, and runner. */
 export interface BenchEnvironment {
   grid: GridName
   repeats: number
