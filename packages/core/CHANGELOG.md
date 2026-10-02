@@ -1,5 +1,9 @@
 # @walq/core
 
+## 1.1.0
+
+Version alignment with the SQLite adapter release; no core API changes.
+
 ## 1.0.0
 
 ### Major Changes

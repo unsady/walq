@@ -32,25 +32,22 @@ jobs:
           node --input-type=module -e "
             import core from './packages/core/package.json' with { type: 'json' };
             import adapter from './packages/better-sqlite3/package.json' with { type: 'json' };
+            import common from './packages/sqlite-common/package.json' with { type: 'json' };
+            import sqlite from './packages/sqlite/package.json' with { type: 'json' };
             const tag = process.env.GITHUB_REF_NAME;
-            if (core.version !== adapter.version || tag !== 'v' + core.version) {
+            if ([core, common, adapter, sqlite].some((pkg) => tag !== 'v' + pkg.version)) {
               throw new Error('Tag and package versions must match');
             }
           "
-      - name: Stage core
+      - name: Stage packages in dependency order
         run: |
-          VERSION=$(node -p "require('./packages/core/package.json').version")
-          if ! npm view "@walq/core@$VERSION" version >/dev/null 2>&1; then
-            pnpm --filter @walq/core pack --pack-destination "$RUNNER_TEMP"
-            npm stage publish "$RUNNER_TEMP/walq-core-$VERSION.tgz" --access public --provenance
-          fi
-      - name: Stage better-sqlite3 adapter
-        run: |
-          VERSION=$(node -p "require('./packages/better-sqlite3/package.json').version")
-          if ! npm view "@walq/better-sqlite3@$VERSION" version >/dev/null 2>&1; then
-            pnpm --filter @walq/better-sqlite3 pack --pack-destination "$RUNNER_TEMP"
-            npm stage publish "$RUNNER_TEMP/walq-better-sqlite3-$VERSION.tgz" --access public --provenance
-          fi
+          for PACKAGE in core sqlite-common better-sqlite3 sqlite; do
+            VERSION=$(node -p "require('./packages/$PACKAGE/package.json').version")
+            if ! npm view "@walq/$PACKAGE@$VERSION" version >/dev/null 2>&1; then
+              pnpm --filter "@walq/$PACKAGE" pack --pack-destination "$RUNNER_TEMP"
+              npm stage publish "$RUNNER_TEMP/walq-$PACKAGE-$VERSION.tgz" --access public --provenance
+            fi
+          done
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
