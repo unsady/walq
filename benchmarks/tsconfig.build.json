@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "../.cache/benchmarks",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "references": [
+    { "path": "../packages/core/tsconfig.build.json" },
+    { "path": "../packages/sqlite/tsconfig.build.json" },
+    { "path": "../packages/better-sqlite3/tsconfig.build.json" }
+  ],
+  "include": ["adapters-cli.ts"]
+}

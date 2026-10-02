@@ -1,15 +1,14 @@
 {
-  "name": "@walq/better-sqlite3",
+  "name": "@walq/sqlite",
   "version": "1.0.0",
-  "description": "better-sqlite3 storage adapter for walq.",
+  "description": "Built-in node:sqlite storage adapter for Node.js, Bun, and Deno.",
   "keywords": [
-    "better-sqlite3",
     "job-queue",
     "queue",
     "sqlite",
     "walq"
   ],
-  "homepage": "https://github.com/unsady/walq/tree/main/packages/better-sqlite3#readme",
+  "homepage": "https://github.com/unsady/walq/tree/main/packages/sqlite#readme",
   "bugs": {
     "url": "https://github.com/unsady/walq/issues"
   },
@@ -17,7 +16,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/unsady/walq.git",
-    "directory": "packages/better-sqlite3"
+    "directory": "packages/sqlite"
   },
   "files": [
     "dist",
@@ -40,20 +39,17 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@types/better-sqlite3": "^9.6.0",
     "@walq/sqlite-common": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.20.3",
     "@walq/core": "workspace:*",
-    "better-sqlite3": "^13.0.3",
     "typescript": "^7.0.2"
   },
   "peerDependencies": {
-    "@walq/core": "^1.0.0",
-    "better-sqlite3": "^13.0.3"
+    "@walq/core": "^1.0.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.16.0"
   }
 }

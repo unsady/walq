@@ -9,13 +9,10 @@
     "outDir": "dist",
     "rootDir": "src",
     "sourceMap": true,
-    "tsBuildInfoFile": "../../.cache/better-sqlite3.tsbuildinfo",
+    "tsBuildInfoFile": "../../.cache/sqlite-common.tsbuildinfo",
     "types": ["node"]
   },
-  "references": [
-    { "path": "../core/tsconfig.build.json" },
-    { "path": "../sqlite-common/tsconfig.build.json" }
-  ],
+  "references": [{ "path": "../core/tsconfig.build.json" }],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/fixtures/**"]
 }

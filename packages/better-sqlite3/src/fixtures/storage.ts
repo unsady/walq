@@ -34,7 +34,12 @@ export function filename() {
   return join(directory, 'queue.sqlite')
 }
 
-export function revertGroupScheduling(db: Database.Database): void {
+interface SchemaConnection {
+  exec(sql: string): unknown
+  prepare(sql: string): { get(): unknown }
+}
+
+export function revertGroupScheduling(db: SchemaConnection): void {
   db.exec(`
     DROP TRIGGER walq_group_counts_insert;
     DROP TRIGGER walq_group_counts_delete;
@@ -52,7 +57,7 @@ export function revertGroupScheduling(db: Database.Database): void {
   `)
 }
 
-export function expectPartialDedupeIndex(db: Database.Database): void {
+export function expectPartialDedupeIndex(db: SchemaConnection): void {
   const index = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'walq_dedupe'")
     .get() as { sql: string } | undefined
@@ -61,7 +66,11 @@ export function expectPartialDedupeIndex(db: Database.Database): void {
 
 const raceTimeout = 4000
 
-export async function race(path: string, operations: { method: string; input: object }[]) {
+export async function race(
+  path: string,
+  operations: { method: string; input: object }[],
+  driver: 'better-sqlite3' | 'node:sqlite' = 'better-sqlite3',
+) {
   const gate = new SharedArrayBuffer(4)
   const workers: Worker[] = []
   const timers: NodeJS.Timeout[] = []
@@ -77,7 +86,7 @@ export async function race(path: string, operations: { method: string; input: ob
             }, raceTimeout)
             timers.push(timer)
             const worker = new Worker(new URL('./claim-worker.ts', import.meta.url), {
-              workerData: { path, gate, count: operations.length, ...operation },
+              workerData: { path, gate, driver, count: operations.length, ...operation },
             })
             workers.push(worker)
             worker.on(

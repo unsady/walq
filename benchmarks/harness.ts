@@ -28,7 +28,10 @@ export interface LatencySummary {
 }
 
 export interface Environment {
+  /** Node version, or the runtime's Node compatibility version. */
   node: string
+  runtime?: string
+  runtimeVersion?: string
   platform: string
   arch: string
   cpu: string
@@ -193,6 +196,8 @@ export function describeEnvironment(): Environment {
 
   return {
     node: process.version,
+    runtime: process.versions.bun ? 'bun' : process.versions.deno ? 'deno' : 'node',
+    runtimeVersion: process.versions.bun ?? process.versions.deno ?? process.versions.node,
     platform: process.platform,
     arch: process.arch,
     cpu,
@@ -372,6 +377,11 @@ interface DomainSummaryProfile {
 }
 
 const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
+  adapters: {
+    throughput: 'jobs/sec',
+    spread: 'spread (%)',
+    highlights: ['call p95 (µs)', 'call samples', 'measured runs', 'SQLite'],
+  },
   coordinator: {
     throughput: 'jobs/sec',
     spread: 'spread (%)',
@@ -457,6 +467,10 @@ export function renderDomainSummary(
     flattenCell(result.scenario),
     ...metricColumns.map((column) => flattenCell(formatValue(result.metrics[column] ?? ''))),
   ])
+  const runtime =
+    environment.runtime === undefined
+      ? environment.node
+      : `${environment.runtime} ${environment.runtimeVersion ?? environment.node}`
   const settingsLine = Object.entries(settings)
     .map(([key, value]) => `${key}=${flattenCell(formatValue(value))}`)
     .join(' ')
@@ -464,7 +478,7 @@ export function renderDomainSummary(
   return [
     `domain summary — ${flattenCell(title)}`,
     '',
-    `env  ${flattenCell(`${environment.node} ${environment.platform}/${environment.arch} · ${environment.cpu} · ${environment.cores} cores`)}`,
+    `env  ${flattenCell(`${runtime} ${environment.platform}/${environment.arch} · ${environment.cpu} · ${environment.cores} cores`)}`,
     settingsLine.length > 0 ? `opts ${settingsLine}` : 'opts',
     '',
     renderTerminalTable(

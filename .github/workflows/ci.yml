@@ -46,3 +46,33 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm clean && pnpm build
+
+  sqlite-runtime:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun, deno]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.runtime == 'bun'
+        with:
+          bun-version: 1.4.2
+      - uses: denoland/setup-deno@v2
+        if: matrix.runtime == 'deno'
+        with:
+          deno-version: 2.9.7
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: node tests/sqlite/runtime.mjs && node --experimental-strip-types --test tests/sqlite/*.test.mjs
+        if: matrix.runtime == 'node'
+      - run: bun tests/sqlite/runtime.mjs && bun test tests/sqlite/*.test.mjs
+        if: matrix.runtime == 'bun'
+      - run: deno run --allow-read --allow-write --allow-env tests/sqlite/runtime.mjs && deno test --no-check --allow-read --allow-write --allow-env --allow-run tests/sqlite/*.test.mjs
+        if: matrix.runtime == 'deno'

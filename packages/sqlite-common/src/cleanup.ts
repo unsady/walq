@@ -1,5 +1,6 @@
 import type { CleanupInput, CleanupResult, RetentionRule } from '@walq/core/storage'
-import type Database from 'better-sqlite3'
+
+import type { Connection, Statement, Transaction } from './driver.js'
 
 const terminalStatuses = ['completed', 'failed'] as const
 
@@ -17,12 +18,12 @@ interface StatusPlan {
   deleteEligible(limit: number): number
 }
 
-function prepare(db: Database.Database, sql: string): Database.Statement {
-  return db.prepare(sql).safeIntegers(false)
+function prepare(db: Connection, sql: string): Statement {
+  return db.prepare(sql)
 }
 
 /**
- * Bounded terminal-job retention for one better-sqlite3 connection.
+ * Bounded terminal-job retention for one SQLite connection.
  *
  * Every statement is an index lookup: locating the newest eligible row walks at
  * most the count bound plus one index entry, deletion is bounded by `limit`, and
@@ -32,13 +33,13 @@ function prepare(db: Database.Database, sql: string): Database.Statement {
  * Inputs must already be validated at the storage boundary.
  */
 export class TerminalCleanup {
-  readonly #selectFrontier: Database.Statement
-  readonly #selectAgeFrontier: Database.Statement
-  readonly #hasEligible: Database.Statement
-  readonly #deleteEligible: Database.Statement
-  readonly #transaction: Database.Transaction<(input: CleanupInput) => CleanupResult>
+  readonly #selectFrontier: Statement
+  readonly #selectAgeFrontier: Statement
+  readonly #hasEligible: Statement
+  readonly #deleteEligible: Statement
+  readonly #transaction: Transaction<[CleanupInput], CleanupResult>
 
-  constructor(db: Database.Database) {
+  constructor(db: Connection) {
     // A count bound contributes the row just older than the newest `count` rows;
     // an age bound contributes the newest row finished before the cutoff. The
     // newest of the two is the frontier of the union of both eligible tails.

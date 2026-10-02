@@ -1,5 +1,6 @@
+import { DatabaseSync } from 'node:sqlite'
+
 import type { Storage } from '@walq/core/storage'
-import Database from 'better-sqlite3'
 import { describe, it, beforeEach, afterEach, expect } from 'vitest'
 
 import {
@@ -7,19 +8,19 @@ import {
   runGroupedClaimConformance,
   runStorageConformance,
 } from '../../../tests/storage/conformance.js'
-import { betterSqlite3 } from './index.js'
+import { sqlite } from './index.js'
 
-const databases: Database.Database[] = []
+const databases: DatabaseSync[] = []
 
 function createStorage(): Storage {
-  const db = new Database(':memory:')
+  const db = new DatabaseSync(':memory:')
   databases.push(db)
-  return betterSqlite3(db)
+  return sqlite(db)
 }
 
 async function cleanup(): Promise<void> {
   for (const db of databases.splice(0)) {
-    if (db.open) db.close()
+    if (db.isOpen) db.close()
   }
 }
 

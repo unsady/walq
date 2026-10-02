@@ -6,7 +6,7 @@ SQLite `Storage` adapter for walq. ESM-only; requires Node.js 22+.
 pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
 ```
 
-`better-sqlite3` has a native addon and requires a supported prebuilt binary or native build tools.
+`better-sqlite3` has a native addon and requires a supported prebuilt binary or native build tools. For the runtime's built-in driver, use [`@walq/sqlite`](../sqlite/README.md); both adapters share the storage implementation and database format through [`@walq/sqlite-common`](../sqlite-common/README.md), without depending on each other.
 
 ```ts
 import Database from 'better-sqlite3'

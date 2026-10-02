@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3'
+import type { Connection } from './driver.js'
 
 // Version 11 was used by an unpublished ready-flag experiment; do not reuse it.
 const schemaVersion = 12
@@ -52,7 +52,7 @@ const indexes = `
   CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
 `
 
-function migrateV2(db: Database.Database): void {
+function migrateV2(db: Connection): void {
   db.exec(`
     ${jobsTable('walq_jobs_v5', false)}
     INSERT INTO walq_jobs_v5 (
@@ -70,7 +70,7 @@ function migrateV2(db: Database.Database): void {
   `)
 }
 
-function migrateV3(db: Database.Database): void {
+function migrateV3(db: Connection): void {
   db.exec(`
     ALTER TABLE walq_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
       CHECK (priority >= ${-maxPriority} AND priority <= ${maxPriority});
@@ -83,7 +83,7 @@ function migrateV3(db: Database.Database): void {
   `)
 }
 
-function migrateV4(db: Database.Database): void {
+function migrateV4(db: Connection): void {
   db.exec(`
     ALTER TABLE walq_jobs ADD COLUMN dedupe TEXT;
     CREATE UNIQUE INDEX walq_dedupe ON walq_jobs (queue, dedupe) WHERE dedupe IS NOT NULL;
@@ -91,7 +91,7 @@ function migrateV4(db: Database.Database): void {
   `)
 }
 
-function migrateV5(db: Database.Database): void {
+function migrateV5(db: Connection): void {
   db.exec(`
     ${jobsTable('walq_jobs_v6')}
     INSERT INTO walq_jobs_v6 (
@@ -110,7 +110,7 @@ function migrateV5(db: Database.Database): void {
   `)
 }
 
-function migrateV6(db: Database.Database): void {
+function migrateV6(db: Connection): void {
   db.exec(`
     ALTER TABLE walq_jobs ADD COLUMN groupId TEXT;
     CREATE TABLE walq_groups (
@@ -123,7 +123,7 @@ function migrateV6(db: Database.Database): void {
   `)
 }
 
-function migrateV7(db: Database.Database): void {
+function migrateV7(db: Connection): void {
   db.exec(`
     CREATE INDEX walq_active_group ON walq_jobs (queue, groupId)
       WHERE status = 'active' AND groupId IS NOT NULL;
@@ -151,7 +151,7 @@ const schedulesTable = `
   CREATE INDEX walq_schedules_due ON walq_schedules (queue, nextRunAt, id);
 `
 
-function migrateV8(db: Database.Database): void {
+function migrateV8(db: Connection): void {
   db.exec(`
     ${schedulesTable}
     UPDATE walq_schema SET version = 9 WHERE id = 1 AND version = 8;
@@ -197,7 +197,7 @@ const groupScheduling = `
     END;
 `
 
-function migrateV10(db: Database.Database): void {
+function migrateV10(db: Connection): void {
   db.exec(`
     ALTER TABLE walq_groups ADD COLUMN pendingCount INTEGER NOT NULL DEFAULT 0
       CHECK (pendingCount >= 0);
@@ -217,14 +217,14 @@ function migrateV10(db: Database.Database): void {
   `)
 }
 
-function migrateV9(db: Database.Database): void {
+function migrateV9(db: Connection): void {
   db.exec(`
     ${pausedQueuesTable}
     UPDATE walq_schema SET version = 10 WHERE id = 1 AND version = 9;
   `)
 }
 
-export function initialize(db: Database.Database): void {
+export function initialize(db: Connection): void {
   if (db.inTransaction) throw new Error('Storage cannot initialize inside a transaction')
 
   db.transaction(() => {
@@ -237,7 +237,7 @@ export function initialize(db: Database.Database): void {
 
     const row = db
       .prepare('SELECT version FROM walq_schema WHERE id = 1')
-      .safeIntegers(false)
+
       .get() as { version: number } | undefined
 
     if (row) {

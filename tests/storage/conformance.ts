@@ -10,7 +10,33 @@ import type {
   RetentionRule,
   Storage,
 } from '@walq/core/storage'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+interface TestBody {
+  (): void | Promise<void>
+}
+
+interface Matchers {
+  toBe(expected: unknown): unknown
+  toEqual(expected: unknown): unknown
+  toMatchObject(expected: object): unknown
+  toHaveLength(expected: number): unknown
+  toBeDefined(): unknown
+  toBeNull(): unknown
+  toThrow(expected?: string | RegExp): unknown
+}
+
+interface Assertions extends Pick<typeof import('expect').expect, 'any'> {
+  (actual: unknown): Matchers & { not: Matchers; rejects: Matchers }
+}
+
+/** Runner hooks shared by Vitest and native runtimes. */
+export interface TestHooks {
+  expect: Assertions
+  describe: (name: string, body: () => void) => unknown
+  it: (name: string, body: TestBody) => unknown
+  beforeEach: (body: TestBody) => unknown
+  afterEach: (body: TestBody) => unknown
+}
 
 export type StorageFactory = () => Storage | Promise<Storage>
 export type StorageCleanup = () => void | Promise<void>
@@ -72,7 +98,10 @@ function mutate(
 export function runStorageConformance(
   createStorage: StorageFactory,
   cleanup: StorageCleanup,
+  hooks: TestHooks,
 ): void {
+  const { describe, it, beforeEach, afterEach, expect } = hooks
+
   describe('storage conformance', () => {
     let storage: Storage
 
@@ -692,9 +721,8 @@ export function runStorageConformance(
       expect(reclaimed).toMatchObject({ id: other!.id, attemptsMade: 2 })
     })
 
-    it.each(['complete', 'fail', 'heartbeat'] as const)(
-      '%s rejects missing, superseded, and exactly-expired leases without touching the live lease',
-      async (method) => {
+    for (const method of ['complete', 'fail', 'heartbeat'] as const) {
+      it(`${method} rejects missing, superseded, and exactly-expired leases without touching the live lease`, async () => {
         await storage.enqueue(enqueueInput({ attempts: 3 }))
         const [first] = await storage.claim(claimInput())
 
@@ -740,12 +768,11 @@ export function runStorageConformance(
         expect(third!.id).toBe(second!.id)
         expect(third!.leaseToken).not.toBe(second!.leaseToken)
         expect(await mutate(storage, method, second!, 31)).toBe('lease_lost')
-      },
-    )
+      })
+    }
 
-    it.each(['complete', 'fail', 'heartbeat'] as const)(
-      '%s reports lease_lost on completed and failed jobs',
-      async (method) => {
+    for (const method of ['complete', 'fail', 'heartbeat'] as const) {
+      it(`${method} reports lease_lost on completed and failed jobs`, async () => {
         await storage.enqueue(enqueueInput())
         const [completed] = await storage.claim(claimInput())
         expect(
@@ -772,8 +799,8 @@ export function runStorageConformance(
         expect(await mutate(storage, method, failed!, 12)).toBe('lease_lost')
         expect(await storage.claim(claimInput({ now: 100 }))).toEqual([])
         expect(await storage.claim(claimInput({ queue: otherQueue, now: 100 }))).toEqual([])
-      },
-    )
+      })
+    }
 
     it('recovers all expired leases per queue even when the limit yields nothing', async () => {
       for (let index = 0; index < 3; index += 1) {
@@ -1040,7 +1067,10 @@ export function runStorageConformance(
  */ export function runGroupedClaimConformance(
   createStorage: StorageFactory,
   cleanup: StorageCleanup,
+  hooks: TestHooks,
 ): void {
+  const { describe, it, beforeEach, afterEach, expect } = hooks
+
   describe('grouped claim conformance', () => {
     let storage: Storage
 
@@ -1205,7 +1235,10 @@ export function runStorageConformance(
 export function runCleanupConformance(
   createStorage: StorageFactory,
   cleanup: StorageCleanup,
+  hooks: TestHooks,
 ): void {
+  const { describe, it, beforeEach, afterEach, expect } = hooks
+
   describe('cleanup conformance', () => {
     let storage: Storage
     const cleanupNow = 1_000_000
