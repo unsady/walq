@@ -1,6 +1,6 @@
 {
   "name": "@walq/better-sqlite3",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "better-sqlite3 storage adapter for walq.",
   "keywords": [
     "better-sqlite3",

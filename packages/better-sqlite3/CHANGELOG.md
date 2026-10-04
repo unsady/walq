@@ -1,5 +1,14 @@
 # @walq/better-sqlite3
 
+## 1.2.1
+
+### Patch Changes
+
+- eab33ed: Improve README quick starts, adapter selection, caller-owned connection examples, and code examples for queue features.
+- Updated dependencies [eab33ed]
+  - @walq/core@1.2.1
+  - @walq/sqlite-common@1.2.1
+
 ## 1.2.0
 
 ### Minor Changes

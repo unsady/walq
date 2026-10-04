@@ -1,5 +1,11 @@
 # @walq/core
 
+## 1.2.1
+
+### Patch Changes
+
+- eab33ed: Improve README quick starts, adapter selection, caller-owned connection examples, and code examples for queue features.
+
 ## 1.2.0
 
 Version alignment with the managed SQLite storage release; no core API changes.
