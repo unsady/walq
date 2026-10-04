@@ -3,16 +3,25 @@
 Typed queue API for walq storage adapters. ESM-only; requires Node.js 22+.
 
 ```sh
-pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
+pnpm add @walq/core @walq/sqlite
 ```
 
 ```ts
-import { createStorage } from '@walq/better-sqlite3'
 import { Queue } from '@walq/core'
+import { createStorage } from '@walq/sqlite'
 
-const storage = await createStorage({ filename: 'queue.sqlite', worker: true })
-const queue = new Queue<{ name: string }>('greetings', { storage })
-const worker = queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
+const storage = await createStorage({
+  filename: './queue.sqlite',
+  worker: true,
+})
+
+const queue = new Queue<{ name: string }>('greetings', {
+  storage,
+})
+
+const worker = queue.process(async ({ name }) => {
+  console.log(`Hello, ${name}!`)
+})
 await queue.add({ name: 'Ada' })
 
 // On shutdown:
@@ -22,7 +31,34 @@ await storage.close()
 
 `worker` defaults to `false`. Set it to `true` to run SQLite in a dedicated thread; job handlers remain in the main thread. Worker mode is currently verified on Node.js only. See the [`@walq/better-sqlite3`](../better-sqlite3/README.md#managed-storage) and [`@walq/sqlite`](../sqlite/README.md#managed-storage) READMEs for connection settings and lifecycle details.
 
-Storage adapter authors import `Storage` from `@walq/core/storage`.
+## Storage adapters
+
+| Adapter                                               | Connection you can pass manually          | Managed connection       |
+| ----------------------------------------------------- | ----------------------------------------- | ------------------------ |
+| [`@walq/sqlite`](../sqlite/README.md)                 | `sqlite(db)` with `node:sqlite`           | `createStorage(options)` |
+| [`@walq/better-sqlite3`](../better-sqlite3/README.md) | `betterSqlite3(db)` with `better-sqlite3` | `createStorage(options)` |
+
+For a caller-owned connection:
+
+```ts
+import { DatabaseSync } from 'node:sqlite'
+
+import { sqlite } from '@walq/sqlite'
+
+const db = new DatabaseSync('./queue.sqlite')
+
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = FULL;
+  PRAGMA busy_timeout = 5000;
+`)
+
+const storage = sqlite(db)
+```
+
+Pass `storage` to `new Queue()` as above. Stop workers and await outstanding storage calls before closing `db` yourself. See the [feature examples](../../README.md#queue-features) for delays, deduplication, groups, batches, and schedules.
+
+Storage adapter authors import `Storage` from `@walq/core/storage`; see the [storage contract](../../docs/storage-contract.md).
 
 ## API
 
@@ -58,7 +94,11 @@ Configure optional handler-failure backoff:
 const queue = new Queue('email', {
   storage,
   attempts: 5,
-  backoff: { type: 'exponential', delay: 1_000, jitter: 0.2 },
+  backoff: {
+    type: 'exponential',
+    delay: 1_000,
+    jitter: 0.2,
+  },
 })
 ```
 
@@ -67,10 +107,16 @@ Backoff can be `fixed` or `exponential`; `delay` is nonnegative safe-integer mil
 ```ts
 const added = await queue.add({ name: 'Grace' })
 const failed = await queue.list({ status: 'failed', limit: 20 })
-if (failed[0]) await queue.retry(failed[0].id)
+
+if (failed[0]) {
+  await queue.retry(failed[0].id)
+}
 
 const job = await queue.get(added.id)
-if (job?.status === 'pending') await queue.reschedule(job.id, { delay: 60_000 })
+
+if (job?.status === 'pending') {
+  await queue.reschedule(job.id, { delay: 60_000 })
+}
 ```
 
 ## Retention and errors
@@ -80,7 +126,13 @@ Completed and failed jobs are cleaned asynchronously; cancelled jobs remain unti
 ```ts
 const emailQueue = new Queue('email', {
   storage,
-  retention: { completed: 10, failed: { count: 1_000, maxAge: 7 * 24 * 60 * 60 * 1_000 } },
+  retention: {
+    completed: 10,
+    failed: {
+      count: 1_000,
+      maxAge: 7 * 24 * 60 * 60 * 1_000,
+    },
+  },
 })
 ```
 
