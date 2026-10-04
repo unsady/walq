@@ -1,5 +1,9 @@
 # @walq/core
 
+## 1.2.0
+
+Version alignment with the managed SQLite storage release; no core API changes.
+
 ## 1.1.0
 
 Version alignment with the SQLite adapter release; no core API changes.

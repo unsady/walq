@@ -44,6 +44,30 @@ Deno needs filesystem permissions for a file-backed database. The runtime test u
 
 These baselines are tested in CI, not claims about the first release implementing SQLite. The adapter requires `DatabaseSync.isTransaction`, `StatementSync.setAllowBareNamedParameters`, `setAllowUnknownNamedParameters`, and `setReadBigInts`. Node.js 22.16.0 introduced `isTransaction`; older Node.js releases are unsupported. Some Node.js versions emit an experimental SQLite warning.
 
+## Managed storage
+
+`createStorage` opens and owns a connection. Set `worker: true` to run SQLite in a dedicated thread instead of blocking the main event loop (worker mode is currently verified on Node.js only).
+
+```ts
+import { createStorage } from '@walq/sqlite'
+
+const storage = await createStorage({
+  filename: './queue.sqlite',
+  worker: true, // Defaults to false.
+})
+
+const queue = new Queue('email', { storage })
+const processor = queue.process(async (data) => console.log(data))
+
+// On shutdown, stop queue processors before closing storage:
+await processor.close()
+await storage.close()
+```
+
+Both modes default to WAL, `synchronous = FULL`, and a 5000-millisecond busy timeout. Override these with `initialization`, a SQL string executed before schema initialization. For advanced driver-specific configuration, continue using an externally owned connection with `sqlite(db)`.
+
+`close()` is idempotent, rejects new calls, drains accepted calls (including failed calls), and closes the connection. Worker mode uses one thread per storage and processes calls sequentially. It defaults to at most 1024 outstanding calls; configure `maxPending` to change this limit. Calls beyond the limit reject rather than accumulating indefinitely. Worker failures reject outstanding calls; mutations are never automatically replayed because their commit outcome may be unknown. Threads isolate event-loop blocking, not SQLite write locks or delays to other storage operations.
+
 ## Connection and initialization
 
 The caller owns the connection. Stop workers and await outstanding storage calls before closing it. Initialize outside a caller-managed transaction; storage operations also reject while an external transaction is active.

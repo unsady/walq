@@ -1,7 +1,16 @@
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 
 import type { Storage } from '@walq/core/storage'
-import { createStorage, type Connection, type Transaction } from '@walq/sqlite-common'
+import {
+  createStorage as createSqliteStorage,
+  createWorkerStorage,
+  type Connection,
+  type Transaction,
+  defaultInitialization,
+  manageStorage,
+  type ManagedStorage,
+  type StorageOptions,
+} from '@walq/sqlite-common'
 
 /** The caller owns the connection and configures its durability and busy timeout. */
 export function sqlite(db: DatabaseSync): Storage {
@@ -38,7 +47,7 @@ export function sqlite(db: DatabaseSync): Storage {
     transaction: (callback) => immediateTransaction(db, callback),
   }
 
-  return createStorage(connection)
+  return createSqliteStorage(connection)
 }
 
 function immediateTransaction<Args extends unknown[], Result>(
@@ -61,5 +70,23 @@ function immediateTransaction<Args extends unknown[], Result>(
         throw error
       }
     },
+  }
+}
+
+export type { ManagedStorage, StorageOptions } from '@walq/sqlite-common'
+
+/** Open and own a connection, optionally in a dedicated worker thread. */
+export async function createStorage(options: StorageOptions): Promise<ManagedStorage> {
+  if (options.worker) return createWorkerStorage(new URL('./worker.js', import.meta.url), options)
+
+  const db = new DatabaseSync(options.filename)
+
+  try {
+    db.exec(options.initialization ?? defaultInitialization)
+
+    return manageStorage(sqlite(db), () => db.close())
+  } catch (error) {
+    db.close()
+    throw error
   }
 }

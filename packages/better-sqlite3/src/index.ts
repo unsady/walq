@@ -1,6 +1,14 @@
 import type { Storage } from '@walq/core/storage'
-import { createStorage, type Connection } from '@walq/sqlite-common'
-import type Database from 'better-sqlite3'
+import {
+  createStorage as createSqliteStorage,
+  createWorkerStorage,
+  type Connection,
+  defaultInitialization,
+  manageStorage,
+  type ManagedStorage,
+  type StorageOptions,
+} from '@walq/sqlite-common'
+import Database from 'better-sqlite3'
 
 /** The caller owns the connection and configures its durability and busy timeout. */
 export function betterSqlite3(db: Database.Database): Storage {
@@ -13,5 +21,23 @@ export function betterSqlite3(db: Database.Database): Storage {
     transaction: (callback) => db.transaction(callback),
   }
 
-  return createStorage(connection)
+  return createSqliteStorage(connection)
+}
+
+export type { ManagedStorage, StorageOptions } from '@walq/sqlite-common'
+
+/** Open and own a connection, optionally in a dedicated worker thread. */
+export async function createStorage(options: StorageOptions): Promise<ManagedStorage> {
+  if (options.worker) return createWorkerStorage(new URL('./worker.js', import.meta.url), options)
+
+  const db = new Database(options.filename)
+
+  try {
+    db.exec(options.initialization ?? defaultInitialization)
+
+    return manageStorage(betterSqlite3(db), () => db.close())
+  } catch (error) {
+    db.close()
+    throw error
+  }
 }
