@@ -7,17 +7,20 @@ pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
 ```
 
 ```ts
-import Database from 'better-sqlite3'
-import { betterSqlite3 } from '@walq/better-sqlite3'
+import { createStorage } from '@walq/better-sqlite3'
 import { Queue } from '@walq/core'
 
-const db = new Database('queue.sqlite')
-const queue = new Queue<{ name: string }>('greetings', {
-  storage: betterSqlite3(db),
-})
-queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
+const storage = await createStorage({ filename: 'queue.sqlite', worker: true })
+const queue = new Queue<{ name: string }>('greetings', { storage })
+const worker = queue.process(async ({ name }) => console.log(`Hello, ${name}!`))
 await queue.add({ name: 'Ada' })
+
+// On shutdown:
+await worker.close()
+await storage.close()
 ```
+
+`worker` defaults to `false`. Set it to `true` to run SQLite in a dedicated thread; job handlers remain in the main thread. Worker mode is currently verified on Node.js only. See the [`@walq/better-sqlite3`](../better-sqlite3/README.md#managed-storage) and [`@walq/sqlite`](../sqlite/README.md#managed-storage) READMEs for connection settings and lifecycle details.
 
 Storage adapter authors import `Storage` from `@walq/core/storage`.
 
