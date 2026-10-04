@@ -8,20 +8,33 @@ pnpm add @walq/core @walq/better-sqlite3 better-sqlite3
 
 `better-sqlite3` has a native addon and requires a supported prebuilt binary or native build tools. For the runtime's built-in driver, use [`@walq/sqlite`](../sqlite/README.md); both adapters share the storage implementation and database format through [`@walq/sqlite-common`](../sqlite-common/README.md), without depending on each other.
 
+## Bring your own connection
+
 ```ts
 import Database from 'better-sqlite3'
 import { betterSqlite3 } from '@walq/better-sqlite3'
 import { Queue } from '@walq/core'
 
-const db = new Database('./queue.sqlite', { timeout: 5_000 })
+const db = new Database('./queue.sqlite', {
+  timeout: 5_000,
+})
+
 db.pragma('journal_mode = WAL')
 db.pragma('synchronous = FULL')
 
+const storage = betterSqlite3(db)
 const queue = new Queue<{ to: string }>('email', {
-  storage: betterSqlite3(db),
+  storage,
 })
-queue.process(async ({ to }) => console.log(`Email ${to}`))
+
+const worker = queue.process(async ({ to }) => {
+  console.log(`Email ${to}`)
+})
 await queue.add({ to: 'user@example.com' })
+
+// On shutdown:
+await worker.close()
+db.close()
 ```
 
 ## Managed storage
@@ -36,8 +49,13 @@ const storage = await createStorage({
   worker: true, // Defaults to false.
 })
 
-const queue = new Queue('email', { storage })
-const processor = queue.process(async (data) => console.log(data))
+const queue = new Queue('email', {
+  storage,
+})
+
+const processor = queue.process(async (data) => {
+  console.log(data)
+})
 
 // On shutdown, stop queue processors before closing storage:
 await processor.close()

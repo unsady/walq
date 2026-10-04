@@ -10,7 +10,7 @@ pnpm add @walq/core @walq/sqlite
 
 For Bun, use `bun add @walq/core @walq/sqlite`. For Deno, use `deno add npm:@walq/core npm:@walq/sqlite`.
 
-## Usage
+## Bring your own connection
 
 ```ts
 import { DatabaseSync } from 'node:sqlite'
@@ -19,12 +19,21 @@ import { Queue } from '@walq/core'
 import { sqlite } from '@walq/sqlite'
 
 const db = new DatabaseSync('./queue.sqlite')
-db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000')
 
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = FULL;
+  PRAGMA busy_timeout = 5000;
+`)
+
+const storage = sqlite(db)
 const queue = new Queue<{ to: string }>('email', {
-  storage: sqlite(db),
+  storage,
 })
-const worker = queue.process(async ({ to }) => console.log(`Email ${to}`))
+
+const worker = queue.process(async ({ to }) => {
+  console.log(`Email ${to}`)
+})
 await queue.add({ to: 'user@example.com' })
 
 // On shutdown:
@@ -56,8 +65,13 @@ const storage = await createStorage({
   worker: true, // Defaults to false.
 })
 
-const queue = new Queue('email', { storage })
-const processor = queue.process(async (data) => console.log(data))
+const queue = new Queue('email', {
+  storage,
+})
+
+const processor = queue.process(async (data) => {
+  console.log(data)
+})
 
 // On shutdown, stop queue processors before closing storage:
 await processor.close()
