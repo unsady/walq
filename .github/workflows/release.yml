@@ -2,21 +2,54 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: npm-release
+  group: release-main
   cancel-in-progress: false
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      hasChangesets: ${{ steps.changesets.outputs.hasChangesets }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Create or update Version Packages PR
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm version-packages
+          title: Version Packages
+          commit: Version Packages
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
   publish:
+    needs: version
+    if: needs.version.outputs.hasChangesets == 'false'
     environment: npm
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,29 +59,33 @@ jobs:
           cache: pnpm
       - run: npm install --global npm@latest
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
-      - name: Verify release tag
-        run: |
-          node --input-type=module -e "
-            import core from './packages/core/package.json' with { type: 'json' };
-            import adapter from './packages/better-sqlite3/package.json' with { type: 'json' };
-            import common from './packages/sqlite-common/package.json' with { type: 'json' };
-            import sqlite from './packages/sqlite/package.json' with { type: 'json' };
-            const tag = process.env.GITHUB_REF_NAME;
-            if ([core, common, adapter, sqlite].some((pkg) => tag !== 'v' + pkg.version)) {
-              throw new Error('Tag and package versions must match');
-            }
-          "
-      - name: Stage packages in dependency order
-        run: |
-          for PACKAGE in core sqlite-common better-sqlite3 sqlite; do
-            VERSION=$(node -p "require('./packages/$PACKAGE/package.json').version")
-            if ! npm view "@walq/$PACKAGE@$VERSION" version >/dev/null 2>&1; then
-              pnpm --filter "@walq/$PACKAGE" pack --pack-destination "$RUNNER_TEMP"
-              npm stage publish "$RUNNER_TEMP/walq-$PACKAGE-$VERSION.tgz" --access public --provenance
-            fi
-          done
-      - name: Create GitHub release
+      - name: Publish packages
+        uses: changesets/action@v1
+        with:
+          publish: pnpm changeset publish
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Create combined GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --notes-file "release-notes/$GITHUB_REF_NAME.md"
+        run: |
+          VERSION=$(jq -r .version packages/core/package.json)
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          node --input-type=module > "$NOTES" <<'NODE'
+          import { readFile } from 'node:fs/promises';
+
+          const { version } = JSON.parse(await readFile('packages/core/package.json', 'utf8'));
+
+          for (const directory of ['core', 'sqlite-common', 'better-sqlite3', 'sqlite']) {
+            const { name } = JSON.parse(await readFile(`packages/${directory}/package.json`, 'utf8'));
+            const changelog = await readFile(`packages/${directory}/CHANGELOG.md`, 'utf8');
+            const sections = changelog.split(/^## /m).slice(1);
+            const section = sections.find((entry) => entry.split('\n', 1)[0].trim() === version);
+            const notes = section?.slice(section.indexOf('\n')).trim() || 'Version alignment; no package-specific changes.';
+
+            console.log(`## ${name}\n\n${notes}\n`);
+          }
+          NODE
+          gh release view "v$VERSION" >/dev/null 2>&1 || \
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --notes-file "$NOTES"

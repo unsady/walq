@@ -70,7 +70,7 @@ Both modes default to WAL, `synchronous = FULL`, and a 5000-millisecond busy tim
 
 The caller owns the connection. Stop workers and await outstanding storage calls before closing it. For durable file-backed use, configure WAL, `synchronous = FULL`, and a suitable busy timeout. WAL requires a local filesystem with SQLite-compatible locking; durability depends on the filesystem and hardware honoring sync requests. SQLite allows one writer at a time.
 
-Initialization requires a writable connection outside a caller-managed transaction and creates internal `walq_` tables. Schema v12 automatically migrates versions 2–10; v11 is unsupported. See the [1.0.0 migration notes](../../release-notes/v1.0.0.md#sqlite-migration) for backup guidance, historical ordering, and obsolete-index removal.
+Initialization requires a writable connection outside a caller-managed transaction and creates internal `walq_` tables. Schema v12 automatically migrates versions 2–10; v11 is unsupported. See the [1.0.0 migration notes](https://github.com/unsady/walq/releases/tag/v1.0.0) for backup guidance, historical ordering, and obsolete-index removal.
 
 ## Claims and transactions
 

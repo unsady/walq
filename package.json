@@ -16,7 +16,7 @@
     "pack:check": "node scripts/check-packages.mjs",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:sqlite && tsc -b benchmarks/tsconfig.build.json && pnpm pack:check",
     "changeset": "changeset",
-    "version-packages": "changeset version",
+    "version-packages": "changeset version && pnpm install --lockfile-only --no-frozen-lockfile",
     "bench": "pnpm bench:build && node .cache/benchmarks/cli.js",
     "bench:build": "pnpm build && tsc -b benchmarks/tsconfig.build.json",
     "bench:full": "BENCH_GRID=full pnpm bench",

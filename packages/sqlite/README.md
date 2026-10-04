@@ -88,7 +88,7 @@ The caller owns the connection. Stop workers and await outstanding storage calls
 
 For durable file-backed use, configure WAL, `synchronous = FULL`, and a suitable busy timeout before calling `sqlite(db)`. WAL requires a local filesystem with SQLite-compatible locking; durability depends on the filesystem and hardware honoring sync requests. SQLite allows one writer at a time.
 
-Both `@walq/sqlite` and [`@walq/better-sqlite3`](../better-sqlite3/README.md) use the same schema, migrations, and storage implementation through [`@walq/sqlite-common`](../sqlite-common/README.md). Neither adapter depends on the other. Existing databases can be reopened with either adapter; no format conversion is needed. Initialization creates internal `walq_` tables. Schema v12 automatically migrates versions 2–10; v11 is unsupported. Back up existing databases before migration; see the [migration notes](../../release-notes/v1.0.0.md#sqlite-migration).
+Both `@walq/sqlite` and [`@walq/better-sqlite3`](../better-sqlite3/README.md) use the same schema, migrations, and storage implementation through [`@walq/sqlite-common`](../sqlite-common/README.md). Neither adapter depends on the other. Existing databases can be reopened with either adapter; no format conversion is needed. Initialization creates internal `walq_` tables. Schema v12 automatically migrates versions 2–10; v11 is unsupported. Back up existing databases before migration; see the [migration notes](https://github.com/unsady/walq/releases/tag/v1.0.0).
 
 ## Transactions
 
