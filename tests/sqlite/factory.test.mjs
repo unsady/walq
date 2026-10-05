@@ -30,6 +30,69 @@ const input = {
   attempts: 1,
 }
 
+if (isNode) {
+  it('preserves causes and custom diagnostics through a real storage worker', async () => {
+    const module = new URL('../../packages/sqlite-common/dist/index.js', import.meta.url)
+    const { createWorkerStorage } = await import(module.href)
+    const source = `
+import { serveStorage } from ${JSON.stringify(module.href)}
+serveStorage({
+  count: async ({ queue }) => {
+    const cause = Object.assign(new TypeError('query failed'), {
+      code: 'ERR_SQLITE_ERROR', errcode: 1811, errstr: 'constraint failed',
+    })
+    const error = new Error('operation failed', { cause })
+    if (queue === 'primitive') error.cause = { reason: 'query failed' }
+    if (queue === 'circular') error.cause = error
+    if (queue === 'aggregate') throw new AggregateError([cause, error], 'operation failed', { cause })
+    if (queue === 'deep') {
+      for (let index = 0; index < 100; index++) error.cause = new Error('nested', { cause: error.cause })
+    }
+    throw error
+  },
+  close: async () => {},
+})
+`
+    const storage = await createWorkerStorage(
+      new URL(`data:text/javascript,${encodeURIComponent(source)}`),
+      { filename: ':memory:' },
+    )
+
+    try {
+      for (const queue of ['normal', 'primitive', 'circular', 'deep', 'aggregate']) {
+        await assert.rejects(storage.count({ queue }), (error) => {
+          assert.equal(error.message, 'operation failed')
+          assert.match(error.stack, /Error: operation failed/)
+          if (queue === 'normal') {
+            assert.ok(error.cause instanceof TypeError)
+            assert.equal(error.cause.message, 'query failed')
+            assert.match(error.cause.stack, /TypeError: query failed/)
+            assert.equal(error.cause.code, 'ERR_SQLITE_ERROR')
+            assert.equal(error.cause.errcode, 1811)
+            assert.equal(error.cause.errstr, 'constraint failed')
+          } else if (queue === 'aggregate') {
+            assert.ok(error instanceof AggregateError)
+            assert.equal(error.errors.length, 2)
+            assert.ok(error.errors[0] instanceof TypeError)
+            assert.equal(error.errors[0].message, 'query failed')
+            assert.equal(error.errors[1].message, 'operation failed')
+            assert.equal(error.cause.errcode, 1811)
+          } else if (queue === 'primitive') {
+            assert.deepEqual(error.cause, { reason: 'query failed' })
+          } else {
+            let depth = 0
+            for (let current = error; current instanceof Error; current = current.cause) depth++
+            assert.ok(depth < 100)
+          }
+          return true
+        })
+      }
+    } finally {
+      await storage.close()
+    }
+  })
+}
+
 for (const [name, createStorage] of Object.entries(factories)) {
   for (const worker of isNode ? [false, true] : [false]) {
     describe(`${name} factory (worker=${worker})`, () => {
@@ -93,6 +156,80 @@ for (const [name, createStorage] of Object.entries(factories)) {
         )
         assert.equal(await storage.removeSchedule({ queue: 'test', id: 'repeat' }), true)
       })
+
+      if (isNode && !worker) {
+        for (const closeFails of [false, true]) {
+          it(`preserves initialization errors when close fails: ${closeFails}`, async (t) => {
+            const Database =
+              name === 'sqlite'
+                ? (await import('node:sqlite')).DatabaseSync
+                : (await import('better-sqlite3')).default
+            const original = new Error('initialization failed')
+            const cleanup = new Error('close failed')
+            t.mock.method(Database.prototype, 'exec', () => {
+              throw original
+            })
+            const close = closeFails
+              ? t.mock.method(Database.prototype, 'close', () => {
+                  throw cleanup
+                })
+              : t.mock.method(Database.prototype, 'close')
+
+            try {
+              await assert.rejects(createStorage({ filename: ':memory:' }), (error) => {
+                if (closeFails) {
+                  assert.ok(error instanceof AggregateError)
+                  assert.equal(error.cause, original)
+                  assert.equal(error.errors[0], original)
+                  assert.equal(error.errors[1], cleanup)
+                } else {
+                  assert.equal(error, original)
+                }
+                return true
+              })
+              assert.equal(close.mock.calls.length, 1)
+            } finally {
+              const db = close.mock.calls[0]?.this
+              t.mock.restoreAll()
+              if (db?.isOpen ?? db?.open) db.close()
+            }
+          })
+        }
+      }
+
+      if (isNode) {
+        it('preserves SQLite error diagnostics in both execution modes', async () => {
+          const directory = await mkdtemp(join(tmpdir(), 'walq-errors-'))
+          const filename = join(directory, 'queue.sqlite')
+          let storage
+
+          try {
+            storage = await createStorage({ filename })
+            await storage.close()
+            storage = await createStorage({
+              filename,
+              worker,
+              initialization:
+                "CREATE TRIGGER forced_failure BEFORE INSERT ON walq_jobs BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
+            })
+            await assert.rejects(storage.enqueue(input), (error) => {
+              assert.equal(
+                error.code,
+                name === 'sqlite' ? 'ERR_SQLITE_ERROR' : 'SQLITE_CONSTRAINT_TRIGGER',
+              )
+              if (name === 'sqlite') {
+                assert.equal(error.errcode, 1811)
+                assert.equal(error.errstr, 'constraint failed')
+              }
+              return true
+            })
+            assert.equal((await storage.count({ queue: input.queue })).pending, 0)
+          } finally {
+            await storage?.close()
+            await rm(directory, { recursive: true, force: true })
+          }
+        })
+      }
 
       if (worker) {
         it('keeps main-thread timers running while SQLite waits for a write lock', async () => {

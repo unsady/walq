@@ -9,6 +9,7 @@ export type {
   JobErrorContext,
   JobStatus,
   ListOptions,
+  ParseErrorContext,
   ProcessContext,
   ProcessManyJob,
   ProcessManyOptions,

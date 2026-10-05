@@ -82,6 +82,8 @@ Both modes default to WAL, `synchronous = FULL`, and a 5000-millisecond busy tim
 
 `close()` is idempotent, rejects new calls, drains accepted calls (including failed calls), and closes the connection. Worker mode uses one thread per storage and processes calls sequentially. It defaults to at most 1024 outstanding calls; configure `maxPending` to change this limit. Calls beyond the limit reject rather than accumulating indefinitely. Worker failures reject outstanding calls; mutations are never automatically replayed because their commit outcome may be unknown. Threads isolate event-loop blocking, not SQLite write locks or delays to other storage operations.
 
+Errors returned by worker storage calls preserve `cause` and driver diagnostics such as `code`, `errcode`, and `errstr`, when present. With `worker: false`, if initialization fails and closing the connection also fails, `createStorage()` rejects with an `AggregateError`: `errors` contains both failures and `cause` is the original error.
+
 ## Connection and initialization
 
 The caller owns the connection. Stop workers and await outstanding storage calls before closing it. Initialize outside a caller-managed transaction; storage operations also reject while an external transaction is active.
@@ -93,6 +95,8 @@ Both `@walq/sqlite` and [`@walq/better-sqlite3`](../better-sqlite3/README.md) us
 ## Transactions
 
 Storage methods return promises, but SQLite work blocks the event loop. Transactions use `BEGIN IMMEDIATE`; failed operations roll back. `enqueueMany` is atomic, including deduplication. `claimQueues` commits chunks with a 512-job budget and yields between them; a single oversized request cannot be split. Multi-chunk calls are not atomic.
+
+If an operation and its rollback both fail, the adapter rejects with an `AggregateError` containing both errors, with the original as `cause`.
 
 See the [storage contract](../../docs/storage-contract.md) for ordering, leases, groups, retention, pause, and schedule semantics.
 

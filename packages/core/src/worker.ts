@@ -1,3 +1,5 @@
+import { inspect } from 'node:util'
+
 import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/storage'
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
@@ -32,6 +34,7 @@ interface ActiveJob {
   data: unknown
   succeeded: boolean
   failure: unknown
+  operation: 'parse' | 'handler'
   leaseLost: boolean
   stopped: boolean
   heartbeatDelay: Delay | undefined
@@ -59,7 +62,17 @@ function retryAt(now: number, attemptsMade: number, backoff: RetryBackoff | unde
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.stack ?? error.message
+  if (error instanceof Error) {
+    const message = error.stack ?? error.message
+    if (!('cause' in error)) return message
+
+    try {
+      return inspect(error, { depth: 8, customInspect: false })
+    } catch {
+      return message
+    }
+  }
+
   try {
     return String(error)
   } catch {
@@ -91,10 +104,16 @@ function safeConsoleError(error: unknown, context: ProcessErrorContext): void {
   safeConsoleLog(describeContext(context), error, context)
 }
 
-function safeConsoleCallbackError(error: unknown, context: ProcessErrorContext): void {
+function safeConsoleCallbackError(
+  error: unknown,
+  context: ProcessErrorContext,
+  callbackError: unknown,
+): void {
   safeConsoleLog(
     `walq onError callback failed (${context.operation} in queue "${context.queue}")`,
     error,
+    context,
+    callbackError,
   )
 }
 
@@ -212,11 +231,15 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   #start(jobs: ClaimedJob[]): void {
     const task = this.#process(jobs)
     this.#active.add(task)
-    void task.finally(() => {
-      this.#active.delete(task)
-      this.#coordinator.wakeWorker(this)
-      this.#settle()
-    })
+    void task
+      .finally(() => {
+        this.#active.delete(task)
+        this.#coordinator.wakeWorker(this)
+        this.#settle()
+      })
+      .catch((error: unknown) => {
+        safeConsoleLog(`walq queue "${this.#queue}" processing failed unexpectedly`, error)
+      })
   }
 
   async #process(jobs: ClaimedJob[]): Promise<void> {
@@ -226,16 +249,22 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       data: undefined,
       succeeded: false,
       failure: undefined,
+      operation: 'parse',
       leaseLost: false,
       stopped: false,
       heartbeatDelay: undefined,
     }))
-    const heartbeatTasks = states.map((state) => this.#heartbeat(state))
+    const heartbeatTasks = states.map((state) =>
+      this.#heartbeat(state).catch((error: unknown) => {
+        safeConsoleLog(`walq queue "${this.#queue}" heartbeat failed unexpectedly`, error)
+      }),
+    )
     const validStates: ActiveJob[] = []
 
     for (const state of states) {
       try {
         state.data = JSON.parse(state.job.data) as Data
+        state.operation = 'handler'
         validStates.push(state)
       } catch (error) {
         state.failure = error
@@ -287,7 +316,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       if (!state.succeeded) {
         this.#report(state.failure, {
           queue: this.#queue,
-          operation: 'handler',
+          operation: state.operation,
           jobId: state.job.id,
           attempt: state.job.attemptsMade,
           attemptsExhausted: state.job.attemptsMade >= state.job.attempts,
@@ -371,10 +400,10 @@ export class QueueWorker<Data> implements CoordinatedWorker {
 
     try {
       void Promise.resolve(onError(error, context)).catch((callbackError: unknown) => {
-        safeConsoleCallbackError(callbackError, context)
+        safeConsoleCallbackError(error, context, callbackError)
       })
     } catch (callbackError) {
-      safeConsoleCallbackError(callbackError, context)
+      safeConsoleCallbackError(error, context, callbackError)
     }
   }
 
@@ -383,7 +412,9 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     if (!this.#cleanupEnabled || this.#closing) return
     this.#cleanupNeeded = true
     if (this.#cleanupTask !== undefined) return
-    this.#cleanupTask = this.#runCleanup()
+    this.#cleanupTask = this.#runCleanup().catch((error: unknown) => {
+      this.#report(error, { queue: this.#queue, operation: 'cleanup' })
+    })
   }
 
   async #runCleanup(): Promise<void> {

@@ -1,6 +1,7 @@
 import { parentPort, Worker } from 'node:worker_threads'
 
 import type { Storage } from '@walq/core/storage'
+import { deserializeError, serializeError, type ErrorObject } from 'serialize-error'
 
 import {
   storageFacade,
@@ -15,49 +16,15 @@ interface Request {
   input?: unknown
 }
 
-interface SerializedError {
-  name: string
-  message: string
-  stack?: string
-  code?: unknown
-}
-
 interface Response {
   id: number
   result?: unknown
-  error?: SerializedError
+  error?: ErrorObject
 }
 
 interface Pending {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
-}
-
-function serializeError(value: unknown): SerializedError {
-  const error = value instanceof Error ? value : new Error(String(value))
-
-  return {
-    name: error.name,
-    message: error.message,
-    ...(error.stack !== undefined && { stack: error.stack }),
-    ...('code' in error && { code: error.code }),
-  }
-}
-
-function deserializeError(value: SerializedError): Error {
-  const constructors: Record<string, ErrorConstructor> = {
-    Error,
-    TypeError,
-    RangeError,
-    SyntaxError,
-  }
-  const Constructor = Object.hasOwn(constructors, value.name) ? constructors[value.name]! : Error
-  const error = new Constructor(value.message)
-  error.name = value.name
-  if (value.stack !== undefined) error.stack = value.stack
-  if (value.code !== undefined) Object.assign(error, { code: value.code })
-
-  return error
 }
 
 export async function createWorkerStorage(
@@ -160,7 +127,10 @@ export function serveStorage(storage: ManagedStorage): void {
         const result = await operation.call(storage, message.input)
         port.postMessage({ id: message.id, result } satisfies Response)
       } catch (error) {
-        port.postMessage({ id: message.id, error: serializeError(error) } satisfies Response)
+        port.postMessage({
+          id: message.id,
+          error: serializeError(error, { maxDepth: 8, useToJSON: false }),
+        } satisfies Response)
       } finally {
         if (message.method === 'close') port.close()
       }

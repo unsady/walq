@@ -88,7 +88,7 @@ Group concurrency is a positive safe integer (default `1`), fixed per queue/grou
 
 Delivery is at least once; handlers must tolerate repetition. Every claim consumes an attempt, even if the handler never starts. Leases last 30 seconds and renew every 10 seconds. Losing a lease aborts that job's signal; handlers must stop cooperatively, including within batches. Expired leases recover on the next claim, not at expiry.
 
-Configure optional handler-failure backoff:
+Configure optional processing-failure backoff:
 
 ```ts
 const queue = new Queue('email', {
@@ -102,7 +102,7 @@ const queue = new Queue('email', {
 })
 ```
 
-Backoff can be `fixed` or `exponential`; `delay` is nonnegative safe-integer milliseconds and `jitter` is from 0 to 1 (default 0), reducing the base delay by a random fraction up to that value. It applies to handler failures only; lease-expiry retries are immediate. `attempts` includes the initial claim; exhausted attempts are recorded as failures without another retry.
+Backoff can be `fixed` or `exponential`; `delay` is nonnegative safe-integer milliseconds and `jitter` is from 0 to 1 (default 0), reducing the base delay by a random fraction up to that value. It applies to payload parsing and handler failures; lease-expiry retries are immediate. `attempts` includes the initial claim; exhausted attempts are recorded as failures without another retry.
 
 ```ts
 const added = await queue.add({ name: 'Grace' })
@@ -133,7 +133,14 @@ const emailQueue = new Queue('email', {
       maxAge: 7 * 24 * 60 * 60 * 1_000,
     },
   },
+  onError: (error, context) => {
+    console.error(context, error)
+  },
 })
 ```
 
-`onError(error, context)` receives `claim`, `cleanup`, `schedule`, `heartbeat`, `complete`, `fail`, or `handler` errors; without it errors go to `console.error`. `lease_lost` is a normal result, not an error. Errors thrown by `onError` are logged and do not affect queue processing.
+`onError(error, context)` receives `claim`, `cleanup`, `schedule`, `heartbeat`, `complete`, `fail`, `parse`, or `handler` errors; without it errors go to `console.error`. `parse` means a job's JSON payload could not be decoded before calling its handler; it includes the job ID, attempt, and `attemptsExhausted`, just like `handler`. `lease_lost` is a normal result, not an error. Errors thrown by `onError` are logged and do not affect queue processing.
+
+Log the error object, not just its message, to keep its stack, `cause`, and driver diagnostics available. `onError` handles background processing errors; direct calls such as `queue.add()` and `createStorage()` reject their promises, so handle them with `try/catch` around `await`.
+
+`job.error` stores diagnostic text, including the stack and a depth-bounded cause chain when present.

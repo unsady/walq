@@ -39,7 +39,8 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "cron-parser": "^5.10.1"
+    "cron-parser": "^5.10.1",
+    "serialize-error": "^13.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.20.3",
