@@ -148,6 +148,76 @@ describe('Queue worker lifecycle', () => {
   })
 
   it.each(['process', 'processMany'] as const)(
+    'persists cause diagnostics safely in %s without changing reported errors',
+    async (mode) => {
+      const nested = new Error('job failed', {
+        cause: new TypeError('nested failure', { cause: new Error('root failure') }),
+      })
+      Object.defineProperty(nested, Symbol.for('nodejs.util.inspect.custom'), {
+        value: () => {
+          throw new Error('custom formatter must not run')
+        },
+      })
+      const circular = new Error('circular failure')
+      circular.cause = circular
+      const withoutStack = new Error('no stack', { cause: 42 })
+      delete withoutStack.stack
+      const normal = new Error('normal failure')
+      const unreadable = new Error('unreadable cause')
+      Object.defineProperty(unreadable, 'cause', {
+        get: () => {
+          throw new Error('cause getter must not replace the original error')
+        },
+      })
+      let deep = new Error('deep root')
+      for (let index = 0; index < 100; index++) deep = new Error('deep wrapper', { cause: deep })
+      const cases = [
+        { error: nested, fragments: ['job failed', 'nested failure', 'root failure'] },
+        { error: circular, fragments: ['circular failure', '[Circular'] },
+        { error: withoutStack, fragments: ['no stack', '42'] },
+        { error: new Error('failed', { cause: 'string cause' }), fragments: ['string cause'] },
+        { error: deep, fragments: ['deep wrapper'] },
+        { error: normal, fragments: [normal.stack!] },
+        { error: unreadable, fragments: ['unreadable cause'] },
+        { error: 'plain failure', fragments: ['plain failure'] },
+        {
+          error: {
+            toString: () => {
+              throw new Error('unprintable')
+            },
+          },
+          fragments: ['Unknown handler error'],
+        },
+      ]
+
+      for (const { error, fragments } of cases) {
+        const storage = new TestStorage()
+        storage.jobs.push(claimedJob('1'))
+        const onError = vi.fn<ProcessErrorHandler>()
+        const queue = new Queue('email', { storage, onError })
+        async function failHandler(): Promise<void> {
+          throw error
+        }
+        const worker =
+          mode === 'process' ? queue.process(failHandler) : queue.processMany(failHandler)
+
+        try {
+          await vi.waitFor(() => expect(storage.failures).toHaveLength(1))
+          const saved = storage.failures[0]!.error
+          for (const fragment of fragments) expect(saved).toContain(fragment)
+          expect(saved).not.toContain('deep root')
+          expect(onError).toHaveBeenCalledExactlyOnceWith(
+            error,
+            expect.objectContaining({ operation: 'handler', jobId: '1' }),
+          )
+        } finally {
+          await worker.close()
+        }
+      }
+    },
+  )
+
+  it.each(['process', 'processMany'] as const)(
     'reports malformed payloads separately from handler errors in %s',
     async (mode) => {
       vi.spyOn(Date, 'now').mockReturnValue(now)

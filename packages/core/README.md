@@ -137,3 +137,5 @@ const emailQueue = new Queue('email', {
 ```
 
 `onError(error, context)` receives `claim`, `cleanup`, `schedule`, `heartbeat`, `complete`, `fail`, `parse`, or `handler` errors; without it errors go to `console.error`. `parse` means a job's JSON payload could not be decoded before calling its handler; it includes the job ID, attempt, and `attemptsExhausted`, just like `handler`. `lease_lost` is a normal result, not an error. Errors thrown by `onError` are logged and do not affect queue processing.
+
+`job.error` stores diagnostic text, including the stack and a depth-bounded cause chain when present.

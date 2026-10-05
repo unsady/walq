@@ -1,3 +1,5 @@
+import { inspect } from 'node:util'
+
 import type { ClaimedJob, CleanupResult, RetentionPolicy } from '@walq/core/storage'
 
 import type { CoordinatedWorker, StorageCoordinator } from './coordinator.js'
@@ -60,7 +62,17 @@ function retryAt(now: number, attemptsMade: number, backoff: RetryBackoff | unde
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.stack ?? error.message
+  if (error instanceof Error) {
+    const message = error.stack ?? error.message
+    if (!('cause' in error)) return message
+
+    try {
+      return inspect(error, { depth: 8, customInspect: false })
+    } catch {
+      return message
+    }
+  }
+
   try {
     return String(error)
   } catch {
