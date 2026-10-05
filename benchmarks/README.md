@@ -4,12 +4,13 @@ Run real queue and SQLite workloads through a standalone CLI and shared harness.
 Performance suites are not run by `pnpm test` or CI; their correctness and
 reporting tests are. Vitest is used only for those tests.
 
-| Suite               | Question                                                                       | Quick / full cases |
-| ------------------- | ------------------------------------------------------------------------------ | ------------------ |
-| `adapters`          | SQLite drivers on Node.js; built-in adapter across Node.js, Bun, Deno          | 6 / 6              |
-| `journal`           | WAL vs DELETE at FULL; WAL/NORMAL vs WAL/FULL; claim batch 1 vs 16             | 6 / 6              |
-| `claim-grouping`    | Production `claimQueues` throughput and responsiveness with a competing writer | 2 / 8              |
-| **Total (Node.js)** |                                                                                | **14 / 20**        |
+| Suite                       | Question                                                                       | Quick / full cases    |
+| --------------------------- | ------------------------------------------------------------------------------ | --------------------- |
+| `adapters`                  | SQLite drivers on Node.js; built-in adapter across Node.js, Bun, Deno          | 6 / 6                 |
+| `journal`                   | WAL vs DELETE at FULL; WAL/NORMAL vs WAL/FULL; claim batch 1 vs 16             | 6 / 6                 |
+| `claim-grouping`            | Production `claimQueues` throughput and responsiveness with a competing writer | 2 / 8                 |
+| `ablation` (opt-in)         | Stepwise journal, claim batching, grouping and 512-job budget comparison       | 20 process / 4 stress |
+| **Default total (Node.js)** |                                                                                | **14 / 20**           |
 
 Keep a benchmark only when it informs a decision or detects a performance
 regression. Scheduling correctness belongs in tests; completed experiments keep
@@ -69,6 +70,31 @@ Quick runs use 1024 jobs and full runs use 10,000 unless `BENCH_JOBS` is set. Ru
 `jobs/sec` is actual processed jobs divided by the sum of timed storage-call durations across measured runs; it is **not** end-to-end application throughput. Call p95 is the median of per-run p95 values; lifecycle latency mixes enqueue, claim, and completion calls. The report shows sample counts: short runs do not support reliable tail-latency claims. Increase jobs and repeats before drawing conclusions. Paired drivers are adjacent and execution order reverses between passes.
 
 Cross-runtime results compare the whole runtime/driver/SQLite combination, not just JavaScript engines. Different bundled SQLite versions or compile options can contribute to differences. These benchmarks use one connection and no concurrent producers; they do not establish contention or multi-process scaling results.
+
+## Article ablation (opt-in)
+
+Use the same collector and event-loop/competing-writer helpers for a stepwise
+comparison through real `Queue.process()` workers:
+
+```sh
+pnpm bench:build
+BENCH_REPEATS=7 BENCH_WARMUP=1 BENCH_JOBS=8192 BENCH_JSON=.cache/benchmarks/process.json node .cache/benchmarks/cli.js ablation
+BENCH_ABLATION_WORKLOAD=stress BENCH_REPEATS=7 BENCH_WARMUP=1 BENCH_JOBS=131072 BENCH_JSON=.cache/benchmarks/stress.json node .cache/benchmarks/cli.js ablation
+```
+
+The process grid has 32 queues, concurrency 1/16 per queue and five claim/journal
+stages, each at NORMAL/FULL. Stress has 256 queues, limit 16 and a production
+competing writer; it compares unbounded vs production-512 grouped transactions.
+`BENCH_ABLATION_WORKLOAD` selects `process` (default) or `stress`.
+`BENCH_ABLATION_HANDLER` selects `shared-turn` (default) or `independent-turn`;
+the latter diagnoses how staggered handler completions can defeat batching.
+The suite has explicit per-scenario durability; `BENCH_SYNCHRONOUS` does not
+replace those pairs. It is excluded from the CLI's default suite selection.
+
+Single-job claims at unchanged worker capacity and unbounded grouping use
+explicit benchmark-only seams; neither is an old-release reconstruction.
+Raw JSON includes every measured call, transaction and probe interval.
+See the [methodology, full tables, raw commands and publication caveats](reports/sqlite-ablation.md).
 
 ## Production claims
 

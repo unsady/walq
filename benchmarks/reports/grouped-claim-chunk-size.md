@@ -1,5 +1,8 @@
 # Why grouped claims use a 512-job chunk budget
 
+Historical prototype measurements. See the [production-path ablation](sqlite-ablation.md)
+for the current seven-repeat comparison and its transaction/API latency distinction.
+
 Measured on an Apple M1 Pro (8 cores, Node 24), with 128/256 queues, claim limit 16, 131072 jobs per run, 5 measured repeats and 1 warmup. A second connection wrote to the same WAL file in the competing scenarios. Results below are approximate: short-run tails are noisy.
 
 | Queues per transaction | Jobs per transaction | Transaction p95 at 256 queues | Competing writer p95 | Throughput vs one big transaction |
