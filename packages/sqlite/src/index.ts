@@ -65,7 +65,13 @@ function immediateTransaction<Args extends unknown[], Result>(
         return result
       } catch (error) {
         // SQLite can roll back automatically after an IO or resource error.
-        if (db.isTransaction) db.exec('ROLLBACK')
+        try {
+          if (db.isTransaction) db.exec('ROLLBACK')
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], 'Transaction and rollback failed', {
+            cause: error,
+          })
+        }
 
         throw error
       }
@@ -86,7 +92,14 @@ export async function createStorage(options: StorageOptions): Promise<ManagedSto
 
     return manageStorage(sqlite(db), () => db.close())
   } catch (error) {
-    db.close()
+    try {
+      db.close()
+    } catch (closeError) {
+      throw new AggregateError([error, closeError], 'Storage initialization and close failed', {
+        cause: error,
+      })
+    }
+
     throw error
   }
 }

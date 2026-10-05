@@ -44,6 +44,7 @@ serveStorage({
     const error = new Error('operation failed', { cause })
     if (queue === 'primitive') error.cause = { reason: 'query failed' }
     if (queue === 'circular') error.cause = error
+    if (queue === 'aggregate') throw new AggregateError([cause, error], 'operation failed', { cause })
     if (queue === 'deep') {
       for (let index = 0; index < 100; index++) error.cause = new Error('nested', { cause: error.cause })
     }
@@ -58,7 +59,7 @@ serveStorage({
     )
 
     try {
-      for (const queue of ['normal', 'primitive', 'circular', 'deep']) {
+      for (const queue of ['normal', 'primitive', 'circular', 'deep', 'aggregate']) {
         await assert.rejects(storage.count({ queue }), (error) => {
           assert.equal(error.message, 'operation failed')
           assert.match(error.stack, /Error: operation failed/)
@@ -69,6 +70,13 @@ serveStorage({
             assert.equal(error.cause.code, 'ERR_SQLITE_ERROR')
             assert.equal(error.cause.errcode, 1811)
             assert.equal(error.cause.errstr, 'constraint failed')
+          } else if (queue === 'aggregate') {
+            assert.ok(error instanceof AggregateError)
+            assert.equal(error.errors.length, 2)
+            assert.ok(error.errors[0] instanceof TypeError)
+            assert.equal(error.errors[0].message, 'query failed')
+            assert.equal(error.errors[1].message, 'operation failed')
+            assert.equal(error.cause.errcode, 1811)
           } else if (queue === 'primitive') {
             assert.deepEqual(error.cause, { reason: 'query failed' })
           } else {
@@ -148,6 +156,46 @@ for (const [name, createStorage] of Object.entries(factories)) {
         )
         assert.equal(await storage.removeSchedule({ queue: 'test', id: 'repeat' }), true)
       })
+
+      if (isNode && !worker) {
+        for (const closeFails of [false, true]) {
+          it(`preserves initialization errors when close fails: ${closeFails}`, async (t) => {
+            const Database =
+              name === 'sqlite'
+                ? (await import('node:sqlite')).DatabaseSync
+                : (await import('better-sqlite3')).default
+            const original = new Error('initialization failed')
+            const cleanup = new Error('close failed')
+            t.mock.method(Database.prototype, 'exec', () => {
+              throw original
+            })
+            const close = closeFails
+              ? t.mock.method(Database.prototype, 'close', () => {
+                  throw cleanup
+                })
+              : t.mock.method(Database.prototype, 'close')
+
+            try {
+              await assert.rejects(createStorage({ filename: ':memory:' }), (error) => {
+                if (closeFails) {
+                  assert.ok(error instanceof AggregateError)
+                  assert.equal(error.cause, original)
+                  assert.equal(error.errors[0], original)
+                  assert.equal(error.errors[1], cleanup)
+                } else {
+                  assert.equal(error, original)
+                }
+                return true
+              })
+              assert.equal(close.mock.calls.length, 1)
+            } finally {
+              const db = close.mock.calls[0]?.this
+              t.mock.restoreAll()
+              if (db?.isOpen ?? db?.open) db.close()
+            }
+          })
+        }
+      }
 
       if (isNode) {
         it('preserves SQLite error diagnostics in both execution modes', async () => {

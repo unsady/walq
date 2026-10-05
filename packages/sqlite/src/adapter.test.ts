@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { betterSqlite3 } from '@walq/better-sqlite3'
 import Database from 'better-sqlite3'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   filename,
@@ -54,6 +54,36 @@ describe('node:sqlite driver', () => {
       storage.enqueue({ ...input, group: { id: 'shared', concurrency: 2 } }),
     ).resolves.toMatchObject({ queue: input.queue })
   })
+
+  it.each([false, true])(
+    'preserves a commit failure when rollback fails: %s',
+    async (rollbackFails) => {
+      const { db, storage } = open()
+      const original = new Error('commit failed')
+      const cleanup = new Error('rollback failed')
+      const exec = db.exec.bind(db)
+      const spy = vi.spyOn(db, 'exec').mockImplementation((sql) => {
+        if (sql === 'COMMIT') throw original
+        if (sql === 'ROLLBACK' && rollbackFails) throw cleanup
+        return exec(sql)
+      })
+      const aggregate = expect.objectContaining({
+        name: 'AggregateError',
+        cause: original,
+        errors: [original, cleanup],
+      })
+
+      try {
+        const failure = await storage.enqueue(input).catch((error: unknown) => error)
+        expect(failure).toEqual(rollbackFails ? aggregate : original)
+        expect(failure instanceof AggregateError ? failure.cause : failure).toBe(original)
+        expect(db.isTransaction).toBe(rollbackFails)
+      } finally {
+        spy.mockRestore()
+        if (db.isTransaction) db.exec('ROLLBACK')
+      }
+    },
+  )
 
   it('rejects caller transactions without committing or rolling them back', async () => {
     const { db, storage } = open()

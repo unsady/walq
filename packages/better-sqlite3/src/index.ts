@@ -37,7 +37,14 @@ export async function createStorage(options: StorageOptions): Promise<ManagedSto
 
     return manageStorage(betterSqlite3(db), () => db.close())
   } catch (error) {
-    db.close()
+    try {
+      db.close()
+    } catch (closeError) {
+      throw new AggregateError([error, closeError], 'Storage initialization and close failed', {
+        cause: error,
+      })
+    }
+
     throw error
   }
 }
