@@ -230,6 +230,9 @@ describe('Queue durable schedules', () => {
     ]) {
       await expect(queue.schedule({ task: 'x' }, options as never)).rejects.toThrow(TypeError)
     }
+    await expect(queue.schedule({}, { id: 'bad', cron: '0 0 99 * *' })).rejects.toMatchObject({
+      cause: expect.any(Error),
+    })
     await expect(queue.schedule(undefined as never, { id: 'bad', every: 1 })).rejects.toThrow(
       TypeError,
     )

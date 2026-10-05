@@ -147,15 +147,16 @@ describe('StorageCoordinator', () => {
     coordinator.unregister(second)
   })
 
-  it('reports unexpected poll failures and continues polling other workers', async () => {
+  it.each(['throw', 'reject'])('handles poll %s and logger failures', async (mode) => {
     vi.useFakeTimers()
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const storage = new TestStorage()
     const coordinator = getCoordinator(storage)
     const failure = new Error('unexpected poll failure')
     const failing: CoordinatedWorker = {
-      poll: async () => {
-        throw failure
+      poll: () => {
+        if (mode === 'throw') throw failure
+        return Promise.reject(failure)
       },
     }
     const poll = vi.fn<CoordinatedWorker['poll']>(async () => 0)
@@ -169,6 +170,9 @@ describe('StorageCoordinator', () => {
       expect(log).toHaveBeenCalledWith(expect.stringContaining('failing'), failure)
       expect(poll).toHaveBeenCalledTimes(1)
 
+      log.mockImplementation(() => {
+        throw new Error('logger failed')
+      })
       await vi.advanceTimersByTimeAsync(1_000)
       expect(poll.mock.calls.length).toBeGreaterThan(1)
     } finally {

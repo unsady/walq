@@ -17,6 +17,14 @@ import { delay, type Delay } from './delay.js'
 
 const pollInterval = 1_000
 
+function logError(message: string, error: unknown): void {
+  try {
+    console.error(message, error)
+  } catch {
+    // Observability must never break polling.
+  }
+}
+
 /** A queue worker that the coordinator polls for new jobs. */
 export interface CoordinatedWorker {
   poll(): Promise<number>
@@ -60,8 +68,11 @@ export class StorageCoordinator {
     }
 
     this.#workers.set(worker, { queue, nextPollAt: 0 })
-    if (this.#loop === undefined) this.#loop = this.#run()
-    else this.#pollDelay?.finish()
+    if (this.#loop === undefined) {
+      this.#loop = this.#run().catch((error: unknown) => {
+        logError('walq polling failed unexpectedly', error)
+      })
+    } else this.#pollDelay?.finish()
   }
 
   unregister(worker: CoordinatedWorker): void {
@@ -174,11 +185,14 @@ export class StorageCoordinator {
   }
 
   async #run(): Promise<void> {
-    while (this.#workers.size > 0) {
-      await this.#sweep()
-      if (this.#workers.size > 0) await this.#waitForPoll()
+    try {
+      while (this.#workers.size > 0) {
+        await this.#sweep()
+        if (this.#workers.size > 0) await this.#waitForPoll()
+      }
+    } finally {
+      this.#loop = undefined
     }
-    this.#loop = undefined
   }
 
   /** Poll ready workers concurrently, rotating their start order for fairness. */
@@ -197,12 +211,14 @@ export class StorageCoordinator {
       // Set the backoff before polling so a wake during poll is not overwritten.
       state.nextPollAt = Date.now() + pollInterval
       polls.push(
-        worker.poll().then(
-          () => undefined,
-          (error: unknown) => {
-            console.error(`walq queue "${state.queue}" poll failed unexpectedly`, error)
-          },
-        ),
+        Promise.resolve()
+          .then(() => worker.poll())
+          .then(
+            () => undefined,
+            (error: unknown) => {
+              logError(`walq queue "${state.queue}" poll failed unexpectedly`, error)
+            },
+          ),
       )
     }
 

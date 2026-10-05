@@ -502,10 +502,46 @@ describe('Queue worker lifecycle', () => {
     expect(call?.[2]).toMatchObject({ operation: 'handler', jobId: '1', attempt: 1 })
   })
 
+  it.each(['processing', 'cleanup'])(
+    'handles unexpected %s rejections and settles close',
+    async (stage) => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {
+        throw new Error('logger failed')
+      })
+      const failure = new Error('unexpected failure')
+      const storage = new TestStorage()
+      if (stage === 'processing') {
+        const job = claimedJob('1')
+        Object.defineProperty(job, 'attemptsMade', {
+          get: () => {
+            throw failure
+          },
+        })
+        storage.jobs.push(job)
+      } else {
+        storage.cleanup = async () => ({
+          removed: 0,
+          get more(): boolean {
+            throw failure
+          },
+        })
+      }
+      const worker = new Queue('email', { storage }).process(async () => {})
+
+      try {
+        await vi.waitFor(() => expect(log).toHaveBeenCalled())
+        expect(log.mock.calls[0]?.[1]).toBe(failure)
+      } finally {
+        await worker.close()
+      }
+    },
+  )
+
   it('isolates thrown and rejected onError callbacks from queue execution', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const storage = new TestStorage()
-    storage.claimErrors.push(new Error('claim failed'))
+    const claimError = new Error('claim failed')
+    storage.claimErrors.push(claimError)
     let calls = 0
     const queue = new Queue('email', {
       storage,
@@ -532,6 +568,18 @@ describe('Queue worker lifecycle', () => {
     await worker.close()
     expect(storage.failures).toHaveLength(1)
     expect(storage.failures[0]!.id).toBe('2')
+    expect(log.mock.calls[0]).toEqual([
+      expect.any(String),
+      claimError,
+      { queue: 'email', operation: 'claim' },
+      expect.objectContaining({ message: 'sync callback failure' }),
+    ])
+    expect(log.mock.calls[1]).toEqual([
+      expect.any(String),
+      expect.objectContaining({ message: 'send failed' }),
+      expect.objectContaining({ jobId: '2', operation: 'handler' }),
+      expect.objectContaining({ message: 'async callback failure' }),
+    ])
   })
 
   it('reports grouped claim failures per queue and keeps polling', async () => {

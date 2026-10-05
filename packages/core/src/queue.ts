@@ -64,7 +64,7 @@ function normalizeScheduleRegistration(value: unknown): ScheduleOptions {
   try {
     CronExpressionParser.parse(value.cron, { tz: 'UTC' })
   } catch (error) {
-    throw new TypeError(`Invalid cron expression: ${String(error)}`)
+    throw new TypeError(`Invalid cron expression: ${String(error)}`, { cause: error })
   }
 
   return { id: value.id, cron: value.cron }

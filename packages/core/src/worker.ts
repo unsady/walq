@@ -91,10 +91,16 @@ function safeConsoleError(error: unknown, context: ProcessErrorContext): void {
   safeConsoleLog(describeContext(context), error, context)
 }
 
-function safeConsoleCallbackError(error: unknown, context: ProcessErrorContext): void {
+function safeConsoleCallbackError(
+  error: unknown,
+  context: ProcessErrorContext,
+  callbackError: unknown,
+): void {
   safeConsoleLog(
     `walq onError callback failed (${context.operation} in queue "${context.queue}")`,
     error,
+    context,
+    callbackError,
   )
 }
 
@@ -212,11 +218,15 @@ export class QueueWorker<Data> implements CoordinatedWorker {
   #start(jobs: ClaimedJob[]): void {
     const task = this.#process(jobs)
     this.#active.add(task)
-    void task.finally(() => {
-      this.#active.delete(task)
-      this.#coordinator.wakeWorker(this)
-      this.#settle()
-    })
+    void task
+      .finally(() => {
+        this.#active.delete(task)
+        this.#coordinator.wakeWorker(this)
+        this.#settle()
+      })
+      .catch((error: unknown) => {
+        safeConsoleLog(`walq queue "${this.#queue}" processing failed unexpectedly`, error)
+      })
   }
 
   async #process(jobs: ClaimedJob[]): Promise<void> {
@@ -230,7 +240,11 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       stopped: false,
       heartbeatDelay: undefined,
     }))
-    const heartbeatTasks = states.map((state) => this.#heartbeat(state))
+    const heartbeatTasks = states.map((state) =>
+      this.#heartbeat(state).catch((error: unknown) => {
+        safeConsoleLog(`walq queue "${this.#queue}" heartbeat failed unexpectedly`, error)
+      }),
+    )
     const validStates: ActiveJob[] = []
 
     for (const state of states) {
@@ -371,10 +385,10 @@ export class QueueWorker<Data> implements CoordinatedWorker {
 
     try {
       void Promise.resolve(onError(error, context)).catch((callbackError: unknown) => {
-        safeConsoleCallbackError(callbackError, context)
+        safeConsoleCallbackError(error, context, callbackError)
       })
     } catch (callbackError) {
-      safeConsoleCallbackError(callbackError, context)
+      safeConsoleCallbackError(error, context, callbackError)
     }
   }
 
@@ -383,7 +397,9 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     if (!this.#cleanupEnabled || this.#closing) return
     this.#cleanupNeeded = true
     if (this.#cleanupTask !== undefined) return
-    this.#cleanupTask = this.#runCleanup()
+    this.#cleanupTask = this.#runCleanup().catch((error: unknown) => {
+      this.#report(error, { queue: this.#queue, operation: 'cleanup' })
+    })
   }
 
   async #runCleanup(): Promise<void> {
