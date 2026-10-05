@@ -133,9 +133,14 @@ const emailQueue = new Queue('email', {
       maxAge: 7 * 24 * 60 * 60 * 1_000,
     },
   },
+  onError: (error, context) => {
+    console.error(context, error)
+  },
 })
 ```
 
 `onError(error, context)` receives `claim`, `cleanup`, `schedule`, `heartbeat`, `complete`, `fail`, `parse`, or `handler` errors; without it errors go to `console.error`. `parse` means a job's JSON payload could not be decoded before calling its handler; it includes the job ID, attempt, and `attemptsExhausted`, just like `handler`. `lease_lost` is a normal result, not an error. Errors thrown by `onError` are logged and do not affect queue processing.
+
+Log the error object, not just its message, to keep its stack, `cause`, and driver diagnostics available. `onError` handles background processing errors; direct calls such as `queue.add()` and `createStorage()` reject their promises, so handle them with `try/catch` around `await`.
 
 `job.error` stores diagnostic text, including the stack and a depth-bounded cause chain when present.

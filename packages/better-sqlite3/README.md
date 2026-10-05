@@ -66,6 +66,8 @@ Both modes default to WAL, `synchronous = FULL`, and a 5000-millisecond busy tim
 
 `close()` is idempotent, rejects new calls, drains accepted calls (including failed calls), and closes the connection. Worker mode uses one thread per storage and processes calls sequentially. It defaults to at most 1024 outstanding calls; configure `maxPending` to change this limit. Calls beyond the limit reject rather than accumulating indefinitely. Worker failures reject outstanding calls; mutations are never automatically replayed because their commit outcome may be unknown. Threads isolate event-loop blocking, not SQLite write locks or delays to other storage operations.
 
+Errors returned by worker storage calls preserve `cause` and driver diagnostics such as `code`, `errcode`, and `errstr`, when present. With `worker: false`, if initialization fails and closing the connection also fails, `createStorage()` rejects with an `AggregateError`: `errors` contains both failures and `cause` is the original error.
+
 ## Connection and initialization
 
 The caller owns the connection. Stop workers and await outstanding storage calls before closing it. For durable file-backed use, configure WAL, `synchronous = FULL`, and a suitable busy timeout. WAL requires a local filesystem with SQLite-compatible locking; durability depends on the filesystem and hardware honoring sync requests. SQLite allows one writer at a time.
