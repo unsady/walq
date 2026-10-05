@@ -147,6 +147,82 @@ describe('Queue worker lifecycle', () => {
     ])
   })
 
+  it.each(['process', 'processMany'] as const)(
+    'reports malformed payloads separately from handler errors in %s',
+    async (mode) => {
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      const storage = new TestStorage()
+      storage.jobs.push(
+        claimedJob('retryable', { data: '{' }),
+        { ...claimedJob('exhausted', { data: '{' }), attempts: 1 },
+        claimedJob('valid', { data: '{"value":1}' }),
+      )
+      const onError = vi.fn<ProcessErrorHandler>()
+      const handlerError = new SyntaxError('handler syntax error')
+      async function failHandler(_data: unknown): Promise<void> {
+        throw handlerError
+      }
+
+      const handler = vi.fn<typeof failHandler>(failHandler)
+      const queue = new Queue('email', {
+        storage,
+        onError,
+        backoff: { type: 'fixed', delay: 250 },
+      })
+      const worker =
+        mode === 'process' ? queue.process(handler) : queue.processMany(handler, { batch: 3 })
+
+      try {
+        await vi.waitFor(() => expect(storage.failures).toHaveLength(3))
+        expect(handler).toHaveBeenCalledTimes(1)
+        const context = expect.objectContaining({ jobId: 'valid' })
+        expect(handler.mock.calls[0]?.[0]).toEqual(
+          mode === 'process' ? { value: 1 } : [{ data: { value: 1 }, context }],
+        )
+        expect(onError.mock.calls).toEqual([
+          [
+            expect.any(SyntaxError),
+            {
+              queue: 'email',
+              operation: 'parse',
+              jobId: 'retryable',
+              attempt: 1,
+              attemptsExhausted: false,
+            },
+          ],
+          [
+            expect.any(SyntaxError),
+            {
+              queue: 'email',
+              operation: 'parse',
+              jobId: 'exhausted',
+              attempt: 1,
+              attemptsExhausted: true,
+            },
+          ],
+          [
+            handlerError,
+            {
+              queue: 'email',
+              operation: 'handler',
+              jobId: 'valid',
+              attempt: 1,
+              attemptsExhausted: false,
+            },
+          ],
+        ])
+        expect(storage.failures.map(({ id, retryAt }) => ({ id, retryAt }))).toEqual([
+          { id: 'retryable', retryAt: now + 250 },
+          { id: 'exhausted', retryAt: now },
+          { id: 'valid', retryAt: now + 250 },
+        ])
+        expect(storage.completions).toHaveLength(0)
+      } finally {
+        await worker.close()
+      }
+    },
+  )
+
   it('heartbeats and loses leases independently within a processMany batch', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)

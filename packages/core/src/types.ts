@@ -49,10 +49,10 @@ export interface QueueOptions {
   storage: Storage
   /** Total allowed executions for every job in this queue. */
   attempts?: number
-  /** Optional backoff for handler failures; omitted retries immediately. */
+  /** Optional backoff for payload parsing and handler failures; omitted retries immediately. */
   backoff?: RetryBackoff
   /**
-   * Called when a claim, lease mutation, cleanup, or handler fails. Absent
+   * Called when a claim, lease mutation, cleanup, payload parsing, or handler fails. Absent
    * means errors are written to `console.error`. The callback may be async; its
    * own errors are reported without affecting queue execution.
    */
@@ -141,6 +141,7 @@ export type ProcessErrorOperation =
   | 'heartbeat'
   | 'complete'
   | 'fail'
+  | 'parse'
   | 'handler'
 
 /** A claim failed before any job was acquired, so no job context exists. */
@@ -185,6 +186,11 @@ export interface HandlerErrorContext {
   readonly attemptsExhausted: boolean
 }
 
+/** A claimed job's JSON payload could not be parsed before invoking its handler. */
+export interface ParseErrorContext extends Omit<HandlerErrorContext, 'operation'> {
+  readonly operation: 'parse'
+}
+
 /** Typed description of the operation that failed, discriminated by `operation`. */
 export type ProcessErrorContext =
   | ClaimErrorContext
@@ -192,6 +198,7 @@ export type ProcessErrorContext =
   | ScheduleErrorContext
   | JobErrorContext
   | HandlerErrorContext
+  | ParseErrorContext
 
 export type ProcessErrorHandler = (
   error: unknown,

@@ -32,6 +32,7 @@ interface ActiveJob {
   data: unknown
   succeeded: boolean
   failure: unknown
+  operation: 'parse' | 'handler'
   leaseLost: boolean
   stopped: boolean
   heartbeatDelay: Delay | undefined
@@ -236,6 +237,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       data: undefined,
       succeeded: false,
       failure: undefined,
+      operation: 'parse',
       leaseLost: false,
       stopped: false,
       heartbeatDelay: undefined,
@@ -250,6 +252,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
     for (const state of states) {
       try {
         state.data = JSON.parse(state.job.data) as Data
+        state.operation = 'handler'
         validStates.push(state)
       } catch (error) {
         state.failure = error
@@ -301,7 +304,7 @@ export class QueueWorker<Data> implements CoordinatedWorker {
       if (!state.succeeded) {
         this.#report(state.failure, {
           queue: this.#queue,
-          operation: 'handler',
+          operation: state.operation,
           jobId: state.job.id,
           attempt: state.job.attemptsMade,
           attemptsExhausted: state.job.attemptsMade >= state.job.attempts,
