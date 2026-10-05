@@ -12,7 +12,6 @@ import { createStorage } from '@walq/sqlite'
 
 const storage = await createStorage({
   filename: './queue.sqlite',
-  worker: true,
 })
 
 const queue = new Queue<{ name: string }>('greetings', {
@@ -29,7 +28,7 @@ await worker.close()
 await storage.close()
 ```
 
-`worker` defaults to `false`. Set it to `true` to run SQLite in a dedicated thread; job handlers remain in the main thread. Worker mode is currently verified on Node.js only. See the [`@walq/better-sqlite3`](../better-sqlite3/README.md#managed-storage) and [`@walq/sqlite`](../sqlite/README.md#managed-storage) READMEs for connection settings and lifecycle details.
+`worker` defaults to `false`, running SQLite in the main thread. Optionally set it to `true` to run SQLite in a dedicated thread; job handlers remain in the main thread and work in either mode. Worker mode is currently verified on Node.js only. See the [`@walq/better-sqlite3`](../better-sqlite3/README.md#managed-storage) and [`@walq/sqlite`](../sqlite/README.md#managed-storage) READMEs for connection settings and lifecycle details.
 
 ## Storage adapters
 
