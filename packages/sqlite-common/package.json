@@ -1,6 +1,6 @@
 {
   "name": "@walq/sqlite-common",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Shared SQLite storage implementation for walq adapters.",
   "keywords": [
     "job-queue",

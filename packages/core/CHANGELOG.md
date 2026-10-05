@@ -1,5 +1,15 @@
 # @walq/core
 
+## 1.2.2
+
+### Patch Changes
+
+- fd98379: Report malformed job JSON as `onError` operation `parse` instead of `handler`, with the same job ID, attempt, and attemptsExhausted fields. Handlers still receive only valid payloads, and retry/backoff behavior is unchanged in both process and processMany. Consumers switching on context.operation should handle the new parse operation.
+- e8af85e: Report unexpected worker polling failures and reject malformed grouped claim results instead of treating missing results as empty claims.
+- 946b1b6: Preserve the original error and context when onError fails, retain cron validation causes, and handle unexpected background rejections without letting logging failures disrupt polling. Public APIs and retry policies are unchanged.
+- e66742d: Document error logging, direct-call rejections, worker diagnostics, and aggregate cleanup errors.
+- 2fdd44c: Include error cause chains in persisted job.error diagnostic text. Formatting is depth-bounded, handles circular references, and does not invoke custom inspection hooks. Errors without causes keep their existing text; onError still receives the original error and retry behavior is unchanged.
+
 ## 1.2.1
 
 ### Patch Changes

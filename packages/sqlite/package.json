@@ -1,6 +1,6 @@
 {
   "name": "@walq/sqlite",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Built-in node:sqlite storage adapter for Node.js, Bun, and Deno.",
   "keywords": [
     "job-queue",
