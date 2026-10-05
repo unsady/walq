@@ -6,14 +6,18 @@ import Database from 'better-sqlite3'
 
 // Native Node type stripping does not remap the source's NodeNext .js imports.
 registerHooks({
-  resolve(specifier, context, nextResolve) {
+  resolve: (specifier, context, nextResolve) => {
     if (specifier === '@walq/sqlite-common') {
       return nextResolve(
         new URL('../../../sqlite-common/src/index.ts', import.meta.url).href,
         context,
       )
     }
-    if (specifier.startsWith('./') && specifier.endsWith('.js')) {
+    if (
+      context.parentURL?.startsWith(new URL('../../../', import.meta.url).href) &&
+      specifier.startsWith('./') &&
+      specifier.endsWith('.js')
+    ) {
       return nextResolve(`${specifier.slice(0, -3)}.ts`, context)
     }
     return nextResolve(specifier, context)
