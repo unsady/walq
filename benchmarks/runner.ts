@@ -67,7 +67,7 @@ export async function runSuite(
     warmup: environment.warmup,
     jobs: environment.jobs ?? definitions[0]?.jobs ?? 0,
     only: environment.only ?? '',
-    synchronous: environment.synchronous,
+    synchronous: suite === 'journal' ? 'full' : environment.synchronous,
   }
   if (suite === 'adapters') settings.batch = 64
 

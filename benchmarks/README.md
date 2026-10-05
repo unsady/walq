@@ -9,6 +9,7 @@ reporting tests are. Vitest is used only for those tests.
 | `adapters`       | SQLite drivers on Node.js; built-in adapter across Node.js, Bun, Deno |
 | `coordinator`    | Shared vs isolated pollers on one in-memory connection                |
 | `contention`     | Shared WAL file vs one file per writer thread                         |
+| `journal`        | WAL vs DELETE with FULL durability and competing workers              |
 | `claim-grouping` | Production grouped claims and prototype chunk-size comparisons        |
 | `groups`         | Ready jobs, saturated/future groups, and round-robin fairness         |
 | `retention`      | Retained history, production `cleanup()` batches, and optional VACUUM |
@@ -69,6 +70,47 @@ Quick runs use 1024 jobs and full runs use 10,000 unless `BENCH_JOBS` is set. Fi
 `jobs/sec` is actual processed jobs divided by the sum of timed storage-call durations across measured runs; it is **not** end-to-end application throughput. Call p95 is the median of per-run p95 values; lifecycle latency mixes enqueue, claim, and completion calls. The report shows sample counts: short runs, especially grouped sweeps, do not support reliable tail-latency claims. Increase jobs and repeats before drawing conclusions. Paired drivers are adjacent and execution order reverses between passes.
 
 Cross-runtime results compare the whole runtime/driver/SQLite combination, not just JavaScript engines. Different bundled SQLite versions or compile options can contribute to differences. These benchmarks use one connection and no concurrent producers; they do not establish contention or multi-process scaling results.
+
+## WAL vs DELETE journal
+
+```sh
+pnpm bench journal
+BENCH_JOBS=10000 BENCH_REPEATS=5 BENCH_JSON=.cache/benchmarks/journal.json pnpm bench journal
+```
+
+Compares `journal_mode=WAL` and `journal_mode=DELETE` for 1 and 4 competing
+worker threads, each with a separate `better-sqlite3` connection to the same
+fresh file, at claim batch sizes 1 and 16. The total job count is fixed across
+the pool, not multiplied by worker count. Only journal mode changes within a
+pair; both use `synchronous=FULL` regardless of `BENCH_SYNCHRONOUS`, a 2000-ms
+busy timeout, identical jobs and transaction boundaries. Each completion is
+one production `complete()` call, not a batched transaction. SQLite's default
+WAL auto-checkpoint is retained, including any checkpoints during measurement.
+Quick runs use 2000 jobs, full runs 10,000; both use the same eight scenarios.
+
+Schema setup, seeding and per-worker in-memory JIT warmup are outside the timed
+phase. Workers start draining behind a shared barrier and each finishes with
+128 empty claims after finding no ready jobs. `jobs/sec` is actual confirmed
+completions divided by summed wall-clock drain spans across valid repeats,
+including the empty tail and event-loop yields, not summed call durations.
+Successful nonempty claims, single-job completions and empty claims have
+separate p95 metrics. Sample counts and raw millisecond timings are kept in JSON;
+p95 values are medians of per-run p95s, with worker samples pooled within a run.
+
+The event-loop probe measures successive `setImmediate` turns inside each worker,
+yielding once per claim batch or empty claim. Its intervals include synchronous
+claim/completion work and lock waits, so this is worker responsiveness under the
+specified batching policy, not idle timer jitter or the parent's event-loop delay.
+Reported max is the median of per-run maxima. Short runs have noisy tail estimates.
+
+`SQLITE_BUSY` counts returned errors (including extended busy codes), not lock
+waits successfully resolved by SQLite's busy handler. `timeouts` counts explicit
+`SQLITE_BUSY_TIMEOUT` codes and run deadline expirations; this driver may return
+plain `SQLITE_BUSY` when its busy timeout expires, which cannot be separately
+identified. Counts include invalid measured runs, not warmups. Other storage
+errors are reported too. Incomplete, duplicate, lost-lease, aborted or erroring
+runs fail the suite and are excluded from performance metrics; raw returned
+outcomes and failure notes remain available in JSON.
 
 ## Options
 

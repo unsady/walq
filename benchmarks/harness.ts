@@ -374,6 +374,7 @@ interface DomainSummaryProfile {
   throughput: string
   spread: string
   highlights: string[]
+  retainZeros?: boolean
 }
 
 const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
@@ -391,6 +392,20 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
     throughput: 'drain jobs/sec',
     spread: 'spread (%)',
     highlights: ['enqueue jobs/sec', 'jobs/claim', 'claim p95 (µs)', 'complete p95 (µs)'],
+  },
+  journal: {
+    throughput: 'jobs/sec',
+    spread: '',
+    highlights: [
+      'claim p95 (µs)',
+      'complete p95 (µs)',
+      'empty claim p95 (µs)',
+      'event-loop p95 (µs)',
+      'SQLITE_BUSY',
+      'timeouts',
+      'errors',
+    ],
+    retainZeros: true,
   },
   'claim-grouping': {
     throughput: 'jobs/sec',
@@ -454,7 +469,7 @@ export function renderDomainSummary(
   const profile = domainSummaryProfiles[suite]
   if (profile === undefined) throw new Error(`no summary profile for suite "${suite}"`)
   const metricColumns = [profile.throughput, profile.spread, ...profile.highlights].filter(
-    (column) => column.length > 0 && hasSignal(results, 'metrics', column),
+    (column) => column.length > 0 && (profile.retainZeros || hasSignal(results, 'metrics', column)),
   )
   const headers = ['scenario', ...metricColumns]
   const alignments: Array<'left' | 'right'> = [

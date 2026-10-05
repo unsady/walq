@@ -77,6 +77,10 @@ export interface ContentionRunOutcome {
   enqueueSamples: number[]
   claimSamples: number[]
   completeSamples: number[]
+  emptyClaimSamples: number[]
+  loopSamples: number[]
+  busy: number
+  timeouts: number
 }
 
 export function scenarioName(scenario: ContentionScenario): string {
@@ -99,13 +103,32 @@ export function contentionScenarios(grid: ContentionGrid): ContentionScenario[] 
 }
 
 /** Create the schema once so that workers never race during startup. */
-function prepareDatabase(path: string, synchronous: SynchronousMode): void {
+async function prepareDatabase(
+  path: string,
+  synchronous: SynchronousMode,
+  journal: 'WAL' | 'DELETE',
+  jobs = 0,
+): Promise<void> {
   const db = new Database(path)
   try {
-    db.pragma('journal_mode = WAL')
+    db.pragma(`journal_mode = ${journal}`)
     db.pragma(synchronousPragma(synchronous))
     db.pragma('busy_timeout = 2000')
-    betterSqlite3(db)
+    const storage = betterSqlite3(db)
+    if (jobs > 0) {
+      const now = Date.now()
+      await storage.enqueueMany(
+        Array.from({ length: jobs }, () => ({
+          queue: 'bench',
+          name: 'bench',
+          data: '{}',
+          now,
+          availableAt: now,
+          priority: 0,
+          attempts: 1,
+        })),
+      )
+    }
   } finally {
     db.close()
   }
@@ -171,7 +194,7 @@ export function aggregateReports(
   const completedIds = new Set(drains.flatMap((report) => report.completedIds))
 
   return {
-    enqueueElapsed: span(enqueues),
+    enqueueElapsed: enqueues.length === 0 ? 0 : span(enqueues),
     drainElapsed: span(drains),
     enqueued: total(enqueues, (report) => report.samples.length),
     completed,
@@ -185,13 +208,19 @@ export function aggregateReports(
     enqueueSamples: enqueues.flatMap((report) => report.samples),
     claimSamples: drains.flatMap((report) => report.claimSamples),
     completeSamples: drains.flatMap((report) => report.completeSamples),
+    emptyClaimSamples: drains.flatMap((report) => report.emptyClaimSamples),
+    loopSamples: drains.flatMap((report) => report.loopSamples),
+    busy: total(drains, (report) => report.busy),
+    timeouts: total(drains, (report) => report.timeouts),
   }
 }
 
-async function executeRun(
+export async function executeRun(
   scenario: ContentionScenario,
   jobs: number,
   synchronous: SynchronousMode,
+  journal: 'WAL' | 'DELETE' = 'WAL',
+  drainOnly = false,
 ): Promise<ContentionRunOutcome> {
   const directory = mkdtempSync(join(tmpdir(), 'walq-bench-'))
   const gate = new SharedArrayBuffer(4)
@@ -203,7 +232,9 @@ async function executeRun(
   const channels: Channel[] = []
 
   try {
-    for (const path of new Set(paths)) prepareDatabase(path, synchronous)
+    for (const path of new Set(paths)) {
+      await prepareDatabase(path, synchronous, journal, drainOnly ? jobs : 0)
+    }
     for (const [index, path] of paths.entries()) {
       channels.push(
         startWorker({
@@ -214,6 +245,8 @@ async function executeRun(
           timeout: runTimeout,
           gate,
           synchronous,
+          journal,
+          drainOnly,
         }),
       )
     }
@@ -222,11 +255,14 @@ async function executeRun(
       Promise.all(channels.map((channel) => channel.ready.promise)),
       timeout.promise,
     ])
-    release(gate, 1)
-    const enqueues = await Promise.race([
-      Promise.all(channels.map((channel) => channel.enqueue.promise)),
-      timeout.promise,
-    ])
+    let enqueues: EnqueueReport[] = []
+    if (!drainOnly) {
+      release(gate, 1)
+      enqueues = await Promise.race([
+        Promise.all(channels.map((channel) => channel.enqueue.promise)),
+        timeout.promise,
+      ])
+    }
     release(gate, 2)
     const drains = await Promise.race([
       Promise.all(channels.map((channel) => channel.drain.promise)),
@@ -237,7 +273,13 @@ async function executeRun(
       timeout.promise,
     ])
 
-    return aggregateReports(enqueues, drains)
+    const outcome = aggregateReports(enqueues, drains)
+    if (drainOnly) {
+      outcome.enqueued = jobs
+      outcome.enqueueElapsed = 0
+    }
+
+    return outcome
   } finally {
     timeout.dispose()
     // Terminating is the only guaranteed stop, including for a thread stuck in a barrier.

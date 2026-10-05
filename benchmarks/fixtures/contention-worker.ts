@@ -15,6 +15,8 @@ export interface ContentionWorkerInput {
   timeout: number
   gate: SharedArrayBuffer
   synchronous: SynchronousMode
+  journal?: 'WAL' | 'DELETE'
+  drainOnly?: boolean
 }
 
 export interface EnqueueReport {
@@ -39,6 +41,10 @@ export interface DrainReport {
   emptyClaims: number
   claimSamples: number[]
   completeSamples: number[]
+  emptyClaimSamples: number[]
+  loopSamples: number[]
+  busy: number
+  timeouts: number
   errors: number
   aborted: boolean
   firstError: string | null
@@ -62,10 +68,18 @@ function clock(): number {
 const input = workerData as ContentionWorkerInput
 const gate = new Int32Array(input.gate)
 const db = new Database(input.path)
-db.pragma('journal_mode = WAL')
+db.pragma(`journal_mode = ${input.journal ?? 'WAL'}`)
 db.pragma(`synchronous = ${input.synchronous.toUpperCase()}`)
 db.pragma('busy_timeout = 2000')
 const storage = betterSqlite3(db)
+if (input.drainOnly) {
+  if (db.pragma('journal_mode', { simple: true }) !== input.journal?.toLowerCase()) {
+    throw new Error('unexpected journal mode')
+  }
+  if (db.pragma('synchronous', { simple: true }) !== 2) {
+    throw new Error('journal comparison requires synchronous=FULL')
+  }
+}
 
 function awaitPhase(phase: number): void {
   for (;;) {
@@ -145,6 +159,10 @@ async function runDrain(): Promise<DrainReport> {
   const claimSamples: number[] = []
   const completeSamples: number[] = []
   const completedIds: string[] = []
+  const emptyClaimSamples: number[] = []
+  const loopSamples: number[] = []
+  let busy = 0
+  let timeouts = 0
   let completed = 0
   let lostLeases = 0
   let claims = 0
@@ -153,8 +171,25 @@ async function runDrain(): Promise<DrainReport> {
   let aborted = false
   let firstError: string | null = null
   const startedAt = clock()
+  const emptyLimit = input.drainOnly ? 128 : 1
+  let previousTurn = performance.now()
+
+  function recordError(error: unknown): void {
+    errors += 1
+    firstError ??= errorMessage(error)
+    const code = error instanceof Error ? ((error as Error & { code?: string }).code ?? '') : ''
+    if (code.startsWith('SQLITE_BUSY')) busy += 1
+    if (code === 'SQLITE_BUSY_TIMEOUT') timeouts += 1
+  }
 
   for (;;) {
+    if (input.drainOnly) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      const turn = performance.now()
+      loopSamples.push(turn - previousTurn)
+      previousTurn = turn
+    }
+
     if (errors >= errorLimit || clock() - startedAt > input.timeout) {
       aborted = true
       break
@@ -170,17 +205,20 @@ async function runDrain(): Promise<DrainReport> {
         leaseDuration,
       })
     } catch (error) {
-      errors += 1
-      firstError ??= errorMessage(error)
+      recordError(error)
       continue
     }
 
     claims += 1
-    claimSamples.push(performance.now() - claimStarted)
+    const claimDuration = performance.now() - claimStarted
     if (jobs.length === 0) {
+      if (!input.drainOnly) claimSamples.push(claimDuration)
+      emptyClaimSamples.push(claimDuration)
       emptyClaims += 1
-      break
+      if (emptyClaims >= emptyLimit) break
+      continue
     }
+    claimSamples.push(claimDuration)
 
     for (const job of jobs) {
       const completeStarted = performance.now()
@@ -198,11 +236,12 @@ async function runDrain(): Promise<DrainReport> {
           lostLeases += 1
         }
       } catch (error) {
-        errors += 1
-        firstError ??= errorMessage(error)
+        recordError(error)
       }
     }
   }
+
+  if (aborted && clock() - startedAt > input.timeout) timeouts += 1
 
   return {
     phase: 'drain',
@@ -215,6 +254,10 @@ async function runDrain(): Promise<DrainReport> {
     emptyClaims,
     claimSamples,
     completeSamples,
+    emptyClaimSamples,
+    loopSamples,
+    busy,
+    timeouts,
     errors,
     aborted,
     firstError,
@@ -224,9 +267,11 @@ async function runDrain(): Promise<DrainReport> {
 try {
   await warmup()
   parentPort!.postMessage({ phase: 'ready' })
-  awaitPhase(1)
-  const enqueue = await runEnqueue()
-  parentPort!.postMessage(enqueue)
+  if (!input.drainOnly) {
+    awaitPhase(1)
+    const enqueue = await runEnqueue()
+    parentPort!.postMessage(enqueue)
+  }
   awaitPhase(2)
   parentPort!.postMessage(await runDrain())
 } finally {

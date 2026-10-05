@@ -320,6 +320,38 @@ describe('renderDomainSummary', () => {
     expect(summary).not.toContain('first handler (ms)')
   })
 
+  it('keeps journal error and latency metrics visible even when zero', () => {
+    const summary = renderDomainSummary('journal', environment, {}, [
+      result({
+        suite: 'journal',
+        scenario: 'WAL / 1 workers / batch 1',
+        metrics: {
+          'jobs/sec': 1000,
+          'claim p95 (µs)': 1,
+          'complete p95 (µs)': 2,
+          'empty claim p95 (µs)': 0,
+          'event-loop p95 (µs)': 3,
+          SQLITE_BUSY: 0,
+          timeouts: 0,
+          errors: 0,
+        },
+      }),
+    ])
+
+    for (const column of [
+      'jobs/sec',
+      'claim p95 (µs)',
+      'complete p95 (µs)',
+      'empty claim p95 (µs)',
+      'event-loop p95 (µs)',
+      'SQLITE_BUSY',
+      'timeouts',
+      'errors',
+    ]) {
+      expect(summary).toContain(column)
+    }
+  })
+
   it('requires an explicit profile for each maintained suite', () => {
     expect(() => renderDomainSummary('misc', environment, {}, [result()])).toThrow(
       'no summary profile',

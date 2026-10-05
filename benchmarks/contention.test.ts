@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { readBenchEnvironment } from './bench-options.js'
 import {
   aggregateReports,
   contentionScenarios,
@@ -12,6 +13,7 @@ import {
 } from './contention.js'
 import type { DrainReport, EnqueueReport } from './fixtures/contention-worker.js'
 import type { Collected } from './harness.js'
+import { definitions as journalDefinitions, summarizeJournal } from './journal.suite.js'
 
 function enqueueReport(overrides: Partial<EnqueueReport> = {}): EnqueueReport {
   return {
@@ -38,6 +40,10 @@ function drainReport(overrides: Partial<DrainReport> = {}): DrainReport {
     emptyClaims: 1,
     claimSamples: [0.02, 0.03],
     completeSamples: [0.01, 0.01],
+    emptyClaimSamples: [0.03],
+    loopSamples: [],
+    busy: 0,
+    timeouts: 0,
     errors: 0,
     aborted: false,
     firstError: null,
@@ -61,6 +67,10 @@ function outcome(overrides: Partial<ContentionRunOutcome> = {}): ContentionRunOu
     enqueueSamples: [0.01],
     claimSamples: [0.02],
     completeSamples: [0.01],
+    emptyClaimSamples: [],
+    loopSamples: [],
+    busy: 0,
+    timeouts: 0,
     ...overrides,
   }
 }
@@ -134,6 +144,70 @@ describe('aggregateReports', () => {
 
     expect(outcome.errors).toBe(3)
     expect(outcome.firstError).toBe('SQLITE_BUSY')
+  })
+})
+
+describe('journal comparison', () => {
+  it('pairs exactly the requested worker and batch configurations in both grids', () => {
+    const expected = [1, 4].flatMap((threads) =>
+      [1, 16].flatMap((batch) =>
+        ['WAL', 'DELETE'].map((journal) => `${journal} / ${threads} workers / batch ${batch}`),
+      ),
+    )
+
+    for (const grid of ['quick', 'full']) {
+      const definitions = journalDefinitions(readBenchEnvironment({ BENCH_GRID: grid }))
+
+      expect(definitions.map((definition) => definition.scenario)).toEqual(expected)
+      expect(
+        definitions.every((definition) => definition.jobs === (grid === 'full' ? 10000 : 2000)),
+      ).toBe(true)
+    }
+
+    const filtered = journalDefinitions(
+      readBenchEnvironment({ BENCH_ONLY: 'DELETE', BENCH_JOBS: '17' }),
+    )
+    expect(filtered).toHaveLength(4)
+    expect(filtered.every((definition) => definition.jobs === 17)).toBe(true)
+  })
+
+  it('uses elapsed totals, separates latencies and retains invalid diagnostics', () => {
+    const runs = [
+      outcome({ drainElapsed: 100, emptyClaimSamples: [0.3], loopSamples: [1] }),
+      outcome({ drainElapsed: 300, emptyClaimSamples: [0.5], loopSamples: [2] }),
+      outcome({ drainElapsed: 1, busy: 2, timeouts: 1, errors: 2 }),
+    ]
+    const result = summarizeJournal(
+      { threads: 4, batch: 16, journal: 'DELETE' },
+      2,
+      collected(runs, ['run timed out']),
+    )
+
+    expect(result.params.synchronous).toBe('FULL')
+    expect(result.metrics['jobs/sec']).toBe(10)
+    expect(result.metrics['claim p95 (µs)']).toBe(20)
+    expect(result.metrics['complete p95 (µs)']).toBe(10)
+    expect(result.metrics['empty claim p95 (µs)']).toBe(300)
+    expect(result.metrics['event-loop p95 (µs)']).toBe(1000)
+    expect(result.metrics['empty samples']).toBe(2)
+    expect(result.metrics.SQLITE_BUSY).toBe(2)
+    expect(result.metrics.timeouts).toBe(2)
+    expect(result.samples.map((sample) => sample.valid)).toEqual([1, 1, 0])
+    expect(result.runs).toEqual(runs)
+    expect(result.ok).toBe(false)
+  })
+
+  it('reports a failed run without fabricated latency samples', () => {
+    const result = summarizeJournal(
+      { threads: 1, batch: 1, journal: 'WAL' },
+      2,
+      collected([], ['run timed out']),
+    )
+
+    expect(result.metrics['jobs/sec']).toBe(0)
+    expect(result.metrics['claim samples']).toBe(0)
+    expect(result.metrics.timeouts).toBe(1)
+    expect(result.ok).toBe(false)
   })
 })
 
