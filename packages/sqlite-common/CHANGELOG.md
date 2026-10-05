@@ -1,5 +1,17 @@
 # @walq/sqlite-common
 
+## 1.2.2
+
+### Patch Changes
+
+- 685303a: Use serialize-error for storage worker error transport so causes, SQLite diagnostic fields, and custom enumerable properties are preserved. Error properties are serialized with bounded depth and without invoking custom toJSON hooks. Public APIs and SQL execution policies are unchanged.
+- Updated dependencies [fd98379]
+- Updated dependencies [e8af85e]
+- Updated dependencies [946b1b6]
+- Updated dependencies [e66742d]
+- Updated dependencies [2fdd44c]
+  - @walq/core@1.2.2
+
 ## 1.2.1
 
 ### Patch Changes

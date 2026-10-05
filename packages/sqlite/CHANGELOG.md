@@ -1,5 +1,21 @@
 # @walq/sqlite
 
+## 1.2.2
+
+### Patch Changes
+
+- b4fb895: Preserve both the original and cleanup errors when node:sqlite rollback fails or a managed adapter cannot close after initialization failure. These failures reject with a standard AggregateError containing both errors and the original as cause. Successful cleanup still rethrows the original error unchanged.
+- 685303a: Use serialize-error for storage worker error transport so causes, SQLite diagnostic fields, and custom enumerable properties are preserved. Error properties are serialized with bounded depth and without invoking custom toJSON hooks. Public APIs and SQL execution policies are unchanged.
+- e66742d: Document error logging, direct-call rejections, worker diagnostics, and aggregate cleanup errors.
+- Updated dependencies [fd98379]
+- Updated dependencies [e8af85e]
+- Updated dependencies [685303a]
+- Updated dependencies [946b1b6]
+- Updated dependencies [e66742d]
+- Updated dependencies [2fdd44c]
+  - @walq/core@1.2.2
+  - @walq/sqlite-common@1.2.2
+
 ## 1.2.1
 
 ### Patch Changes
