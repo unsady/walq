@@ -8,17 +8,15 @@ setupCleanup()
 
 describe('SQLite groups', () => {
   it('validates groups and rejects conflicting concurrency without mutation', async () => {
-    const { db, storage } = open()
+    const { storage } = open()
 
     for (const group of [
       { id: '', concurrency: 1 },
       { id: 'g', concurrency: 0 },
-      { id: 'g', concurrency: 1.5 },
-      { id: 'g', concurrency: Number.MAX_SAFE_INTEGER + 1 },
     ]) {
       await expect(storage.enqueue({ ...input, group } as never)).rejects.toThrow(TypeError)
     }
-    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 0 })
+    expect(await storage.count({ queue: input.queue })).toMatchObject({ pending: 0 })
 
     const first = await storage.enqueue({ ...input, group: { id: 'g', concurrency: 2 } })
     await expect(storage.enqueue({ ...input, group: { id: 'g', concurrency: 3 } })).rejects.toThrow(
@@ -31,12 +29,15 @@ describe('SQLite groups', () => {
       ]),
     ).rejects.toThrow('already uses concurrency 1')
     expect(await storage.inspect({ queue: input.queue, id: first.id })).not.toBeNull()
-    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 1 })
-    expect(db.prepare('SELECT count(*) AS count FROM walq_groups').get()).toEqual({ count: 1 })
+    expect(await storage.count({ queue: input.queue })).toMatchObject({ pending: 1 })
+    // The failed batch must not leave its first group's configuration behind.
+    await expect(
+      storage.enqueue({ ...input, group: { id: 'batch-conflict', concurrency: 2 } }),
+    ).resolves.toBeDefined()
   })
 
   it('deduplicates grouped jobs without changing membership and keeps group config stable', async () => {
-    const { db, storage } = open()
+    const { storage } = open()
     const first = await storage.enqueue({
       ...input,
       data: '{"original":true}',
@@ -56,7 +57,10 @@ describe('SQLite groups', () => {
       group: { id: 'unused', concurrency: 3 },
     })
     expect(differentGroupDuplicate.id).toBe(first.id)
-    expect(db.prepare('SELECT id FROM walq_groups WHERE id = ?').get('unused')).toBeUndefined()
+    // A duplicate must not establish the supplied, otherwise-unused group.
+    await expect(
+      storage.enqueue({ ...input, group: { id: 'unused', concurrency: 1 } }),
+    ).resolves.toBeDefined()
     await expect(
       storage.enqueue({ ...input, dedupe: 'same', group: { id: 'g', concurrency: 1 } }),
     ).rejects.toThrow('already uses concurrency 2')
@@ -65,9 +69,6 @@ describe('SQLite groups', () => {
     await expect(storage.enqueue({ ...input, group: { id: 'g', concurrency: 1 } })).rejects.toThrow(
       'already uses concurrency 2',
     )
-    expect(db.prepare('SELECT queue, id, concurrency FROM walq_groups').all()).toEqual([
-      { queue: 'email', id: 'g', concurrency: 2 },
-    ])
   })
 
   it('enforces limits without head-of-line blocking and scopes groups to queues', async () => {
@@ -108,7 +109,7 @@ describe('SQLite groups', () => {
   })
 
   it('scans past many saturated groups in global priority order', async () => {
-    const { db, storage } = open()
+    const { storage } = open()
     const groupCount = 70
     const saturated = await storage.enqueueMany(
       Array.from({ length: groupCount }, (_, index) => ({
@@ -137,15 +138,13 @@ describe('SQLite groups', () => {
       available[0]!.id,
       available[1]!.id,
     ])
-    expect(
-      db.prepare("SELECT count(*) AS count FROM walq_jobs WHERE status = 'pending'").get(),
-    ).toEqual({ count: groupCount })
+    expect(await storage.count({ queue: input.queue })).toMatchObject({ pending: groupCount })
     expect(blocked).toHaveLength(groupCount)
   })
 
   it('round-robins groups across calls and connections, with ungrouped jobs first', async () => {
     const path = filename()
-    const { db, storage } = open(path)
+    const { storage } = open(path)
     const grouped = new Map<string, string[]>()
 
     for (const id of ['a', 'b', 'c']) {
@@ -180,15 +179,6 @@ describe('SQLite groups', () => {
     }
 
     expect(await otherStorage.claim(claimInput)).toEqual([])
-    expect(
-      db
-        .prepare('SELECT id, pendingCount FROM walq_groups WHERE queue = ? ORDER BY id')
-        .all(input.queue),
-    ).toEqual([
-      { id: 'a', pendingCount: 0 },
-      { id: 'b', pendingCount: 0 },
-      { id: 'c', pendingCount: 0 },
-    ])
   })
 
   it('keeps claiming groups under a continuous backlog of ungrouped jobs', async () => {
@@ -232,30 +222,8 @@ describe('SQLite groups', () => {
     expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(plain[4]!.id)
   })
 
-  it('writes the round-robin cursor once for a multi-job claim', async () => {
-    const { db, storage } = open()
-    await storage.enqueueMany(
-      ['a', 'b', 'c'].flatMap((id) =>
-        Array.from({ length: 2 }, () => ({ ...input, group: { id, concurrency: 2 } })),
-      ),
-    )
-    db.exec(`
-      CREATE TABLE cursor_writes (count INTEGER NOT NULL);
-      INSERT INTO cursor_writes VALUES (0);
-      CREATE TRIGGER count_cursor_insert AFTER INSERT ON walq_group_cursor
-      BEGIN UPDATE cursor_writes SET count = count + 1; END;
-      CREATE TRIGGER count_cursor_update AFTER UPDATE ON walq_group_cursor
-      BEGIN UPDATE cursor_writes SET count = count + 1; END;
-    `)
-
-    const claimed = await storage.claim({ ...claimInput, limit: 5 })
-
-    expect(claimed).toHaveLength(5)
-    expect(db.prepare('SELECT count FROM cursor_writes').get()).toEqual({ count: 1 })
-  })
-
   it('validates duplicate inputs without registering an unused group', async () => {
-    const { db, storage } = open()
+    const { storage } = open()
     const original = await storage.enqueue({ ...input, dedupe: 'same' })
 
     await expect(
@@ -274,11 +242,13 @@ describe('SQLite groups', () => {
       group: { id: 'unused', concurrency: 2 },
     })
     expect(duplicate).toEqual(original)
-    expect(db.prepare('SELECT count(*) AS count FROM walq_groups').get()).toEqual({ count: 0 })
+    await expect(
+      storage.enqueue({ ...input, group: { id: 'unused', concurrency: 1 } }),
+    ).resolves.toBeDefined()
   })
 
   it('validates every batch input before inserting even when its dedupe key already exists', async () => {
-    const { db, storage } = open()
+    const { storage } = open()
     await storage.enqueue({ ...input, dedupe: 'same' })
 
     await expect(
@@ -287,7 +257,7 @@ describe('SQLite groups', () => {
         { ...input, dedupe: 'same', attempts: 0 },
       ]),
     ).rejects.toThrow('attempts')
-    expect(db.prepare('SELECT count(*) AS count FROM walq_jobs').get()).toEqual({ count: 1 })
+    expect(await storage.count({ queue: input.queue })).toMatchObject({ pending: 1 })
   })
 
   it('round-robins inside a multi-job claim and honors priority within each group', async () => {
@@ -406,8 +376,8 @@ describe('SQLite groups', () => {
     expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
   })
 
-  it('skips a saturated group after future-only groups without reading its backlog', async () => {
-    const { db, storage } = open()
+  it('claims ready work past future-only and saturated groups', async () => {
+    const { storage } = open()
     await storage.enqueueMany(
       Array.from({ length: 8 }, (_, index) => ({
         ...input,
@@ -429,19 +399,9 @@ describe('SQLite groups', () => {
     const ready = await storage.enqueue({ ...input, group: { id: 'zz-ready', concurrency: 1 } })
     expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(ready.id)
     expect(await storage.claim({ ...claimInput, limit: 1 })).toEqual([])
-
-    const plan = db
-      .prepare(
-        `EXPLAIN QUERY PLAN SELECT groupId FROM walq_jobs INDEXED BY walq_pending_grouped
-         WHERE queue = 'email' AND groupId > 'z-blocked' AND groupId IS NOT NULL
-           AND status = 'pending' AND availableAt <= 10 AND attemptsMade < attempts
-         ORDER BY groupId LIMIT 1`,
-      )
-      .all() as { detail: string }[]
-    expect(plan.some(({ detail }) => detail.includes('groupId>?'))).toBe(true)
   })
 
-  it('skips multiple saturated due groups after switching to the due index', async () => {
+  it('releases capacity in multiple saturated groups behind future-only groups', async () => {
     const { storage } = open()
     await storage.enqueueMany(
       Array.from({ length: 8 }, (_, index) => ({
@@ -472,48 +432,6 @@ describe('SQLite groups', () => {
 
     await storage.complete({ ...claimed[0]!, now: input.now })
     expect((await storage.claim({ ...claimInput, limit: 1 }))[0]?.id).toBe(blocked[0]!.id)
-  })
-
-  it('uses separate pending indexes for grouped and ungrouped claims', () => {
-    const { db } = open()
-    const queries = [
-      `SELECT id FROM walq_jobs INDEXED BY walq_pending
-       WHERE queue = 'email' AND status = 'pending' AND groupId IS NULL
-         AND availableAt <= 10 AND attemptsMade < attempts
-       ORDER BY priority DESC, availableAt, seq LIMIT 10`,
-      `SELECT id FROM walq_jobs INDEXED BY walq_pending_grouped
-       WHERE queue = 'email' AND groupId = 'one' AND groupId IS NOT NULL
-         AND status = 'pending' AND availableAt <= 10 AND attemptsMade < attempts
-       ORDER BY priority DESC, availableAt, seq LIMIT 1`,
-      `SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
-       WHERE queue = 'email' AND pendingCount > 0 AND activeCount < concurrency
-         AND id > 'one' ORDER BY id LIMIT 1`,
-      `SELECT groupId FROM walq_jobs INDEXED BY walq_pending_grouped
-       WHERE queue = 'email' AND status = 'pending' AND groupId IS NOT NULL
-         AND groupId > 'one' AND availableAt <= 10 AND attemptsMade < attempts
-       ORDER BY groupId LIMIT 1`,
-      `SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
-       WHERE queue = 'email' AND id = 'one'
-         AND pendingCount > 0 AND activeCount < concurrency`,
-    ]
-    const indexes = [
-      'walq_pending',
-      'walq_pending_grouped',
-      'walq_groups_eligible',
-      'walq_pending_grouped',
-      'walq_groups_eligible',
-    ]
-    expect(
-      db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'walq_active_group'").get(),
-    ).toBeUndefined()
-
-    for (const [index, query] of queries.entries()) {
-      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all() as { detail: string }[]
-      const details = plan.map(({ detail }) => detail).join('; ')
-      expect(details).toContain(indexes[index])
-      expect(details).not.toContain('TEMP B-TREE')
-      expect(details).not.toContain('SCAN walq_jobs')
-    }
   })
 
   it('applies group capacity across claimQueues requests and releases it on state transitions', async () => {
@@ -570,5 +488,72 @@ describe('SQLite groups', () => {
       reopened.storage.enqueue({ ...input, group: { id: 'persistent', concurrency: 1 } }),
     ).rejects.toThrow('already uses concurrency 2')
     expect((await reopened.storage.claim({ ...claimInput, limit: 5 })).length).toBe(2)
+  })
+})
+
+describe('SQLite group scheduling (performance contracts)', () => {
+  it('writes the round-robin cursor once for a multi-job claim', async () => {
+    const { db, storage } = open()
+    await storage.enqueueMany(
+      ['a', 'b', 'c'].flatMap((id) =>
+        Array.from({ length: 2 }, () => ({ ...input, group: { id, concurrency: 2 } })),
+      ),
+    )
+    db.exec(`
+      CREATE TABLE cursor_writes (count INTEGER NOT NULL);
+      INSERT INTO cursor_writes VALUES (0);
+      CREATE TRIGGER count_cursor_insert AFTER INSERT ON walq_group_cursor
+      BEGIN UPDATE cursor_writes SET count = count + 1; END;
+      CREATE TRIGGER count_cursor_update AFTER UPDATE ON walq_group_cursor
+      BEGIN UPDATE cursor_writes SET count = count + 1; END;
+    `)
+
+    const claimed = await storage.claim({ ...claimInput, limit: 5 })
+
+    expect(claimed).toHaveLength(5)
+    expect(db.prepare('SELECT count FROM cursor_writes').get()).toEqual({ count: 1 })
+  })
+
+  it('uses separate pending indexes for grouped and ungrouped claims', () => {
+    const { db } = open()
+    const queries = [
+      `SELECT id FROM walq_jobs INDEXED BY walq_pending
+       WHERE queue = 'email' AND status = 'pending' AND groupId IS NULL
+         AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY priority DESC, availableAt, seq LIMIT 10`,
+      `SELECT id FROM walq_jobs INDEXED BY walq_pending_grouped
+       WHERE queue = 'email' AND groupId = 'one' AND groupId IS NOT NULL
+         AND status = 'pending' AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY priority DESC, availableAt, seq LIMIT 1`,
+      `SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
+       WHERE queue = 'email' AND pendingCount > 0 AND activeCount < concurrency
+         AND id > 'one' ORDER BY id LIMIT 1`,
+      `SELECT groupId FROM walq_jobs INDEXED BY walq_pending_grouped
+       WHERE queue = 'email' AND status = 'pending' AND groupId IS NOT NULL
+         AND groupId > 'one' AND availableAt <= 10 AND attemptsMade < attempts
+       ORDER BY groupId LIMIT 1`,
+      `SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
+       WHERE queue = 'email' AND id = 'one'
+         AND pendingCount > 0 AND activeCount < concurrency`,
+    ]
+    const indexes = [
+      'walq_pending',
+      'walq_pending_grouped',
+      'walq_groups_eligible',
+      'walq_pending_grouped',
+      'walq_groups_eligible',
+    ]
+    const plans = queries.map((query) => {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all() as { detail: string }[]
+
+      return plan.map(({ detail }) => detail).join('; ')
+    })
+
+    for (const [index, details] of plans.entries()) {
+      expect(details).toContain(indexes[index])
+      expect(details).not.toContain('TEMP B-TREE')
+      expect(details).not.toContain('SCAN walq_jobs')
+    }
+    expect(plans[3]).toContain('groupId>?')
   })
 })

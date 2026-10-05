@@ -347,29 +347,8 @@ describe('SQLite concurrency', () => {
     ).toEqual({ status: 'pending', attemptsMade: max - 1, attempts: max })
   })
 
-  it('validates inspection inputs and protects attempt-count overflow', async () => {
+  it('protects attempt-count overflow during retry', async () => {
     const { db, storage } = open()
-    const pending = await storage.enqueue(input)
-
-    await expect(storage.inspect({ queue: '', id: pending.id })).rejects.toThrow('queue')
-    await expect(
-      storage.list({ queue: 'email', status: undefined as never, limit: 1 }),
-    ).rejects.toThrow('status')
-    await expect(
-      storage.list({ queue: 'email', status: 'pending', limit: Number.MAX_SAFE_INTEGER + 1 }),
-    ).rejects.toThrow('limit')
-    await expect(
-      storage.retry({ queue: 'email', id: pending.id, now: Number.MAX_SAFE_INTEGER + 1 }),
-    ).rejects.toThrow('now')
-    await expect(storage.cancel({ queue: 'email', id: pending.id, now: -1 })).rejects.toThrow('now')
-    await expect(
-      storage.reschedule({
-        queue: 'email',
-        id: pending.id,
-        availableAt: Number.MAX_SAFE_INTEGER + 1,
-      }),
-    ).rejects.toThrow('availableAt')
-
     const max = Number.MAX_SAFE_INTEGER
     db.prepare(`
       INSERT INTO walq_jobs

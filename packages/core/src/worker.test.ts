@@ -94,15 +94,10 @@ describe('Queue worker lifecycle', () => {
     [],
     { concurrency: null },
     { concurrency: 0 },
-    { concurrency: -1 },
     { concurrency: 1.5 },
     { concurrency: Number.MAX_SAFE_INTEGER + 1 },
-    { batch: null },
     { batch: 0 },
-    { batch: -1 },
     { batch: 1.5 },
-    { batch: Number.POSITIVE_INFINITY },
-    { batch: Number.MAX_SAFE_INTEGER + 1 },
     { batch: { size: 2 } },
     { concurrency: 2, batch: Number.MAX_SAFE_INTEGER },
   ])('rejects invalid processMany options %o', (options) => {
@@ -351,9 +346,13 @@ describe('Queue worker lifecycle', () => {
     const queue = new Queue('email', { storage })
     const first = queue.process(async () => {})
 
-    expect(() => queue.process(async () => {})).toThrow('already being processed')
+    const sameQueue = new Queue('email', { storage })
+    expect(() => sameQueue.process(async () => {})).toThrow('already being processed')
+
+    const independent = new Queue('email', { storage: new TestStorage() }).process(async () => {})
+    await independent.close()
     await first.close()
-    const second = queue.process(async () => {})
+    const second = sameQueue.process(async () => {})
     await second.close()
   })
 

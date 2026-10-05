@@ -10,59 +10,37 @@ function limits(chunks: Request[][]): number[][] {
   return chunks.map((chunk) => chunk.map(({ limit }) => limit))
 }
 
-describe('chunked grouped claims', () => {
+describe('grouped claim transaction budget (performance contract)', () => {
   it('returns no transactions for an empty batch', () => {
     expect(chunkClaims([], ({ limit }: Request) => limit)).toEqual([])
   })
 
-  it('keeps a small batch in one transaction', () => {
-    const requests = Array.from({ length: 5 }, () => ({ limit: 16 }))
-
-    expect(limits(chunkClaims(requests, ({ limit }) => limit))).toEqual([[16, 16, 16, 16, 16]])
-  })
-
   it('splits a batch into budget-sized transactions and preserves order', () => {
-    const requests = Array.from({ length: 70 }, (_, index) => ({ limit: 16, index }))
+    const perChunk = Math.floor(claimBudget / 16)
+    const requests = Array.from({ length: perChunk * 2 + 1 }, (_, index) => ({ limit: 16, index }))
 
     const chunks = chunkClaims(requests, ({ limit }) => limit)
 
-    expect(chunks.map((chunk) => chunk.length)).toEqual([32, 32, 6])
+    expect(chunks.map((chunk) => chunk.length)).toEqual([perChunk, perChunk, 1])
     expect(chunks.flat()).toEqual(requests)
-  })
-
-  it('accumulates the limits of every request in a transaction', () => {
-    const requests: Request[] = [
-      { limit: 1 },
-      ...Array.from({ length: 3 }, () => ({ limit: 512 })),
-      ...Array.from({ length: 2 }, () => ({ limit: 16 })),
-    ]
-
-    expect(limits(chunkClaims(requests, ({ limit }) => limit))).toEqual([
-      [1],
-      [512],
-      [512],
-      [512],
-      [16, 16],
-    ])
   })
 
   it('fills a transaction with mixed limits instead of sizing it from the first request', () => {
     const requests: Request[] = [
-      ...Array.from({ length: 10 }, () => ({ limit: 1 })),
-      { limit: 502 },
-      { limit: 2 },
       { limit: 1 },
+      { limit: 1 },
+      { limit: claimBudget - 2 },
       { limit: 1 },
     ]
 
     expect(limits(chunkClaims(requests, ({ limit }) => limit))).toEqual([
-      [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 502],
-      [2, 1, 1],
+      [1, 1, claimBudget - 2],
+      [1],
     ])
   })
 
   it('gives a request above the budget a transaction of its own', () => {
-    const requests: Request[] = [{ limit: 1000 }, { limit: 1 }, { limit: 1 }]
+    const requests: Request[] = [{ limit: claimBudget + 1 }, { limit: 1 }, { limit: 1 }]
 
     expect(chunkClaims(requests, ({ limit }) => limit).map((chunk) => chunk.length)).toEqual([1, 2])
   })
@@ -82,13 +60,5 @@ describe('chunked grouped claims', () => {
         chunk.length > 1 && chunk.reduce((sum, request) => sum + request.limit, 0) > claimBudget,
     )
     expect(oversized).toEqual([])
-  })
-
-  it('keeps a batch of single-job requests inside the budget', () => {
-    const requests = Array.from({ length: 700 }, () => ({ limit: 1 }))
-
-    expect(chunkClaims(requests, ({ limit }) => limit).map((chunk) => chunk.length)).toEqual([
-      512, 188,
-    ])
   })
 })

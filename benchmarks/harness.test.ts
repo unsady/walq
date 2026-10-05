@@ -317,14 +317,6 @@ describe('renderDomainSummary', () => {
     expect(summary).not.toContain('queues')
     expect(summary).not.toContain('empty claims')
     expect(summary).not.toContain('elapsed (ms)')
-  })
-
-  it('drops profile columns that no scenario provides', () => {
-    const summary = renderDomainSummary('coordinator (quick)', environment, {}, [
-      result({ suite: 'coordinator', scenario: 'isolated', metrics: { 'jobs/sec': 10 } }),
-    ])
-
-    expect(summary).toContain('jobs/sec')
     expect(summary).not.toContain('first handler (ms)')
   })
 

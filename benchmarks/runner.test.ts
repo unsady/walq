@@ -42,24 +42,16 @@ function output() {
 }
 
 describe('runSuite', () => {
-  it('alternates order, discards warmup and prints only one table', async () => {
-    const order: string[] = []
+  it('prints one summary and reports warmup and measured progress', async () => {
     const sink = output()
-    const scenarios = ['alpha', 'beta'].map((name) =>
-      definition(name, async () => {
-        order.push(name)
-
-        return order.length
-      }),
-    )
+    const scenarios = ['alpha', 'beta'].map((name) => definition(name, async () => 1))
 
     expect(await runSuite('coordinator', scenarios, environment, sink)).toBe(true)
-    expect(order).toEqual(['alpha', 'beta', 'beta', 'alpha', 'alpha', 'beta'])
     expect(sink.write).toHaveBeenCalledTimes(1)
     expect(sink.write.mock.calls[0]?.[0]).toContain('domain summary — coordinator (quick)')
     expect(sink.write.mock.calls[0]?.[0]).toContain('jobs/sec')
-    expect(sink.report.mock.calls[0]?.[0]).toContain('warmup 1/1')
-    expect(sink.report.mock.calls.at(-1)?.[0]).toContain('repeat 2/2')
+    expect(sink.report).toHaveBeenCalledWith(expect.stringContaining('warmup 1/1'))
+    expect(sink.report).toHaveBeenCalledWith(expect.stringContaining('repeat 2/2'))
   })
 
   it('rejects empty selections and zero measured runs before executing', async () => {

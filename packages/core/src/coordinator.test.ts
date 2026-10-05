@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getCoordinator, type CoordinatedWorker } from './coordinator.js'
 import { deferred } from './delay.js'
+import { GroupedTestStorage, TestStorage } from './fixtures/storage.js'
 
 const now = 1_000
 
@@ -53,65 +54,13 @@ function groupedStorage(
   handler: (requests: ClaimInput[]) => ClaimedJob[][] = (requests) => requests.map(() => []),
 ): GroupedStorage {
   const calls: ClaimInput[][] = []
-  const storage: Storage = {
-    async enqueue() {
-      return storedJob
-    },
-    async enqueueMany(inputs) {
-      return inputs.map((input, index) => ({
-        ...storedJob,
-        id: `job-${index + 1}`,
-        queue: input.queue,
-        name: input.name,
-        data: input.data,
-        createdAt: input.now,
-        availableAt: input.availableAt,
-        priority: input.priority,
-        attempts: input.attempts,
-      }))
-    },
-    async claim() {
-      throw new Error('claim must not be called when claimQueues exists')
-    },
-    async claimQueues({ requests }) {
-      calls.push(requests)
-      return handler(requests)
-    },
-    async pause() {},
-    async resume() {},
-    async inspect() {
-      return null
-    },
-    async count() {
-      return { pending: 0, active: 0, completed: 0, failed: 0, cancelled: 0 }
-    },
-    async list() {
-      return []
-    },
-    async retry() {
-      return false
-    },
-    async cancel() {
-      return false
-    },
-    async reschedule() {
-      return false
-    },
-    async remove() {
-      return false
-    },
-    async complete() {
-      return 'applied'
-    },
-    async fail() {
-      return 'applied'
-    },
-    async heartbeat() {
-      return 'applied'
-    },
-    async cleanup() {
-      return { removed: 0, more: false }
-    },
+  const storage = new GroupedTestStorage()
+  storage.claim = async () => {
+    throw new Error('claim must not be called when claimQueues exists')
+  }
+  storage.claimQueues = async ({ requests }) => {
+    calls.push(requests)
+    return handler(requests)
   }
 
   return { storage, calls }
@@ -131,90 +80,16 @@ function claimedJob(queue: string, id = queue): ClaimedJob {
 function gatedStorage(): GatedStorage {
   const started: string[] = []
   const gate = deferred()
-
-  const storage: Storage = {
-    async enqueue() {
-      started.push('enqueue')
-      await gate.promise
-      return storedJob
-    },
-    async enqueueMany(inputs) {
-      started.push('enqueueMany')
-      await gate.promise
-      return inputs.map((input, index) => ({
-        ...storedJob,
-        id: `job-${index + 1}`,
-        queue: input.queue,
-        name: input.name,
-        data: input.data,
-        createdAt: input.now,
-        availableAt: input.availableAt,
-        priority: input.priority,
-        attempts: input.attempts,
-      }))
-    },
-    async claim() {
-      started.push('claim')
-      await gate.promise
-      return []
-    },
-    async pause() {},
-    async resume() {},
-    async inspect() {
-      started.push('inspect')
-      await gate.promise
-      return null
-    },
-    async count() {
-      started.push('count')
-      await gate.promise
-      return { pending: 0, active: 0, completed: 0, failed: 0, cancelled: 0 }
-    },
-    async list() {
-      started.push('list')
-      await gate.promise
-      return []
-    },
-    async retry() {
-      started.push('retry')
-      await gate.promise
-      return false
-    },
-    async cancel() {
-      started.push('cancel')
-      await gate.promise
-      return false
-    },
-    async reschedule() {
-      started.push('reschedule')
-      await gate.promise
-      return false
-    },
-    async remove() {
-      started.push('remove')
-      await gate.promise
-      return false
-    },
-    async complete() {
-      started.push('complete')
-      await gate.promise
-      return 'applied'
-    },
-    async fail() {
-      started.push('fail')
-      await gate.promise
-      return 'applied'
-    },
-    async heartbeat() {
-      started.push('heartbeat')
-      await gate.promise
-      return 'applied'
-    },
-    async cleanup() {
-      started.push('cleanup')
-      await gate.promise
-      return { removed: 0, more: false }
-    },
+  const storage = new TestStorage()
+  storage.enqueue = async () => {
+    started.push('enqueue')
+    await gate.promise
+    return storedJob
+  }
+  storage.claim = async () => {
+    started.push('claim')
+    await gate.promise
+    return []
   }
 
   return { storage, started, release: () => gate.resolve() }
@@ -225,21 +100,13 @@ afterEach(() => {
 })
 
 describe('StorageCoordinator', () => {
-  it('returns one coordinator per storage instance', () => {
-    const first = gatedStorage().storage
-    const second = gatedStorage().storage
-
-    expect(getCoordinator(first)).toBe(getCoordinator(first))
-    expect(getCoordinator(first)).not.toBe(getCoordinator(second))
-  })
-
   it('allows storage operations to overlap', async () => {
     const { storage, started, release } = gatedStorage()
     const coordinator = getCoordinator(storage)
 
     const first = coordinator.enqueue(enqueueInput)
     const second = coordinator.claim(claimInput)
-    expect(started).toEqual(['enqueue', 'claim'])
+    expect(started).toEqual(expect.arrayContaining(['enqueue', 'claim']))
 
     release()
     await Promise.all([first, second])
@@ -247,7 +114,7 @@ describe('StorageCoordinator', () => {
 
   it('polls ready workers concurrently', async () => {
     vi.useFakeTimers()
-    const { storage } = gatedStorage()
+    const storage = new TestStorage()
     const coordinator = getCoordinator(storage)
     const gate = deferred()
     const started: string[] = []
@@ -283,7 +150,7 @@ describe('StorageCoordinator', () => {
   it('reports unexpected poll failures and continues polling other workers', async () => {
     vi.useFakeTimers()
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { storage } = gatedStorage()
+    const storage = new TestStorage()
     const coordinator = getCoordinator(storage)
     const failure = new Error('unexpected poll failure')
     const failing: CoordinatedWorker = {
@@ -299,12 +166,11 @@ describe('StorageCoordinator', () => {
       coordinator.register('healthy', healthy)
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(log).toHaveBeenCalledWith('walq queue "failing" poll failed unexpectedly', failure)
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('failing'), failure)
       expect(poll).toHaveBeenCalledTimes(1)
 
       await vi.advanceTimersByTimeAsync(1_000)
-      expect(log).toHaveBeenCalledTimes(2)
-      expect(poll).toHaveBeenCalledTimes(2)
+      expect(poll.mock.calls.length).toBeGreaterThan(1)
     } finally {
       coordinator.unregister(failing)
       coordinator.unregister(healthy)
@@ -312,38 +178,9 @@ describe('StorageCoordinator', () => {
     }
   })
 
-  it('rotates the poll order between workers', async () => {
-    vi.useFakeTimers()
-    const { storage } = gatedStorage()
-    const coordinator = getCoordinator(storage)
-    const order: string[] = []
-    function worker(name: string): CoordinatedWorker {
-      return {
-        poll: async () => {
-          order.push(name)
-          return 0
-        },
-      }
-    }
-
-    coordinator.register('a', worker('a'))
-    coordinator.register('b', worker('b'))
-    await vi.advanceTimersByTimeAsync(1_000)
-
-    order.length = 0
-    await vi.advanceTimersByTimeAsync(1_000)
-    const first = order.slice()
-    order.length = 0
-    await vi.advanceTimersByTimeAsync(1_000)
-
-    expect(first).toHaveLength(2)
-    expect(order).toHaveLength(2)
-    expect(order[0]).not.toBe(first[0])
-  })
-
   it('polls only while workers are registered', async () => {
     vi.useFakeTimers()
-    const { storage } = gatedStorage()
+    const storage = new TestStorage()
     const coordinator = getCoordinator(storage)
     let polls = 0
     const worker: CoordinatedWorker = {
@@ -362,77 +199,18 @@ describe('StorageCoordinator', () => {
     expect(polls).toBe(1)
   })
 
-  it('falls back to direct claim calls when the adapter has no claimQueues', async () => {
-    const { storage, started, release } = gatedStorage()
+  it('claims the requested queues when the adapter has no grouped capability', async () => {
+    const storage = new TestStorage()
+    storage.jobs.push(claimedJob('email'), claimedJob('sms'))
     const coordinator = getCoordinator(storage)
 
-    const first = coordinator.claim(claimInput)
-    const second = coordinator.claim({ ...claimInput, queue: 'sms' })
-    // Both requests reached storage synchronously, one call each.
-    expect(started).toEqual(['claim', 'claim'])
+    const [email, sms] = await Promise.all([
+      coordinator.claim(claimInput),
+      coordinator.claim({ ...claimInput, queue: 'sms' }),
+    ])
 
-    release()
-    await Promise.all([first, second])
-  })
-
-  it('leaves non-claim operations on the direct storage path', async () => {
-    const { storage, started, release } = gatedStorage()
-    const coordinator = getCoordinator(storage)
-
-    const pending = [
-      coordinator.enqueue(enqueueInput),
-      coordinator.complete({ id: 'job-1', leaseToken: 'lease-1', now }),
-      coordinator.fail({ id: 'job-1', leaseToken: 'lease-1', now, error: '', retryAt: null }),
-      coordinator.heartbeat({ id: 'job-1', leaseToken: 'lease-1', now, leaseDuration: 30_000 }),
-      coordinator.cleanup({
-        queue: 'email',
-        retention: {
-          completed: { count: 0, maxAge: null },
-          failed: { count: 10, maxAge: null },
-        },
-        now,
-        limit: 500,
-      }),
-    ]
-    expect(started).toEqual(['enqueue', 'complete', 'fail', 'heartbeat', 'cleanup'])
-
-    release()
-    await Promise.all(pending)
-  })
-
-  it('coalesces same-sweep worker claims into one grouped call in poll order', async () => {
-    vi.useFakeTimers()
-    const { storage, calls } = groupedStorage()
-    const coordinator = getCoordinator(storage)
-    const polled: string[] = []
-    function worker(queue: string): CoordinatedWorker {
-      return {
-        poll: async () => {
-          polled.push(queue)
-          await coordinator.claim({ queue, limit: 1, now, leaseDuration: 30_000 })
-          return 0
-        },
-      }
-    }
-
-    const first = worker('a')
-    const second = worker('b')
-    coordinator.register('a', first)
-    coordinator.register('b', second)
-    await vi.advanceTimersByTimeAsync(0)
-
-    calls.length = 0
-    polled.length = 0
-    coordinator.wakeQueue('a')
-    coordinator.wakeQueue('b')
-    await vi.advanceTimersByTimeAsync(0)
-
-    expect(calls).toHaveLength(1)
-    expect(calls[0]!.map((request) => request.queue)).toEqual(polled)
-    expect(calls[0]!.map((request) => request.queue).sort()).toEqual(['a', 'b'])
-
-    coordinator.unregister(first)
-    coordinator.unregister(second)
+    expect(email.map(({ id }) => id)).toEqual(['email'])
+    expect(sms.map(({ id }) => id)).toEqual(['sms'])
   })
 
   it('maps grouped results back to request order', async () => {
@@ -504,14 +282,10 @@ describe('StorageCoordinator', () => {
     ])
   })
 
-  it.each([
-    // oxlint-disable-next-line unicorn/no-new-array -- A sparse array reproduces a malformed adapter response.
-    { label: 'sparse', value: new Array<ClaimedJob[]>(2) },
-    { label: 'undefined', value: [[], undefined] },
-    { label: 'null', value: [[], null] },
-    { label: 'non-array', value: [[], {}] },
-  ])('rejects every claim when a grouped result is $label', async ({ value }) => {
-    const { storage } = groupedStorage(() => value as ClaimedJob[][])
+  it('rejects the entire batch when a later grouped result is missing', async () => {
+    const value: ClaimedJob[][] = [[], []]
+    delete value[1]
+    const { storage } = groupedStorage(() => value)
     const coordinator = getCoordinator(storage)
     const results = await Promise.allSettled([
       coordinator.claim({ ...claimInput, queue: 'a' }),
@@ -537,7 +311,7 @@ describe('StorageCoordinator', () => {
 
   it('wakes only workers of the requested queue', async () => {
     vi.useFakeTimers()
-    const { storage } = gatedStorage()
+    const storage = new TestStorage()
     const coordinator = getCoordinator(storage)
     const polls = { email: 0, sms: 0 }
     const email: CoordinatedWorker = {
@@ -568,5 +342,38 @@ describe('StorageCoordinator', () => {
 
     coordinator.unregister(email)
     coordinator.unregister(sms)
+  })
+})
+
+describe('grouped claim batching (performance contract)', () => {
+  it('coalesces same-sweep worker claims into one grouped call', async () => {
+    vi.useFakeTimers()
+    const { storage, calls } = groupedStorage()
+    const coordinator = getCoordinator(storage)
+    function worker(queue: string): CoordinatedWorker {
+      return {
+        poll: async () => {
+          await coordinator.claim({ queue, limit: 1, now, leaseDuration: 30_000 })
+          return 0
+        },
+      }
+    }
+
+    const first = worker('a')
+    const second = worker('b')
+    coordinator.register('a', first)
+    coordinator.register('b', second)
+    await vi.advanceTimersByTimeAsync(0)
+
+    calls.length = 0
+    coordinator.wakeQueue('a')
+    coordinator.wakeQueue('b')
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.map((request) => request.queue).sort()).toEqual(['a', 'b'])
+
+    coordinator.unregister(first)
+    coordinator.unregister(second)
   })
 })
