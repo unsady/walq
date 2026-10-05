@@ -7,26 +7,14 @@ import Database from 'better-sqlite3'
 
 import type { SynchronousMode } from '../bench-options.js'
 
-export interface ContentionWorkerInput {
+export interface JournalWorkerInput {
   path: string
   queue: string
-  jobs: number
   batch: number
   timeout: number
   gate: SharedArrayBuffer
   synchronous: SynchronousMode
-  journal?: 'WAL' | 'DELETE'
-  drainOnly?: boolean
-}
-
-export interface EnqueueReport {
-  phase: 'enqueue'
-  startedAt: number
-  finishedAt: number
-  samples: number[]
-  errors: number
-  aborted: boolean
-  firstError: string | null
+  journal: 'WAL' | 'DELETE'
 }
 
 export interface DrainReport {
@@ -50,7 +38,7 @@ export interface DrainReport {
   firstError: string | null
 }
 
-export type WorkerReport = { phase: 'ready' } | EnqueueReport | DrainReport
+export type WorkerReport = { phase: 'ready' } | DrainReport
 
 const errorLimit = 20
 const leaseDuration = 30_000
@@ -65,20 +53,18 @@ function clock(): number {
   return performance.timeOrigin + performance.now()
 }
 
-const input = workerData as ContentionWorkerInput
+const input = workerData as JournalWorkerInput
 const gate = new Int32Array(input.gate)
 const db = new Database(input.path)
-db.pragma(`journal_mode = ${input.journal ?? 'WAL'}`)
+db.pragma(`journal_mode = ${input.journal}`)
 db.pragma(`synchronous = ${input.synchronous.toUpperCase()}`)
 db.pragma('busy_timeout = 2000')
 const storage = betterSqlite3(db)
-if (input.drainOnly) {
-  if (db.pragma('journal_mode', { simple: true }) !== input.journal?.toLowerCase()) {
-    throw new Error('unexpected journal mode')
-  }
-  if (db.pragma('synchronous', { simple: true }) !== 2) {
-    throw new Error('journal comparison requires synchronous=FULL')
-  }
+if (db.pragma('journal_mode', { simple: true }) !== input.journal.toLowerCase()) {
+  throw new Error('unexpected journal mode')
+}
+if (db.pragma('synchronous', { simple: true }) !== (input.synchronous === 'full' ? 2 : 1)) {
+  throw new Error('unexpected synchronous mode')
 }
 
 function awaitPhase(phase: number): void {
@@ -120,41 +106,6 @@ async function warmup(): Promise<void> {
   }
 }
 
-async function runEnqueue(): Promise<EnqueueReport> {
-  const samples: number[] = []
-  let errors = 0
-  let aborted = false
-  let firstError: string | null = null
-  const startedAt = clock()
-
-  for (let index = 0; index < input.jobs; index += 1) {
-    if (errors >= errorLimit || clock() - startedAt > input.timeout) {
-      aborted = true
-      break
-    }
-
-    const timestamp = Date.now()
-    const started = performance.now()
-    try {
-      await storage.enqueue({
-        queue: input.queue,
-        name: 'bench',
-        data: '{}',
-        now: timestamp,
-        availableAt: timestamp,
-        priority: 0,
-        attempts: 1,
-      })
-      samples.push(performance.now() - started)
-    } catch (error) {
-      errors += 1
-      firstError ??= errorMessage(error)
-    }
-  }
-
-  return { phase: 'enqueue', startedAt, finishedAt: clock(), samples, errors, aborted, firstError }
-}
-
 async function runDrain(): Promise<DrainReport> {
   const claimSamples: number[] = []
   const completeSamples: number[] = []
@@ -171,7 +122,7 @@ async function runDrain(): Promise<DrainReport> {
   let aborted = false
   let firstError: string | null = null
   const startedAt = clock()
-  const emptyLimit = input.drainOnly ? 128 : 1
+  const emptyLimit = 128
   let previousTurn = performance.now()
 
   function recordError(error: unknown): void {
@@ -183,12 +134,10 @@ async function runDrain(): Promise<DrainReport> {
   }
 
   for (;;) {
-    if (input.drainOnly) {
-      await new Promise<void>((resolve) => setImmediate(resolve))
-      const turn = performance.now()
-      loopSamples.push(turn - previousTurn)
-      previousTurn = turn
-    }
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    const turn = performance.now()
+    loopSamples.push(turn - previousTurn)
+    previousTurn = turn
 
     if (errors >= errorLimit || clock() - startedAt > input.timeout) {
       aborted = true
@@ -212,7 +161,6 @@ async function runDrain(): Promise<DrainReport> {
     claims += 1
     const claimDuration = performance.now() - claimStarted
     if (jobs.length === 0) {
-      if (!input.drainOnly) claimSamples.push(claimDuration)
       emptyClaimSamples.push(claimDuration)
       emptyClaims += 1
       if (emptyClaims >= emptyLimit) break
@@ -267,12 +215,7 @@ async function runDrain(): Promise<DrainReport> {
 try {
   await warmup()
   parentPort!.postMessage({ phase: 'ready' })
-  if (!input.drainOnly) {
-    awaitPhase(1)
-    const enqueue = await runEnqueue()
-    parentPort!.postMessage(enqueue)
-  }
-  awaitPhase(2)
+  awaitPhase(1)
   parentPort!.postMessage(await runDrain())
 } finally {
   db.close()

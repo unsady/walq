@@ -383,15 +383,11 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
     spread: 'spread (%)',
     highlights: ['call p95 (µs)', 'call samples', 'measured runs', 'SQLite'],
   },
-  contention: {
-    throughput: 'drain jobs/sec',
-    spread: 'spread (%)',
-    highlights: ['enqueue jobs/sec', 'jobs/claim', 'claim p95 (µs)', 'complete p95 (µs)'],
-  },
   journal: {
     throughput: 'jobs/sec',
     spread: '',
     highlights: [
+      'FULL drop (%)',
       'claim p95 (µs)',
       'complete p95 (µs)',
       'empty claim p95 (µs)',

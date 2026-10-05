@@ -28,4 +28,8 @@
 
 The maintained grids also drop per-thread databases, intermediate scaling tiers,
 in-memory adapter runs, and duplicate grouped-claim/cleanup adapter workloads.
+The shared-database contention suite and four-worker journal cases are also
+retired: they used independent claim loops rather than the shared coordinator.
+Single-connection journal cases preserve claim-batch comparisons and add a
+paired WAL/NORMAL vs WAL/FULL durability comparison.
 Historical runners remain available in Git.

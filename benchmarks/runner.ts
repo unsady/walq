@@ -60,6 +60,11 @@ export async function runSuite(
   const results: BenchmarkResult[] = definitions.map((definition) =>
     definition.summarize(collected.scenarios.get(definition) ?? { outcomes: [], failures: [] }),
   )
+  if (suite === 'journal') {
+    const { applyDurabilityComparison } = await import('./journal.suite.js')
+    applyDurabilityComparison(results)
+  }
+
   const settings: Record<string, MetricValue> = {
     suite,
     grid: environment.grid,
@@ -67,7 +72,7 @@ export async function runSuite(
     warmup: environment.warmup,
     jobs: environment.jobs ?? definitions[0]?.jobs ?? 0,
     only: environment.only ?? '',
-    synchronous: suite === 'journal' ? 'full' : environment.synchronous,
+    synchronous: suite === 'journal' ? 'per scenario' : environment.synchronous,
   }
   if (suite === 'adapters') settings.batch = 64
 

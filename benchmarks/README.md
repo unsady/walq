@@ -7,20 +7,19 @@ reporting tests are. Vitest is used only for those tests.
 | Suite               | Question                                                                       | Quick / full cases |
 | ------------------- | ------------------------------------------------------------------------------ | ------------------ |
 | `adapters`          | SQLite drivers on Node.js; built-in adapter across Node.js, Bun, Deno          | 6 / 6              |
-| `contention`        | Enqueue and drain throughput with competing workers on one WAL file            | 2 / 4              |
-| `journal`           | WAL vs DELETE with FULL durability and competing workers                       | 8 / 8              |
+| `journal`           | WAL vs DELETE at FULL; WAL/NORMAL vs WAL/FULL; claim batch 1 vs 16             | 6 / 6              |
 | `claim-grouping`    | Production `claimQueues` throughput and responsiveness with a competing writer | 2 / 8              |
-| **Total (Node.js)** |                                                                                | **18 / 26**        |
+| **Total (Node.js)** |                                                                                | **14 / 20**        |
 
 Keep a benchmark only when it informs a decision or detects a performance
 regression. Scheduling correctness belongs in tests; completed experiments keep
 their decision records, not maintained runners.
 
 ```sh
-pnpm bench                              # 18 quick cases on Node.js
-pnpm bench:full                         # 26 full cases on Node.js
+pnpm bench                              # 14 quick cases on Node.js
+pnpm bench:full                         # 20 full cases on Node.js
 pnpm bench journal                      # one suite
-pnpm bench adapters contention          # selected suites, sequentially
+pnpm bench adapters journal          # selected suites, sequentially
 pnpm bench --help
 BENCH_ONLY=competing pnpm bench claim-grouping
 BENCH_JSON=.cache/benchmarks/bench.json pnpm bench
@@ -71,7 +70,7 @@ Quick runs use 1024 jobs and full runs use 10,000 unless `BENCH_JOBS` is set. Ru
 
 Cross-runtime results compare the whole runtime/driver/SQLite combination, not just JavaScript engines. Different bundled SQLite versions or compile options can contribute to differences. These benchmarks use one connection and no concurrent producers; they do not establish contention or multi-process scaling results.
 
-## Production claims and contention
+## Production claims
 
 The full claim-grouping grid uses 1/32 queues, claim limits 1/16, and solo/competing
 placements. Quick selects 32 queues at limit 16 in both placements. All cases call
@@ -81,40 +80,45 @@ claim round. Jobs/sec counts claimed jobs over measured claim-round durations,
 excluding deliberate pauses between rounds. Competing writer latency includes
 its complete storage calls, not only SQLite lock wait. The default is 4096 jobs.
 
-Contention uses 1/4 workers sharing one WAL file, with batch 16 in quick and
-batches 1/16 in full. The default is 2000 total jobs across the pool, not per worker.
-Enqueue and drain phases are measured separately; drain rates include empty-tail
-claims and yields. Each job is completed with one production `complete()` call.
-
-## WAL vs DELETE journal
+## Journal and durability comparisons
 
 ```sh
 pnpm bench journal
 BENCH_JOBS=10000 BENCH_REPEATS=5 BENCH_JSON=.cache/benchmarks/journal.json pnpm bench journal
 ```
 
-Compares `journal_mode=WAL` and `journal_mode=DELETE` for 1 and 4 competing
-worker threads, each with a separate `better-sqlite3` connection to the same
-fresh file, at claim batch sizes 1 and 16. The total job count is fixed across
-the pool, not multiplied by worker count. Only journal mode changes within a
-pair; both use `synchronous=FULL` regardless of `BENCH_SYNCHRONOUS`, a 2000-ms
-busy timeout, identical jobs and transaction boundaries. Each completion is
-one production `complete()` call, not a batched transaction. SQLite's default
-WAL auto-checkpoint is retained, including any checkpoints during measurement.
-Quick runs use 2000 jobs, full runs 10,000; both use the same eight scenarios.
+Six scenarios use one `better-sqlite3` connection in one worker thread on a fresh
+file, at claim batch sizes 1 and 16:
+
+- WAL/NORMAL vs WAL/FULL isolates synchronous durability.
+- WAL/FULL vs DELETE/FULL isolates journal mode.
+- Batch 1 vs 16 isolates claim batching within each mode; completion is still
+  one production `complete()` call per job.
+
+Both grids use these six scenarios: 2000 jobs in quick, 10,000 in full.
+All cases use a 2000-ms busy timeout and identical jobs and transaction
+boundaries. `BENCH_SYNCHRONOUS` does not override these explicit scenario settings.
+SQLite's default WAL auto-checkpoint is retained, including checkpoints during
+measurement.
+
+`FULL drop (%)` is `100 × (1 − WAL/FULL jobs/sec ÷ WAL/NORMAL jobs/sec)` at the
+same batch size and job count. Positive values mean lower FULL throughput;
+negative values mean higher FULL throughput in that run. It appears only for
+valid WAL/FULL rows with a valid matching NORMAL baseline; filtering out the
+baseline leaves the comparison blank. Raw timings and rates remain in JSON.
 
 Schema setup, seeding and per-worker in-memory JIT warmup are outside the timed
-phase. Workers start draining behind a shared barrier and each finishes with
-128 empty claims after finding no ready jobs. `jobs/sec` is actual confirmed
-completions divided by summed wall-clock drain spans across valid repeats,
-including the empty tail and event-loop yields, not summed call durations.
+phase. The worker starts draining behind a barrier and finishes with 128 empty
+claims after finding no ready jobs. `jobs/sec` is actual confirmed completions
+divided by summed wall-clock drain spans across valid repeats, including the
+empty tail and event-loop yields, not summed call durations.
 Successful nonempty claims, single-job completions and empty claims have
 separate p95 metrics. Sample counts and raw millisecond timings are kept in JSON;
 p95 values are medians of per-run p95s, with worker samples pooled within a run.
 
 The event-loop probe measures successive `setImmediate` turns inside each worker,
 yielding once per claim batch or empty claim. Its intervals include synchronous
-claim/completion work and lock waits, so this is worker responsiveness under the
+claim/completion work, so this is worker responsiveness under the
 specified batching policy, not idle timer jitter or the parent's event-loop delay.
 Reported max is the median of per-run maxima. Short runs have noisy tail estimates.
 
@@ -129,16 +133,16 @@ outcomes and failure notes remain available in JSON.
 
 ## Options
 
-| Variable                                    | Default           | Purpose                                                         |
-| ------------------------------------------- | ----------------- | --------------------------------------------------------------- |
-| `BENCH_GRID`                                | `quick`           | `quick` or `full`                                               |
-| `BENCH_REPEATS` / `BENCH_WARMUP`            | `3` / `1`         | Measured / discarded runs                                       |
-| `BENCH_JOBS`                                | per suite         | Total job count                                                 |
-| `BENCH_ONLY`                                | unset             | Scenario-name substring filter                                  |
-| `BENCH_JSON`                                | unset             | Base path for per-suite JSON artifacts                          |
-| `BENCH_SYNCHRONOUS`                         | `normal`          | SQLite durability: `normal` or `full`; journal always uses FULL |
-| `BENCH_ADAPTERS`                            | runtime-dependent | Comma-separated driver selection                                |
-| `BENCH_CLAIM_QUEUES` / `BENCH_CLAIM_LIMITS` | grid              | Comma-separated production claim tiers                          |
+| Variable                                    | Default           | Purpose                                                                         |
+| ------------------------------------------- | ----------------- | ------------------------------------------------------------------------------- |
+| `BENCH_GRID`                                | `quick`           | `quick` or `full`                                                               |
+| `BENCH_REPEATS` / `BENCH_WARMUP`            | `3` / `1`         | Measured / discarded runs                                                       |
+| `BENCH_JOBS`                                | per suite         | Total job count                                                                 |
+| `BENCH_ONLY`                                | unset             | Scenario-name substring filter                                                  |
+| `BENCH_JSON`                                | unset             | Base path for per-suite JSON artifacts                                          |
+| `BENCH_SYNCHRONOUS`                         | `normal`          | SQLite durability: `normal` or `full`; journal uses explicit per-scenario modes |
+| `BENCH_ADAPTERS`                            | runtime-dependent | Comma-separated driver selection                                                |
+| `BENCH_CLAIM_QUEUES` / `BENCH_CLAIM_LIMITS` | grid              | Comma-separated production claim tiers                                          |
 
 ## Reading results
 
