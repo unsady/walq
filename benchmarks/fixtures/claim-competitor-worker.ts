@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { parentPort, workerData } from 'node:worker_threads'
 
+import { betterSqlite3 } from '@walq/better-sqlite3'
 import Database from 'better-sqlite3'
 
 import type { SynchronousMode } from '../bench-options.js'
@@ -10,6 +11,8 @@ export interface ClaimCompetitorInput {
   path: string
   control: SharedArrayBuffer
   synchronous: SynchronousMode
+  preparedLeases?: number
+  production?: boolean
 }
 
 export interface ClaimCompetitorReport {
@@ -38,6 +41,7 @@ async function main(): Promise<void> {
   db.pragma('journal_mode = WAL')
   db.pragma(`synchronous = ${input.synchronous.toUpperCase()}`)
   db.pragma('busy_timeout = 2000')
+  const storage = input.production ? betterSqlite3(db) : undefined
   const insert = db.prepare(`
     INSERT INTO walq_jobs (
       id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
@@ -59,7 +63,7 @@ async function main(): Promise<void> {
   const leases: Lease[] = []
   const prepareLeases = db.transaction(() => {
     const now = Date.now()
-    for (let index = 0; index < preparedLeases; index += 1) {
+    for (let index = 0; index < (input.preparedLeases ?? preparedLeases); index += 1) {
       const lease = { id: randomUUID(), leaseToken: randomUUID() }
       insertActive.run({ ...lease, now, expiresAt: now + 120_000 })
       leases.push(lease)
@@ -79,26 +83,40 @@ async function main(): Promise<void> {
   try {
     while (Atomics.load(control, 1) === 0 && operations < leases.length) {
       try {
-        const lease = leases[operations]
+        const lease = leases[operations]!
         if (lease === undefined) throw new Error('competitor exhausted its prepared leases')
-        function enqueue(): void {
+        async function enqueue(): Promise<void> {
           const started = performance.now()
-          insert.run({ id: randomUUID(), now: Date.now() })
+          const now = Date.now()
+          if (storage === undefined) insert.run({ id: randomUUID(), now })
+          else
+            await storage.enqueue({
+              queue: 'competitor',
+              name: 'job',
+              data: '{}',
+              now,
+              availableAt: now,
+              priority: 0,
+              attempts: 1,
+            })
           enqueueSamples.push(performance.now() - started)
         }
-        function completeLease(): void {
+        async function completeLease(): Promise<void> {
           const started = performance.now()
-          const result = complete.run({ ...lease, now: Date.now() })
+          const applied =
+            storage === undefined
+              ? complete.run({ ...lease, now: Date.now() }).changes === 1
+              : (await storage.complete({ ...lease, now: Date.now() })) === 'applied'
           completeSamples.push(performance.now() - started)
-          if (result.changes !== 1) throw new Error('competitor lost its lease')
+          if (!applied) throw new Error('competitor lost its lease')
         }
 
         if (operations % 2 === 0) {
-          enqueue()
-          completeLease()
+          await enqueue()
+          await completeLease()
         } else {
-          completeLease()
-          enqueue()
+          await completeLease()
+          await enqueue()
         }
         operations += 1
         Atomics.store(control, 2, operations)

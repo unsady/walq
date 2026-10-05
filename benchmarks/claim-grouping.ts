@@ -133,18 +133,23 @@ export function claimGroupingScenarioName(scenario: ClaimGroupingScenario): stri
   return `production / ${scenario.placement} / ${scenario.queues} queues / limit ${scenario.limit}`
 }
 
-function prepareJobs(db: Database.Database, queues: string[], jobs: number): void {
+export function prepareJobs(
+  db: Database.Database,
+  queues: string[],
+  jobs: number,
+  data = '{}',
+): void {
   const insert = db.prepare(`
     INSERT INTO walq_jobs (
       id, queue, name, data, status, createdAt, availableAt, priority, attemptsMade, attempts
-    ) VALUES (@id, @queue, 'job', '{}', 'pending', @now, @now, 0, 0, 1)
+    ) VALUES (@id, @queue, 'job', @data, 'pending', @now, @now, 0, 0, 1)
   `)
   const counts = distribute(jobs, queues.length)
   const now = Date.now()
   const populate = db.transaction(() => {
     for (const [index, queue] of queues.entries()) {
       for (let count = 0; count < (counts[index] ?? 0); count += 1) {
-        insert.run({ id: randomUUID(), queue, now })
+        insert.run({ id: randomUUID(), queue, now, data })
       }
     }
   })
@@ -196,9 +201,11 @@ async function claimProduction(
   return jobs
 }
 
-function startCompetitor(
+export function startCompetitor(
   path: string,
   synchronous: SynchronousMode,
+  preparedLeases?: number,
+  production = false,
 ): {
   start: () => Promise<void>
   waitForSamples: (minimum: number) => Promise<void>
@@ -207,7 +214,13 @@ function startCompetitor(
 } {
   const controlBuffer = new SharedArrayBuffer(12)
   const control = new Int32Array(controlBuffer)
-  const input: ClaimCompetitorInput = { path, control: controlBuffer, synchronous }
+  const input: ClaimCompetitorInput = {
+    path,
+    control: controlBuffer,
+    synchronous,
+    production,
+    ...(preparedLeases === undefined ? {} : { preparedLeases }),
+  }
   const worker = new Worker(new URL('./fixtures/claim-competitor-worker.js', import.meta.url), {
     workerData: input,
   })

@@ -7,6 +7,7 @@ interface SuiteModule {
 }
 
 const suites: Record<string, () => Promise<SuiteModule>> = {
+  ablation: () => import('./ablation.suite.js'),
   adapters: () => import('./adapters.suite.js'),
   journal: () => import('./journal.suite.js'),
   'claim-grouping': () => import('./claim-grouping.suite.js'),
@@ -22,7 +23,8 @@ async function main(): Promise<void> {
     return
   }
 
-  const selected = args.length === 0 ? Object.keys(suites) : args
+  const selected =
+    args.length === 0 ? Object.keys(suites).filter((suite) => suite !== 'ablation') : args
   for (const suite of selected) {
     if (!Object.hasOwn(suites, suite)) throw new Error(`Unknown benchmark suite "${suite}"`)
   }

@@ -54,6 +54,20 @@ describe('runSuite', () => {
     expect(sink.report).toHaveBeenCalledWith(expect.stringContaining('repeat 2/2'))
   })
 
+  it('labels ablation durability as per-scenario rather than the harness default', async () => {
+    const sink = output()
+
+    expect(
+      await runSuite(
+        'ablation',
+        [definition('paired modes', async () => 1, 'ablation')],
+        environment,
+        sink,
+      ),
+    ).toBe(true)
+    expect(sink.write.mock.calls[0]?.[0]).toContain('synchronous=per scenario')
+  })
+
   it('rejects empty selections and zero measured runs before executing', async () => {
     const run = vi.fn<() => Promise<number>>(async () => 1)
 

@@ -14,6 +14,8 @@ export interface BenchmarkResult {
   metrics: Record<string, MetricValue>
   /** Every measured run in execution order. */
   samples: RunSample[]
+  /** Optional operation-level outcomes, retained without aggregation. */
+  raw?: unknown[]
   notes: string[]
   ok: boolean
 }
@@ -378,6 +380,17 @@ interface DomainSummaryProfile {
 }
 
 const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
+  ablation: {
+    throughput: 'jobs/sec',
+    spread: 'spread (%)',
+    highlights: [
+      'elapsed (s)',
+      'claim p95 (µs)',
+      'event-loop p95 (µs)',
+      'writer enqueue p95 (µs)',
+      'writer complete p95 (µs)',
+    ],
+  },
   adapters: {
     throughput: 'jobs/sec',
     spread: 'spread (%)',
