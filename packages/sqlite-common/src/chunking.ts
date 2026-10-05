@@ -6,11 +6,6 @@
  */
 export const claimBudget = 512
 
-/** Queues one transaction may cover at a uniform limit: 16 -> 32, 32 -> 16, 64 -> 8. */
-export function claimChunkSize(limit: number): number {
-  return Math.max(1, Math.floor(claimBudget / limit))
-}
-
 /**
  * Splits an ordered batch into transaction-sized runs by accumulating the limit
  * of every request, so a run never asks for more than `claimBudget` jobs even

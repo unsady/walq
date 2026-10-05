@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { claimBudget, claimChunkSize, chunkClaims } from './chunking.js'
+import { claimBudget, chunkClaims } from './chunking.js'
 
 interface Request {
   limit: number
@@ -9,34 +9,6 @@ interface Request {
 function limits(chunks: Request[][]): number[][] {
   return chunks.map((chunk) => chunk.map(({ limit }) => limit))
 }
-
-describe('claim chunk size', () => {
-  it('derives the queue count from the job budget', () => {
-    expect(claimChunkSize(16)).toBe(32)
-    expect(claimChunkSize(32)).toBe(16)
-    expect(claimChunkSize(64)).toBe(8)
-  })
-
-  it('fills the budget for limits that divide it', () => {
-    expect(claimChunkSize(1) * 1).toBe(claimBudget)
-    expect(claimChunkSize(16) * 16).toBe(claimBudget)
-    expect(claimChunkSize(512) * 512).toBe(claimBudget)
-  })
-
-  it('never plans more jobs than the budget for a uniform limit', () => {
-    for (const limit of [1, 3, 15, 16, 17, 255, 256, 300, 511, 512]) {
-      expect(claimChunkSize(limit) * limit).toBeLessThanOrEqual(claimBudget)
-    }
-
-    expect(claimChunkSize(300)).toBe(1)
-    expect(claimChunkSize(511)).toBe(1)
-  })
-
-  it('never returns less than one queue for a limit above the budget', () => {
-    expect(claimChunkSize(1000)).toBe(1)
-    expect(claimChunkSize(Number.MAX_SAFE_INTEGER)).toBe(1)
-  })
-})
 
 describe('chunked grouped claims', () => {
   it('returns no transactions for an empty batch', () => {

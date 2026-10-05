@@ -50,7 +50,7 @@ interface GroupedStorage {
 
 /** Storage that advertises claimQueues and records each grouped request. */
 function groupedStorage(
-  handler: (requests: ClaimInput[]) => ClaimedJob[][] = () => [],
+  handler: (requests: ClaimInput[]) => ClaimedJob[][] = (requests) => requests.map(() => []),
 ): GroupedStorage {
   const calls: ClaimInput[][] = []
   const storage: Storage = {
@@ -280,6 +280,38 @@ describe('StorageCoordinator', () => {
     coordinator.unregister(second)
   })
 
+  it('reports unexpected poll failures and continues polling other workers', async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { storage } = gatedStorage()
+    const coordinator = getCoordinator(storage)
+    const failure = new Error('unexpected poll failure')
+    const failing: CoordinatedWorker = {
+      poll: async () => {
+        throw failure
+      },
+    }
+    const poll = vi.fn<CoordinatedWorker['poll']>(async () => 0)
+    const healthy: CoordinatedWorker = { poll }
+
+    try {
+      coordinator.register('failing', failing)
+      coordinator.register('healthy', healthy)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(log).toHaveBeenCalledWith('walq queue "failing" poll failed unexpectedly', failure)
+      expect(poll).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(log).toHaveBeenCalledTimes(2)
+      expect(poll).toHaveBeenCalledTimes(2)
+    } finally {
+      coordinator.unregister(failing)
+      coordinator.unregister(healthy)
+      log.mockRestore()
+    }
+  })
+
   it('rotates the poll order between workers', async () => {
     vi.useFakeTimers()
     const { storage } = gatedStorage()
@@ -470,6 +502,37 @@ describe('StorageCoordinator', () => {
         reason: new Error('Grouped claim returned 1 results for 2 requests'),
       },
     ])
+  })
+
+  it.each([
+    // oxlint-disable-next-line unicorn/no-new-array -- A sparse array reproduces a malformed adapter response.
+    { label: 'sparse', value: new Array<ClaimedJob[]>(2) },
+    { label: 'undefined', value: [[], undefined] },
+    { label: 'null', value: [[], null] },
+    { label: 'non-array', value: [[], {}] },
+  ])('rejects every claim when a grouped result is $label', async ({ value }) => {
+    const { storage } = groupedStorage(() => value as ClaimedJob[][])
+    const coordinator = getCoordinator(storage)
+    const results = await Promise.allSettled([
+      coordinator.claim({ ...claimInput, queue: 'a' }),
+      coordinator.claim({ ...claimInput, queue: 'b' }),
+    ])
+
+    expect(results).toHaveLength(2)
+    for (const result of results) {
+      expect(result).toMatchObject({
+        status: 'rejected',
+        reason: expect.objectContaining({ message: expect.stringContaining('must be an array') }),
+      })
+    }
+  })
+
+  it('rejects a non-array grouped response', async () => {
+    const { storage } = groupedStorage(() => ({ length: 1 }) as ClaimedJob[][])
+
+    await expect(getCoordinator(storage).claim(claimInput)).rejects.toThrow(
+      'Grouped claim must return an array',
+    )
   })
 
   it('wakes only workers of the requested queue', async () => {

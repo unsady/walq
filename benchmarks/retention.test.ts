@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import * as fs from 'node:fs'
+
+import Database from 'better-sqlite3'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   defineRetentionScenario,
@@ -14,6 +17,8 @@ import {
   type RetentionOutcome,
   type RetentionScenario,
 } from './retention.js'
+
+vi.mock('node:fs', { spy: true })
 
 function outcome(overrides: Partial<RetentionOutcome> = {}): RetentionOutcome {
   return {
@@ -108,6 +113,59 @@ describe('retention grid', () => {
 })
 
 describe('production cleanup workload', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('treats a missing snapshot file as zero bytes', async () => {
+    vi.mocked(fs.statSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('missing file'), { code: 'ENOENT' })
+    })
+    const definition = defineRetentionScenario(
+      { history: 0, cleanup: 'retained', batch: 0, connection: 'warm' },
+      1,
+      'normal',
+    )
+    const run = (await definition.run()) as RetentionOutcome
+
+    expect(run.before.db).toBe(0)
+    expect(retentionInvalidReason(run, 1)).toBeUndefined()
+  })
+
+  it('propagates unexpected snapshot errors', async () => {
+    const failure = Object.assign(new Error('snapshot denied'), { code: 'EACCES' })
+    vi.mocked(fs.statSync).mockImplementationOnce(() => {
+      throw failure
+    })
+    const definition = defineRetentionScenario(
+      { history: 0, cleanup: 'retained', batch: 0, connection: 'warm' },
+      1,
+      'normal',
+    )
+
+    await expect(definition.run()).rejects.toBe(failure)
+  })
+
+  it('propagates unexpected connection close errors', async () => {
+    const failure = new Error('close failed')
+    const close = Database.prototype.close
+
+    function closeWithFailure(this: Database.Database): never {
+      close.call(this)
+
+      throw failure
+    }
+
+    vi.spyOn(Database.prototype, 'close').mockImplementationOnce(closeWithFailure)
+    const definition = defineRetentionScenario(
+      { history: 0, cleanup: 'retained', batch: 0, connection: 'warm' },
+      1,
+      'normal',
+    )
+
+    await expect(definition.run()).rejects.toBe(failure)
+  })
+
   it.each(['warm', 'reopened'] as const)(
     'cleans both terminal statuses in bounded calls (%s)',
     async (connection) => {

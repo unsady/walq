@@ -228,8 +228,10 @@ function openDatabase(path: string, synchronous: SynchronousMode): Database.Data
 function fileSize(path: string): number {
   try {
     return statSync(path).size
-  } catch {
-    return 0
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return 0
+
+    throw error
   }
 }
 
@@ -493,11 +495,10 @@ async function executeRun(
     }
   } finally {
     try {
-      db?.close()
-    } catch {
-      // The connection may already be closed by the reopened branch.
+      if (db?.open) db.close()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
     }
-    rmSync(directory, { recursive: true, force: true })
   }
 }
 
