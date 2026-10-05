@@ -1,16 +1,11 @@
-import { betterSqlite3 } from '@walq/better-sqlite3'
-import Database from 'better-sqlite3'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
-  claimChunkOverride,
   claimGroupingScenarioName,
   claimGroupingScenarios,
   claimLimitOverride,
-  claimModeOverride,
   claimQueueOverride,
   fullClaimGroupingGrid,
-  GroupedClaimer,
   invalidReason,
   minimumCompetitorSamples,
   measureClaimRound,
@@ -22,64 +17,6 @@ import {
 } from './claim-grouping.js'
 import type { ClaimCompetitorReport } from './fixtures/claim-competitor-worker.js'
 import type { Collected } from './harness.js'
-
-describe('grouped prototype selection', () => {
-  it('claims only ungrouped jobs in production order', () => {
-    const db = new Database(':memory:')
-
-    try {
-      betterSqlite3(db)
-      db.exec(`
-        INSERT INTO walq_groups (queue, id, concurrency) VALUES ('queue', 'group', 1);
-        INSERT INTO walq_jobs (
-          id, queue, name, data, status, createdAt, availableAt, priority,
-          attemptsMade, attempts, groupId
-        ) VALUES
-          ('z-first', 'queue', 'job', '{}', 'pending', 0, 0, 0, 0, 1, NULL),
-          ('a-second', 'queue', 'job', '{}', 'pending', 0, 0, 0, 0, 1, NULL),
-          ('priority', 'queue', 'job', '{}', 'pending', 0, 0, 1, 0, 1, NULL),
-          ('grouped', 'queue', 'job', '{}', 'pending', 0, 0, 2, 0, 1, 'group');
-      `)
-      const claimer = new GroupedClaimer(db)
-
-      const jobs = claimer.claim(
-        [{ queue: 'queue', now: 1, limit: 16, leaseDuration: 60_000 }],
-        undefined,
-        [],
-      )
-
-      expect(jobs.map(({ id }) => id)).toEqual(['priority', 'z-first', 'a-second'])
-    } finally {
-      db.close()
-    }
-  })
-})
-
-describe('grouped prototype selection (SQLite performance contract)', () => {
-  it('uses the pending index without scanning or sorting the backlog', () => {
-    const db = new Database(':memory:')
-
-    try {
-      betterSqlite3(db)
-      const prepare = vi.spyOn(db, 'prepare')
-      new GroupedClaimer(db)
-      const sql = prepare.mock.calls.find(([query]) => query.includes('SELECT id'))?.[0]
-      prepare.mockRestore()
-
-      expect(sql).toBeDefined()
-      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all({
-        queue: 'queue',
-        now: 1,
-        limit: 16,
-      }) as { detail: string }[]
-
-      expect(plan.some(({ detail }) => detail.includes('USING INDEX walq_pending'))).toBe(true)
-      expect(plan.some(({ detail }) => /SCAN walq_jobs|TEMP B-TREE/.test(detail))).toBe(false)
-    } finally {
-      db.close()
-    }
-  })
-})
 
 describe('claim round event-loop probe (measurement contract)', () => {
   it('observes every turn throughout the round', async () => {
@@ -111,20 +48,21 @@ describe('claim round event-loop probe (measurement contract)', () => {
 })
 
 describe('claim grouping scenarios', () => {
-  it('builds the quick matrix', () => {
-    const scenarios = claimGroupingScenarios(quickClaimGroupingGrid)
+  it('keeps two production smoke cases in quick and eight in full', () => {
+    expect(claimGroupingScenarios(quickClaimGroupingGrid).map(claimGroupingScenarioName)).toEqual([
+      'production / solo / 32 queues / limit 16',
+      'production / competing / 32 queues / limit 16',
+    ])
 
-    expect(scenarios).toHaveLength(12)
-    expect(new Set(scenarios.map((scenario) => scenario.mode))).toEqual(new Set(['production']))
-    expect(new Set(scenarios.map(claimGroupingScenarioName)).size).toBe(12)
-  })
-
-  it('covers every requested queue count and limit in the full matrix', () => {
     const scenarios = claimGroupingScenarios(fullClaimGroupingGrid)
 
-    expect(scenarios).toHaveLength(72)
-    expect(new Set(scenarios.map((scenario) => scenario.queues))).toEqual(new Set([1, 4, 8, 32]))
-    expect(new Set(scenarios.map((scenario) => scenario.limit))).toEqual(new Set([1, 4, 16]))
+    expect(scenarios).toHaveLength(8)
+    expect(new Set(scenarios.map(claimGroupingScenarioName)).size).toBe(8)
+    expect(new Set(scenarios.map((scenario) => scenario.queues))).toEqual(new Set([1, 32]))
+    expect(new Set(scenarios.map((scenario) => scenario.limit))).toEqual(new Set([1, 16]))
+    expect(new Set(scenarios.map((scenario) => scenario.placement))).toEqual(
+      new Set(['solo', 'competing']),
+    )
   })
 })
 
@@ -136,31 +74,13 @@ describe('claim grouping tier overrides', () => {
     expect(claimLimitOverride('')).toBeUndefined()
   })
 
-  it('parses chunk tiers with an explicit all marker', () => {
-    expect(claimChunkOverride('all,16,32,64')).toEqual([undefined, 16, 32, 64])
-    expect(claimChunkOverride('32')).toEqual([32])
-    expect(claimChunkOverride(undefined)).toBeUndefined()
-  })
-
-  it('parses claim modes', () => {
-    expect(claimModeOverride('grouped')).toEqual(['grouped'])
-    expect(claimModeOverride('current,grouped,production')).toEqual([
-      'current',
-      'grouped',
-      'production',
-    ])
-    expect(claimModeOverride('')).toBeUndefined()
-  })
-
   it('rejects invalid tiers instead of defaulting silently', () => {
     expect(() => claimQueueOverride('32,x')).toThrow('BENCH_CLAIM_QUEUES')
     expect(() => claimQueueOverride('0')).toThrow('BENCH_CLAIM_QUEUES')
     expect(() => claimLimitOverride('1.5')).toThrow('BENCH_CLAIM_LIMITS')
-    expect(() => claimChunkOverride('big')).toThrow('BENCH_CLAIM_CHUNKS')
-    expect(() => claimModeOverride('batched')).toThrow('BENCH_CLAIM_MODES')
   })
 
-  it('replaces only the provided tiers and keeps the rest of the grid', () => {
+  it('replaces only the provided tiers and keeps the source grid unchanged', () => {
     const grid = withClaimGroupingTiers(quickClaimGroupingGrid, {
       queues: [32, 64, 128],
       limits: [16],
@@ -168,51 +88,9 @@ describe('claim grouping tier overrides', () => {
 
     expect(grid.queues).toEqual([32, 64, 128])
     expect(grid.limits).toEqual([16])
-    expect(grid.modes).toEqual(quickClaimGroupingGrid.modes)
     expect(grid.placements).toEqual(quickClaimGroupingGrid.placements)
+    expect(quickClaimGroupingGrid.queues).toEqual([32])
     expect(claimGroupingScenarios(grid)).toHaveLength(6)
-  })
-
-  it('keeps chunk tiers out of the current and production modes', () => {
-    const grid = withClaimGroupingTiers(quickClaimGroupingGrid, {
-      queues: [32],
-      limits: [16],
-      modes: ['production'],
-      chunks: [undefined, 16],
-    })
-
-    expect(claimGroupingScenarios(grid).map(claimGroupingScenarioName)).toEqual([
-      'production / solo / 32 queues / limit 16',
-      'production / competing / 32 queues / limit 16',
-    ])
-  })
-
-  it('keeps the base name until chunks are configured, then labels every chunk tier', () => {
-    const base = withClaimGroupingTiers(quickClaimGroupingGrid, {
-      queues: [128],
-      limits: [16],
-      modes: ['grouped'],
-    })
-    expect(claimGroupingScenarios(base).map(claimGroupingScenarioName)).toContain(
-      'grouped / solo / 128 queues / limit 16',
-    )
-
-    const chunked = withClaimGroupingTiers(quickClaimGroupingGrid, {
-      queues: [128],
-      limits: [16],
-      modes: ['grouped'],
-      chunks: [undefined, 16, 32, 64],
-    })
-    const scenarios = claimGroupingScenarios(chunked)
-    expect(scenarios).toHaveLength(8)
-    expect(scenarios.map(claimGroupingScenarioName)).toEqual(
-      expect.arrayContaining([
-        'grouped / solo / 128 queues / limit 16 / chunk all',
-        'grouped / solo / 128 queues / limit 16 / chunk 16',
-        'grouped / competing / 128 queues / limit 16 / chunk 32',
-        'grouped / competing / 128 queues / limit 16 / chunk 64',
-      ]),
-    )
   })
 })
 
@@ -291,12 +169,8 @@ describe('summarizeRuns metric labels', () => {
   const production: ClaimGroupingScenario = {
     queues: 8,
     limit: 16,
-    mode: 'production',
     placement: 'solo',
-    chunkSize: undefined,
-    chunksConfigured: false,
   }
-  const grouped: ClaimGroupingScenario = { ...production, mode: 'grouped' }
 
   it('labels the production claimQueues call as an API call, not a transaction', () => {
     const result = summarizeRuns(production, 4, collected([outcome()]))
@@ -309,17 +183,8 @@ describe('summarizeRuns metric labels', () => {
     expect(result.samples[0]?.calls).toBe(2)
   })
 
-  it('keeps transaction labels for the prototype modes', () => {
-    const result = summarizeRuns(grouped, 4, collected([outcome()]))
-
-    expect(result.metrics['transaction p50 (µs)']).toBe(10000)
-    expect(result.metrics['jobs/transaction']).toBe(2)
-    expect(result.metrics.commits).toBe(2)
-    expect(result.metrics['claim call p50 (µs)']).toBeUndefined()
-  })
-
   it('excludes invalid runs and notes the reason', () => {
-    const result = summarizeRuns(grouped, 4, collected([outcome(), outcome({ claimed: 1 })]))
+    const result = summarizeRuns(production, 4, collected([outcome(), outcome({ claimed: 1 })]))
 
     expect(result.samples).toHaveLength(1)
     expect(result.ok).toBe(false)

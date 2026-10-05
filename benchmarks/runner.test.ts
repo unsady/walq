@@ -19,7 +19,7 @@ const environment: BenchEnvironment = {
   synchronous: 'normal',
 }
 
-function definition(name: string, run: () => Promise<number>, suite = 'coordinator') {
+function definition(name: string, run: () => Promise<number>, suite = 'contention') {
   return defineScenario({
     suite,
     scenario: name,
@@ -29,7 +29,7 @@ function definition(name: string, run: () => Promise<number>, suite = 'coordinat
       suite,
       scenario: name,
       params: {},
-      metrics: { 'jobs/sec': outcomes.length * 10 },
+      metrics: { [suite === 'contention' ? 'drain jobs/sec' : 'jobs/sec']: outcomes.length * 10 },
       samples: outcomes.map((duration) => ({ duration })),
       notes: failures,
       ok: failures.length === 0 && outcomes.length > 0,
@@ -46,9 +46,9 @@ describe('runSuite', () => {
     const sink = output()
     const scenarios = ['alpha', 'beta'].map((name) => definition(name, async () => 1))
 
-    expect(await runSuite('coordinator', scenarios, environment, sink)).toBe(true)
+    expect(await runSuite('contention', scenarios, environment, sink)).toBe(true)
     expect(sink.write).toHaveBeenCalledTimes(1)
-    expect(sink.write.mock.calls[0]?.[0]).toContain('domain summary — coordinator (quick)')
+    expect(sink.write.mock.calls[0]?.[0]).toContain('domain summary — contention (quick)')
     expect(sink.write.mock.calls[0]?.[0]).toContain('jobs/sec')
     expect(sink.report).toHaveBeenCalledWith(expect.stringContaining('warmup 1/1'))
     expect(sink.report).toHaveBeenCalledWith(expect.stringContaining('repeat 2/2'))
@@ -57,11 +57,11 @@ describe('runSuite', () => {
   it('rejects empty selections and zero measured runs before executing', async () => {
     const run = vi.fn<() => Promise<number>>(async () => 1)
 
-    await expect(runSuite('coordinator', [], environment, output())).rejects.toThrow(
-      'No coordinator scenario',
+    await expect(runSuite('contention', [], environment, output())).rejects.toThrow(
+      'No contention scenario',
     )
     await expect(
-      runSuite('coordinator', [definition('alpha', run)], { ...environment, repeats: 0 }, output()),
+      runSuite('contention', [definition('alpha', run)], { ...environment, repeats: 0 }, output()),
     ).rejects.toThrow('BENCH_REPEATS must be positive')
     expect(run).not.toHaveBeenCalled()
   })
@@ -72,7 +72,7 @@ describe('runSuite', () => {
       throw new Error('run timed out')
     })
 
-    expect(await runSuite('coordinator', [broken], { ...environment, warmup: 0 }, sink)).toBe(false)
+    expect(await runSuite('contention', [broken], { ...environment, warmup: 0 }, sink)).toBe(false)
     expect(sink.report).toHaveBeenCalledWith('broken: run timed out; run timed out')
     expect(sink.write).toHaveBeenCalledTimes(1)
   })
@@ -84,7 +84,7 @@ describe('runSuite', () => {
     })
 
     expect(
-      await runSuite('coordinator', [abort, definition('later', later)], environment, output()),
+      await runSuite('contention', [abort, definition('later', later)], environment, output()),
     ).toBe(false)
     expect(later).not.toHaveBeenCalled()
   })
@@ -95,13 +95,13 @@ describe('runSuite', () => {
     let attempts = 0
     try {
       await runSuite(
-        'coordinator',
+        'contention',
         [definition('alpha', async () => ++attempts)],
         { ...environment, json: base },
         output(),
       )
       const parsed = JSON.parse(
-        readFileSync(join(directory, 'nested', 'run.coordinator.json'), 'utf8'),
+        readFileSync(join(directory, 'nested', 'run.contention.json'), 'utf8'),
       ) as {
         environment: { runtime: string }
         options: { jobs: number }

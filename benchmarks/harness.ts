@@ -383,11 +383,6 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
     spread: 'spread (%)',
     highlights: ['call p95 (µs)', 'call samples', 'measured runs', 'SQLite'],
   },
-  coordinator: {
-    throughput: 'jobs/sec',
-    spread: 'spread (%)',
-    highlights: ['claims/job', 'empty claims', 'claim p95 (µs)', 'first handler (ms)'],
-  },
   contention: {
     throughput: 'drain jobs/sec',
     spread: 'spread (%)',
@@ -410,33 +405,7 @@ const domainSummaryProfiles: Record<string, DomainSummaryProfile> = {
   'claim-grouping': {
     throughput: 'jobs/sec',
     spread: 'spread (%)',
-    // Production reports one `claimQueues` call, the prototype reports one transaction, so both
-    // label sets must stay visible instead of silently dropping production latency.
-    highlights: [
-      'jobs/claim call',
-      'claim calls',
-      'claim call p95 (µs)',
-      'jobs/transaction',
-      'commits',
-      'transaction p95 (µs)',
-      'event loop p95 (µs)',
-    ],
-  },
-  groups: {
-    throughput: 'claims/sec',
-    spread: 'spread (%)',
-    highlights: ['first claim (µs)', 'follow-up claim (µs)', 'claimed jobs', 'served groups'],
-  },
-  retention: {
-    throughput: 'active jobs/sec',
-    spread: 'spread (%)',
-    highlights: [
-      'cleanup (ms)',
-      'cleanup calls',
-      'cleanup call p95 (µs)',
-      'cleanup stall p95 (µs)',
-      'db after (MiB)',
-    ],
+    highlights: ['jobs/claim call', 'claim calls', 'claim call p95 (µs)', 'event loop p95 (µs)'],
   },
 }
 

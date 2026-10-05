@@ -14,7 +14,7 @@ import { renderDomainSummary, renderJson } from './harness.js'
 
 const base: AdapterScenario = {
   adapter: 'node:sqlite',
-  database: 'memory',
+  database: 'wal',
   operation: 'enqueueMany',
   jobs: 17,
   batch: 8,
@@ -36,7 +36,11 @@ describe('adapter benchmark selection', () => {
 
   it('uses identical workloads for both adapters and filters scenario names', () => {
     const scenarios = adapterScenarios(readBenchEnvironment({}), adapterNames(undefined))
-    expect(scenarios).toHaveLength(20)
+    expect(scenarios).toHaveLength(6)
+    expect(scenarios.every((scenario) => scenario.database === 'wal')).toBe(true)
+    expect(new Set(scenarios.map((scenario) => scenario.operation))).toEqual(
+      new Set(['enqueueMany', 'claim', 'lifecycle']),
+    )
     const better = scenarios.filter((scenario) => scenario.adapter === 'better-sqlite3')
     const builtin = scenarios.filter((scenario) => scenario.adapter === 'node:sqlite')
     expect(better.map(({ adapter: _adapter, ...scenario }) => scenario)).toEqual(
@@ -48,7 +52,7 @@ describe('adapter benchmark selection', () => {
     ])
     expect(
       adapterScenarios(
-        readBenchEnvironment({ BENCH_ONLY: 'wal/cleanup', BENCH_JOBS: '17' }),
+        readBenchEnvironment({ BENCH_ONLY: 'wal/claim', BENCH_JOBS: '17' }),
         adapterNames(undefined),
       ),
     ).toMatchObject([
@@ -67,27 +71,13 @@ it.each(scenarios)(
   '$adapter/$database/$operation validates actual measured work',
   async (scenario) => {
     const run = await runAdapterScenario(scenario, 'full')
-    const calls =
-      scenario.operation === 'lifecycle' ? 23 : scenario.operation === 'claimQueues-grouped' ? 1 : 3
+    const calls = scenario.operation === 'lifecycle' ? 23 : 3
 
     expect(run.jobs).toBe(17)
     expect(run.latency).toHaveLength(calls)
     expect(run.duration).toBe(run.latency.reduce((total, value) => total + value, 0))
     expect(run.duration).toBeGreaterThan(0)
     expect(run.sqlite).toMatch(/^\d+\.\d+\.\d+/)
-  },
-)
-
-it.each(adapterNames(undefined))(
-  '%s grouped claims include multiple chunks and a partial final sweep',
-  async (adapter) => {
-    const run = await runAdapterScenario(
-      { ...base, adapter, operation: 'claimQueues-grouped', jobs: 1025, batch: 64 },
-      'normal',
-    )
-
-    expect(run.jobs).toBe(1025)
-    expect(run.latency).toHaveLength(2)
   },
 )
 

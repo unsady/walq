@@ -117,6 +117,36 @@ export function runStorageConformance(
       expect(await storage.enqueueMany([])).toEqual([])
     })
 
+    it('preserves round-robin fairness across repeated large batch claims', async () => {
+      const inputs = Array.from({ length: 64 }, (_, group) =>
+        Array.from({ length: 64 }, () =>
+          enqueueInput({ group: { id: `group-${group}`, concurrency: 256 } }),
+        ),
+      ).flat()
+      const added = await storage.enqueueMany(inputs)
+      const groups = new Map(added.map((job, index) => [job.id, inputs[index]!.group!.id]))
+      const claimed = new Set<string>()
+
+      for (let round = 0; round < 8; round += 1) {
+        const jobs = await storage.claim(claimInput({ limit: 256 }))
+        const counts = new Map<string, number>()
+
+        expect(jobs).toHaveLength(256)
+
+        for (const job of jobs) {
+          expect(claimed.has(job.id)).toBe(false)
+          claimed.add(job.id)
+          const group = groups.get(job.id)!
+          counts.set(group, (counts.get(group) ?? 0) + 1)
+        }
+
+        expect(counts.size).toBe(64)
+        expect([...counts.values()]).toEqual(Array.from({ length: 64 }, () => 4))
+      }
+
+      expect(claimed.size).toBe(2048)
+    })
+
     it('pauses and resumes claims idempotently for one exact queue', async () => {
       const first = await storage.enqueue(enqueueInput())
       const second = await storage.enqueue(enqueueInput())

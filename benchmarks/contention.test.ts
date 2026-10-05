@@ -82,29 +82,19 @@ function collected(
   return { outcomes, failures }
 }
 
-const scenario: ContentionScenario = { threads: 4, batch: 1, placement: 'shared' }
+const scenario: ContentionScenario = { threads: 4, batch: 1 }
 
 describe('contentionScenarios', () => {
-  it('skips the per-thread placement for a single thread', () => {
-    const scenarios = contentionScenarios(quickContentionGrid)
-
-    expect(scenarios.some((entry) => entry.threads === 1 && entry.placement === 'per-thread')).toBe(
-      false,
-    )
-    expect(scenarios).toHaveLength(6)
-    expect(contentionScenarios(fullContentionGrid)).toHaveLength(28)
-  })
-
-  it('keeps both placements of one configuration next to each other', () => {
-    const scenarios = contentionScenarios(quickContentionGrid).filter(
-      (entry) => entry.threads === 4,
-    )
-
-    expect(scenarios.map((entry) => entry.placement)).toEqual([
-      'shared',
-      'per-thread',
-      'shared',
-      'per-thread',
+  it('uses one shared database with the requested worker and batch tiers', () => {
+    expect(contentionScenarios(quickContentionGrid)).toEqual([
+      { threads: 1, batch: 16 },
+      { threads: 4, batch: 16 },
+    ])
+    expect(contentionScenarios(fullContentionGrid)).toEqual([
+      { threads: 1, batch: 1 },
+      { threads: 1, batch: 16 },
+      { threads: 4, batch: 1 },
+      { threads: 4, batch: 16 },
     ])
   })
 })

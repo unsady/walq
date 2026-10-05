@@ -69,7 +69,7 @@ export function readBenchEnvironment(env: NodeJS.ProcessEnv): BenchEnvironment {
 /**
  * Derive a per-suite artifact path from the `BENCH_JSON` base path, so benchmark
  * files never overwrite each other's domain metrics:
- * `bench.json` becomes `bench.coordinator.json` and `bench.contention.json`.
+ * `bench.json` becomes `bench.adapters.json` and `bench.contention.json`.
  */
 export function artifactPath(base: string, suite: string): string {
   const separator = base.lastIndexOf('.')

@@ -8,12 +8,9 @@ interface SuiteModule {
 
 const suites: Record<string, () => Promise<SuiteModule>> = {
   adapters: () => import('./adapters.suite.js'),
-  coordinator: () => import('./coordinator.suite.js'),
   contention: () => import('./contention.suite.js'),
   journal: () => import('./journal.suite.js'),
   'claim-grouping': () => import('./claim-grouping.suite.js'),
-  groups: () => import('./groups.suite.js'),
-  retention: () => import('./retention.suite.js'),
 }
 
 async function main(): Promise<void> {

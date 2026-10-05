@@ -287,30 +287,30 @@ describe('renderDomainSummary', () => {
   }
 
   it('keeps the suite profile and drops columns without signal', () => {
-    const summary = renderDomainSummary('coordinator (quick)', environment, { repeats: 3 }, [
+    const summary = renderDomainSummary('adapters (quick)', environment, { repeats: 3 }, [
       result({
-        suite: 'coordinator',
+        suite: 'adapters',
         scenario: 'shared / 1 queue',
         params: { mode: 'shared', queues: 1, jobs: 1000 },
         metrics: {
           'jobs/sec': 1200,
           'spread (%)': 5,
-          'claims/job': 1.01,
+          'call samples': 1.01,
           'empty claims': 0,
-          'claim p95 (µs)': 42,
+          'call p95 (µs)': 42,
           'elapsed (ms)': 800,
         },
       }),
     ])
 
-    expect(summary).toContain('domain summary — coordinator (quick)')
+    expect(summary).toContain('domain summary — adapters (quick)')
     expect(summary).toContain('env  v22.0.0 darwin/arm64 · test cpu · 8 cores')
     expect(summary).toContain('opts repeats=3')
     expect(summary).toContain('scenario')
     expect(summary).toContain('jobs/sec')
     expect(summary).toContain('spread (%)')
-    expect(summary).toContain('claims/job')
-    expect(summary).toContain('claim p95 (µs)')
+    expect(summary).toContain('call samples')
+    expect(summary).toContain('call p95 (µs)')
     expect(summary).not.toContain('###')
     expect(summary).not.toContain('|')
     expect(summary).not.toContain('mode')
@@ -359,29 +359,29 @@ describe('renderDomainSummary', () => {
   })
 
   it('aligns text left and numbers right with computed widths', () => {
-    const summary = renderDomainSummary('coordinator', environment, {}, [
+    const summary = renderDomainSummary('adapters', environment, {}, [
       result({
-        suite: 'coordinator',
+        suite: 'adapters',
         scenario: 'alpha',
-        metrics: { 'jobs/sec': 5, 'spread (%)': 1, 'claims/job': 30 },
+        metrics: { 'jobs/sec': 5, 'spread (%)': 1, 'call samples': 30 },
       }),
       result({
-        suite: 'coordinator',
+        suite: 'adapters',
         scenario: 'beta beta',
-        metrics: { 'jobs/sec': 50, 'spread (%)': 10, 'claims/job': 3 },
+        metrics: { 'jobs/sec': 50, 'spread (%)': 10, 'call samples': 3 },
       }),
     ])
 
     const lines = summary.split('\n')
-    expect(lines).toContain('scenario   jobs/sec  spread (%)  claims/job')
-    expect(lines).toContain('alpha             5           1          30')
-    expect(lines).toContain('beta beta        50          10           3')
+    expect(lines).toContain('scenario   jobs/sec  spread (%)  call samples')
+    expect(lines).toContain('alpha             5           1            30')
+    expect(lines).toContain('beta beta        50          10             3')
   })
 
   it('collapses line breaks so a value cannot break the table', () => {
     const summary = renderDomainSummary('line\nbreak', environment, {}, [
       result({
-        suite: 'coordinator',
+        suite: 'adapters',
         scenario: 'multi\nline',
         metrics: { 'jobs/sec': '1000\nruns', 'spread (%)': 2 },
       }),
@@ -393,7 +393,7 @@ describe('renderDomainSummary', () => {
     expect(summary).not.toContain('multi\nline')
   })
 
-  it('shows both production and prototype claim-grouping latency columns', () => {
+  it('shows production claim-grouping API latency columns', () => {
     const summary = renderDomainSummary('claim-grouping (quick)', environment, {}, [
       result({
         suite: 'claim-grouping',
@@ -407,24 +407,12 @@ describe('renderDomainSummary', () => {
           'event loop p95 (µs)': 1,
         },
       }),
-      result({
-        suite: 'claim-grouping',
-        scenario: 'grouped / solo',
-        metrics: {
-          'jobs/sec': 900,
-          'spread (%)': 3,
-          'transaction p95 (µs)': 60,
-          'jobs/transaction': 4,
-          commits: 50,
-          'event loop p95 (µs)': 1,
-        },
-      }),
     ])
 
     expect(summary).toContain('claim call p95 (µs)')
     expect(summary).toContain('jobs/claim call')
-    expect(summary).toContain('transaction p95 (µs)')
-    expect(summary).toContain('jobs/transaction')
+    expect(summary).not.toContain('transaction p95 (µs)')
+    expect(summary).not.toContain('jobs/transaction')
   })
 
   it('returns nothing without results', () => {

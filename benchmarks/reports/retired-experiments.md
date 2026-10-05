@@ -11,5 +11,21 @@
   API or performance claim is adopted from this experiment; a future proposal
   needs equivalent semantics and execution paths.
 
-Group scheduling and stress checks were not retired: their distinct workloads
-now share the maintained `groups` suite.
+- **Grouped-claim SQL prototypes:** per-queue and grouped ungrouped-job runners
+  supported the [512-job chunk decision](grouped-claim-chunk-size.md). The
+  architecture is shipped; maintained cases now measure only production calls.
+- **In-memory coordinator comparison:** shared vs isolated pollers did not measure
+  durable SQLite workloads. Production grouped claims remain benchmarked, while
+  coordinator behavior remains covered by core tests.
+- **Group scheduling workloads:** saturated/future groups and fairness belong in
+  correctness and query-plan tests, not a permanent timing matrix. Existing
+  adapter tests cover blocked selection; storage conformance preserves the
+  repeated 64-group, 256-job-claim fairness check.
+- **Retention history matrix:** warm/reopened history, cleanup, VACUUM and
+  checkpoint combinations are retired. Cleanup semantics remain covered by
+  storage conformance and adapter retention tests; a specific large-history
+  performance issue should get a targeted experiment.
+
+The maintained grids also drop per-thread databases, intermediate scaling tiers,
+in-memory adapter runs, and duplicate grouped-claim/cleanup adapter workloads.
+Historical runners remain available in Git.

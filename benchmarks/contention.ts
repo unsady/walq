@@ -26,30 +26,24 @@ import {
 } from './harness.js'
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
-export type ContentionPlacement = 'shared' | 'per-thread'
-
 export interface ContentionGrid {
   threads: number[]
   batches: number[]
-  placements: ContentionPlacement[]
 }
 
 export interface ContentionScenario {
   threads: number
   batch: number
-  placement: ContentionPlacement
 }
 
 export const quickContentionGrid: ContentionGrid = {
   threads: [1, 4],
-  batches: [1, 16],
-  placements: ['shared', 'per-thread'],
+  batches: [16],
 }
 
 export const fullContentionGrid: ContentionGrid = {
-  threads: [1, 2, 4, 8],
-  batches: [1, 4, 16, 64],
-  placements: ['shared', 'per-thread'],
+  threads: [1, 4],
+  batches: [1, 16],
 }
 
 const runTimeout = 60_000
@@ -84,18 +78,14 @@ export interface ContentionRunOutcome {
 }
 
 export function scenarioName(scenario: ContentionScenario): string {
-  return `${scenario.placement} / ${scenario.threads} threads / batch ${scenario.batch}`
+  return `shared / ${scenario.threads} threads / batch ${scenario.batch}`
 }
 
 export function contentionScenarios(grid: ContentionGrid): ContentionScenario[] {
   const scenarios: ContentionScenario[] = []
   for (const threads of grid.threads) {
     for (const batch of grid.batches) {
-      for (const placement of grid.placements) {
-        // A single thread owns a single file either way.
-        if (threads === 1 && placement === 'per-thread') continue
-        scenarios.push({ threads, batch, placement })
-      }
+      scenarios.push({ threads, batch })
     }
   }
 
@@ -226,16 +216,13 @@ export async function executeRun(
   const gate = new SharedArrayBuffer(4)
   const timeout = guard(runTimeout, 'run timed out')
   const counts = distribute(jobs, scenario.threads)
-  const paths = Array.from({ length: scenario.threads }, (_, index) =>
-    join(directory, `walq-${scenario.placement === 'shared' ? 0 : index}.sqlite`),
-  )
+  const path = join(directory, 'walq.sqlite')
   const channels: Channel[] = []
 
   try {
-    for (const path of new Set(paths)) {
-      await prepareDatabase(path, synchronous, journal, drainOnly ? jobs : 0)
-    }
-    for (const [index, path] of paths.entries()) {
+    await prepareDatabase(path, synchronous, journal, drainOnly ? jobs : 0)
+
+    for (let index = 0; index < scenario.threads; index += 1) {
       channels.push(
         startWorker({
           path,
@@ -336,7 +323,7 @@ export function summarizeRuns(
     suite: 'contention',
     scenario: scenarioName(scenario),
     params: {
-      files: scenario.placement === 'shared' ? 1 : scenario.threads,
+      files: 1,
       threads: scenario.threads,
       batch: scenario.batch,
       jobs,

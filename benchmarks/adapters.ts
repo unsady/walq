@@ -18,17 +18,11 @@ import {
 import { defineScenario, type ScenarioDefinition } from './scenario.js'
 
 export type AdapterName = 'better-sqlite3' | 'node:sqlite'
-export type DatabaseMode = 'memory' | 'wal'
-export type AdapterOperation =
-  | 'enqueueMany'
-  | 'claim'
-  | 'claimQueues-grouped'
-  | 'lifecycle'
-  | 'cleanup'
+export type AdapterOperation = 'enqueueMany' | 'claim' | 'lifecycle'
 
 export interface AdapterScenario {
   adapter: AdapterName
-  database: DatabaseMode
+  database: 'wal'
   operation: AdapterOperation
   jobs: number
   batch: number
@@ -58,15 +52,7 @@ export interface AdapterResult extends BenchmarkResult {
   runs: AdapterOutcome[]
 }
 
-const operations: AdapterOperation[] = [
-  'enqueueMany',
-  'claim',
-  'claimQueues-grouped',
-  'lifecycle',
-  'cleanup',
-]
-const queues = 16
-const groups = 16
+const operations: AdapterOperation[] = ['enqueueMany', 'claim', 'lifecycle']
 
 export function adapterNames(value: string | undefined, runtime = 'node'): AdapterName[] {
   const selected =
@@ -92,11 +78,15 @@ export function adapterScenarios(
 ): AdapterScenario[] {
   const jobs = environment.jobs ?? (environment.grid === 'full' ? 10_000 : 1024)
 
-  return (['memory', 'wal'] as const)
-    .flatMap((database) =>
-      operations.flatMap((operation) =>
-        adapters.map((adapter) => ({ adapter, database, operation, jobs, batch: 64 })),
-      ),
+  return operations
+    .flatMap((operation) =>
+      adapters.map((adapter) => ({
+        adapter,
+        database: 'wal' as const,
+        operation,
+        jobs,
+        batch: 64,
+      })),
     )
     .filter((scenario) => matches(scenarioName(scenario), environment.only))
 }
@@ -108,7 +98,6 @@ function scenarioName(scenario: AdapterScenario): string {
 async function open(
   adapter: AdapterName,
   path: string,
-  database: DatabaseMode,
   synchronous: SynchronousMode,
   entries: AdapterEntries | undefined,
 ): Promise<{ db: Connection; storage: Storage }> {
@@ -119,7 +108,7 @@ async function open(
     const db = new DatabaseSync(path)
 
     try {
-      configure(db, database, synchronous)
+      configure(db, synchronous)
 
       return { db, storage: sqlite(db) }
     } catch (error) {
@@ -138,7 +127,7 @@ async function open(
   const db = new Database(path)
 
   try {
-    configure(db, database, synchronous)
+    configure(db, synchronous)
 
     return { db, storage: betterSqlite3(db) }
   } catch (error) {
@@ -147,26 +136,21 @@ async function open(
   }
 }
 
-function configure(db: Connection, database: DatabaseMode, synchronous: SynchronousMode): void {
+function configure(db: Connection, synchronous: SynchronousMode): void {
   db.exec(
-    `PRAGMA page_size = 4096; PRAGMA journal_mode = ${database === 'wal' ? 'WAL' : 'MEMORY'}; PRAGMA ${synchronousPragma(synchronous)}; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -2000; PRAGMA wal_autocheckpoint = 1000`,
+    `PRAGMA page_size = 4096; PRAGMA journal_mode = WAL; PRAGMA ${synchronousPragma(synchronous)}; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -2000; PRAGMA wal_autocheckpoint = 1000`,
   )
 }
 
 function inputs(scenario: AdapterScenario): EnqueueInput[] {
-  return Array.from({ length: scenario.jobs }, (_, index) => ({
-    queue: scenario.operation === 'claimQueues-grouped' ? `bench-${index % queues}` : 'bench',
+  return Array.from({ length: scenario.jobs }, () => ({
+    queue: 'bench',
     name: 'job',
     data: '{"value":1}',
     now: 10,
     availableAt: 10,
     priority: 0,
     attempts: 2,
-    ...(scenario.operation === 'claimQueues-grouped'
-      ? {
-          group: { id: `group-${Math.floor(index / queues) % groups}`, concurrency: scenario.jobs },
-        }
-      : {}),
   }))
 }
 
@@ -191,8 +175,7 @@ export async function runAdapterScenario(
   try {
     const connection = await open(
       scenario.adapter,
-      scenario.database === 'memory' ? ':memory:' : join(directory, 'queue.sqlite'),
-      scenario.database,
+      join(directory, 'queue.sqlite'),
       synchronous,
       entries,
     )
@@ -202,7 +185,7 @@ export async function runAdapterScenario(
     const durability = db.prepare('PRAGMA synchronous').get() as { synchronous: number }
     const page = db.prepare('PRAGMA page_size').get() as { page_size: number }
     if (
-      journal.journal_mode !== (scenario.database === 'wal' ? 'wal' : 'memory') ||
+      journal.journal_mode !== 'wal' ||
       durability.synchronous !== (synchronous === 'full' ? 2 : 1) ||
       page.page_size !== 4096
     ) {
@@ -234,31 +217,7 @@ export async function runAdapterScenario(
       }
     }
 
-    if (scenario.operation === 'cleanup') {
-      while (processed < scenario.jobs) {
-        deadline.check()
-        const jobs = await storage.claim(request)
-        if (jobs.length === 0) throw new Error('Cleanup setup stopped before all jobs were claimed')
-        for (const job of jobs) {
-          const result = await storage.complete({ id: job.id, leaseToken: job.leaseToken, now: 11 })
-          if (result !== 'applied') throw new Error('Cleanup setup lost a lease')
-        }
-        processed += jobs.length
-      }
-      processed = 0
-      const cleanup = {
-        queue: 'bench',
-        now: 12,
-        limit: scenario.batch,
-        retention: { completed: { count: 0, maxAge: null }, failed: { count: null, maxAge: null } },
-      }
-      while (processed < scenario.jobs) {
-        const result = await measure(() => storage.cleanup(cleanup))
-        if (result.removed === 0)
-          throw new Error('Cleanup stopped before all terminal jobs were removed')
-        processed += result.removed
-      }
-    } else if (scenario.operation === 'enqueueMany' || scenario.operation === 'lifecycle') {
+    if (scenario.operation === 'enqueueMany' || scenario.operation === 'lifecycle') {
       for (const batch of batches) {
         const added = await measure(() => storage.enqueueMany(batch))
         if (added.length !== batch.length) throw new Error('Enqueue returned an incomplete batch')
@@ -277,16 +236,8 @@ export async function runAdapterScenario(
         }
       }
     } else {
-      const requests = Array.from({ length: queues }, (_, index) => ({
-        ...request,
-        queue: `bench-${index}`,
-      }))
-      const sweep = { requests }
       while (processed < scenario.jobs) {
-        const jobs =
-          scenario.operation === 'claim'
-            ? await measure(() => storage.claim(request))
-            : (await measure(() => storage.claimQueues!(sweep))).flat()
+        const jobs = await measure(() => storage.claim(request))
         if (jobs.length === 0) throw new Error('Claims stopped before all jobs were acquired')
         claimed.push(...jobs)
         processed += jobs.length
@@ -312,11 +263,7 @@ export async function runAdapterScenario(
     const counts = db
       .prepare(`SELECT count(*) AS count, sum(status = '${expected}') AS matching FROM walq_jobs`)
       .get() as { count: number; matching: number | null }
-    if (
-      scenario.operation === 'cleanup'
-        ? counts.count !== 0
-        : counts.count !== scenario.jobs || counts.matching !== scenario.jobs
-    ) {
+    if (counts.count !== scenario.jobs || counts.matching !== scenario.jobs) {
       throw new Error('Final database state does not match the measured workload')
     }
     const duration = latency.reduce((total, value) => total + value, 0)

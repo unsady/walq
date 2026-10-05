@@ -11,12 +11,8 @@ Measured on an Apple M1 Pro (8 cores, Node 24), with 128/256 queues, claim limit
 
 **Decision:** split grouped claims at a budget of 512 jobs (`packages/sqlite-common/src/chunking.ts`). At limit 16 this corresponds to 32 queues per transaction. It substantially shortens writer-lock holds without a large throughput loss; a job budget also adapts to other claim limits. The production path was separately checked against the 32-queue prototype. Adapter tests cover chunk boundaries, rollback within a chunk, and commits across chunks.
 
-To repeat the comparison on current code, run the prototype under both `BENCH_SYNCHRONOUS=normal` and `full` (and save JSON with `BENCH_JSON` if needed):
-
-```sh
-BENCH_REPEATS=5 BENCH_JOBS=131072 BENCH_CLAIM_QUEUES=128,256 \
-  BENCH_CLAIM_LIMITS=16 BENCH_CLAIM_MODES=grouped \
-  BENCH_CLAIM_CHUNKS=all,16,32,64 pnpm bench claim-grouping
-```
-
-`BENCH_ONLY=competing BENCH_REPEATS=8` gives more samples for the competing writer. The prototype reports transaction latency; the production `claimQueues` metric covers an entire call, possibly multiple transactions. Neither competitor latency nor p99 should be interpreted as a direct or precise measurement of SQLite lock wait.
+The ungrouped SQL prototypes used for this comparison are retired; their runner
+is available in Git history before the benchmark-suite reduction. Maintained
+`claim-grouping` cases measure only production `claimQueues` calls, which can span
+multiple transactions and are not directly comparable to prototype transaction
+timings. Competitor latency and p99 are not precise measurements of SQLite lock wait.

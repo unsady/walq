@@ -69,12 +69,12 @@ describe('synchronousPragma', () => {
 
 describe('artifactPath', () => {
   it('inserts the suite before the extension', () => {
-    expect(artifactPath('reports/bench.json', 'coordinator')).toBe('reports/bench.coordinator.json')
+    expect(artifactPath('reports/bench.json', 'adapters')).toBe('reports/bench.adapters.json')
     expect(artifactPath('bench.json', 'contention')).toBe('bench.contention.json')
   })
 
   it('appends the suite when there is no extension', () => {
-    expect(artifactPath('reports/bench', 'coordinator')).toBe('reports/bench.coordinator')
-    expect(artifactPath('.hidden', 'coordinator')).toBe('.hidden.coordinator')
+    expect(artifactPath('reports/bench', 'adapters')).toBe('reports/bench.adapters')
+    expect(artifactPath('.hidden', 'adapters')).toBe('.hidden.adapters')
   })
 })

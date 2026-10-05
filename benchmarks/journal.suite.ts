@@ -28,7 +28,7 @@ export function summarizeJournal(
   jobs: number,
   collected: Collected<ContentionRunOutcome>,
 ): JournalResult {
-  const base = summarizeRuns({ ...scenario, placement: 'shared' }, jobs, collected)
+  const base = summarizeRuns(scenario, jobs, collected)
   const valid = collected.outcomes.filter((outcome) => invalidReason(outcome, jobs) === undefined)
   const claim = summarizePerRunMicros(valid.map((outcome) => outcome.claimSamples))
   const complete = summarizePerRunMicros(valid.map((outcome) => outcome.completeSamples))
@@ -86,8 +86,7 @@ export function definitions(environment: BenchEnvironment): ScenarioDefinition[]
         suite: 'journal',
         scenario: scenarioName(scenario),
         jobs,
-        run: () =>
-          executeRun({ ...scenario, placement: 'shared' }, jobs, 'full', scenario.journal, true),
+        run: () => executeRun(scenario, jobs, 'full', scenario.journal, true),
         summarize: (collected) => summarizeJournal(scenario, jobs, collected),
       }),
     )
