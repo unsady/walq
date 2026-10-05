@@ -39,14 +39,13 @@ db.close()
 
 ## Managed storage
 
-`createStorage` opens and owns a connection. Set `worker: true` to run SQLite in a dedicated thread instead of blocking the main event loop (worker mode is currently verified on Node.js only).
+`createStorage` opens and owns a connection. By default, `worker` is `false` and SQLite runs in the main thread. Optionally set `worker: true` to move SQLite work to a dedicated thread; job handlers stay in the main thread and work in either mode. Worker mode is currently verified on Node.js only.
 
 ```ts
 import { createStorage } from '@walq/better-sqlite3'
 
 const storage = await createStorage({
   filename: './queue.sqlite',
-  worker: true, // Defaults to false.
 })
 
 const queue = new Queue('email', {

@@ -58,11 +58,10 @@ import { createStorage } from '@walq/better-sqlite3'
 
 const storage = await createStorage({
   filename: './queue.sqlite',
-  worker: true,
 })
 ```
 
-Both adapters accept `worker: true` to move SQLite work to a dedicated thread; job handlers stay in the main thread. The default is `false`. Worker mode is currently verified on Node.js only.
+Both adapters default to `worker: false`, running SQLite in the main thread. Optionally set `worker: true` to move SQLite work to a dedicated thread; job handlers stay in the main thread and work in either mode. Worker mode is currently verified on Node.js only.
 
 ### Bring your own connection
 
