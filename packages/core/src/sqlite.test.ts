@@ -112,6 +112,47 @@ describe.each(['better-sqlite3', 'node:sqlite'] as const)('%s Queue integration'
     await expect(queue.get(retried.id)).resolves.toBeNull()
   })
 
+  it('wakes a sleeping worker immediately after retrying a failed job', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(10_000)
+    const { storage } = openStorage()
+    const queue = new Queue('retry-wake', {
+      storage,
+      retention: { completed: null, failed: null },
+    })
+    const added = await queue.add({})
+    const [claimed] = await storage.claim({
+      queue: 'retry-wake',
+      limit: 1,
+      now: Date.now(),
+      leaseDuration: 30_000,
+    })
+    expect(claimed?.id).toBe(added.id)
+    await storage.fail({
+      id: claimed!.id,
+      leaseToken: claimed!.leaseToken,
+      now: Date.now(),
+      error: 'terminal failure',
+      retryAt: null,
+    })
+    const handled: string[] = []
+    const worker = queue.process(async (_data, context) => {
+      handled.push(context.jobId)
+    })
+
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(handled).toEqual([])
+      expect(await queue.get(added.id)).toMatchObject({ status: 'failed' })
+
+      expect(await queue.retry(added.id)).toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(handled).toEqual([added.id])
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('wakes a sleeping worker after a pending job is rescheduled', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)

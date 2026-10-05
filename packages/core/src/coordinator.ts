@@ -136,12 +136,18 @@ export class StorageCoordinator {
       const results = await claimQueues.call(this.#storage, {
         requests: batch.map((request) => request.input),
       })
+      if (!Array.isArray(results)) throw new Error('Grouped claim must return an array')
       if (results.length !== batch.length) {
         throw new Error(
           `Grouped claim returned ${results.length} results for ${batch.length} requests`,
         )
       }
-      for (const [index, request] of batch.entries()) request.resolve(results[index] ?? [])
+      for (let index = 0; index < batch.length; index += 1) {
+        if (!Array.isArray(results[index])) {
+          throw new Error(`Grouped claim result at index ${index} must be an array`)
+        }
+      }
+      for (const [index, request] of batch.entries()) request.resolve(results[index]!)
     } catch (error) {
       for (const request of batch) request.reject(error)
     }
@@ -193,7 +199,9 @@ export class StorageCoordinator {
       polls.push(
         worker.poll().then(
           () => undefined,
-          () => undefined,
+          (error: unknown) => {
+            console.error(`walq queue "${state.queue}" poll failed unexpectedly`, error)
+          },
         ),
       )
     }

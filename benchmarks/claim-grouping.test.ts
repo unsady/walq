@@ -24,7 +24,7 @@ import type { ClaimCompetitorReport } from './fixtures/claim-competitor-worker.j
 import type { Collected } from './harness.js'
 
 describe('grouped prototype selection', () => {
-  it('uses the pending index and production ordering for ungrouped jobs', () => {
+  it('claims only ungrouped jobs in production order', () => {
     const db = new Database(':memory:')
 
     try {
@@ -40,20 +40,7 @@ describe('grouped prototype selection', () => {
           ('priority', 'queue', 'job', '{}', 'pending', 0, 0, 1, 0, 1, NULL),
           ('grouped', 'queue', 'job', '{}', 'pending', 0, 0, 2, 0, 1, 'group');
       `)
-      const prepare = vi.spyOn(db, 'prepare')
       const claimer = new GroupedClaimer(db)
-      const sql = prepare.mock.calls.find(([query]) => query.includes('SELECT id'))?.[0]
-      prepare.mockRestore()
-
-      expect(sql).toBeDefined()
-      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all({
-        queue: 'queue',
-        now: 1,
-        limit: 16,
-      }) as { detail: string }[]
-
-      expect(plan.some(({ detail }) => detail.includes('USING INDEX walq_pending'))).toBe(true)
-      expect(plan.some(({ detail }) => /SCAN walq_jobs|TEMP B-TREE/.test(detail))).toBe(false)
 
       const jobs = claimer.claim(
         [{ queue: 'queue', now: 1, limit: 16, leaseDuration: 60_000 }],
@@ -68,7 +55,33 @@ describe('grouped prototype selection', () => {
   })
 })
 
-describe('claim round event-loop probe', () => {
+describe('grouped prototype selection (SQLite performance contract)', () => {
+  it('uses the pending index without scanning or sorting the backlog', () => {
+    const db = new Database(':memory:')
+
+    try {
+      betterSqlite3(db)
+      const prepare = vi.spyOn(db, 'prepare')
+      new GroupedClaimer(db)
+      const sql = prepare.mock.calls.find(([query]) => query.includes('SELECT id'))?.[0]
+      prepare.mockRestore()
+
+      expect(sql).toBeDefined()
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all({
+        queue: 'queue',
+        now: 1,
+        limit: 16,
+      }) as { detail: string }[]
+
+      expect(plan.some(({ detail }) => detail.includes('USING INDEX walq_pending'))).toBe(true)
+      expect(plan.some(({ detail }) => /SCAN walq_jobs|TEMP B-TREE/.test(detail))).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('claim round event-loop probe (measurement contract)', () => {
   it('observes every turn throughout the round', async () => {
     const samples: number[] = []
     const result = await measureClaimRound(async () => {

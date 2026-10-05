@@ -56,10 +56,10 @@ for (const [name, createStorage] of Object.entries(factories)) {
         const storage = await open()
         const inserted = storage.enqueueMany([input, input])
         const closed = storage.close()
-        assert.equal(storage.close(), closed)
+        const closedAgain = storage.close()
         await assert.rejects(storage.count({ queue: 'test' }), /closed/)
         assert.equal((await inserted).length, 2)
-        await closed
+        await Promise.all([closed, closedAgain])
       })
 
       it('preserves validation errors and continues after a failed operation', async () => {

@@ -18,10 +18,6 @@ interface StatusPlan {
   deleteEligible(limit: number): number
 }
 
-function prepare(db: Connection, sql: string): Statement {
-  return db.prepare(sql)
-}
-
 /**
  * Bounded terminal-job retention for one SQLite connection.
  *
@@ -43,9 +39,7 @@ export class TerminalCleanup {
     // A count bound contributes the row just older than the newest `count` rows;
     // an age bound contributes the newest row finished before the cutoff. The
     // newest of the two is the frontier of the union of both eligible tails.
-    this.#selectFrontier = prepare(
-      db,
-      `
+    this.#selectFrontier = db.prepare(`
         SELECT finishedAt AS finishedAt, id AS id FROM (
           SELECT finishedAt AS finishedAt, id AS id FROM walq_jobs
           WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
@@ -62,30 +56,21 @@ export class TerminalCleanup {
         )
         ORDER BY finishedAt DESC, id DESC
         LIMIT 1
-      `,
-    )
-    this.#selectAgeFrontier = prepare(
-      db,
-      `
+      `)
+    this.#selectAgeFrontier = db.prepare(`
         SELECT finishedAt AS finishedAt, id AS id FROM walq_jobs
         WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
           AND finishedAt < @cutoff
         ORDER BY finishedAt DESC, id DESC
         LIMIT 1
-      `,
-    )
-    this.#hasEligible = prepare(
-      db,
-      `
+      `)
+    this.#hasEligible = db.prepare(`
         SELECT 1 AS found FROM walq_jobs
         WHERE queue = @queue AND status = @status AND finishedAt IS NOT NULL
           AND (finishedAt, id) <= (@finishedAt, @id)
         LIMIT 1
-      `,
-    )
-    this.#deleteEligible = prepare(
-      db,
-      `
+      `)
+    this.#deleteEligible = db.prepare(`
         DELETE FROM walq_jobs
         WHERE rowid IN (
           SELECT rowid FROM walq_jobs
@@ -94,8 +79,7 @@ export class TerminalCleanup {
           ORDER BY finishedAt, id
           LIMIT @limit
         )
-      `,
-    )
+      `)
     this.#transaction = db.transaction((input: CleanupInput): CleanupResult => this.#execute(input))
   }
 

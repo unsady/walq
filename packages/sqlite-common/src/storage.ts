@@ -66,10 +66,6 @@ interface NextGroup {
 const maxGroupLookupsBeforeIndexScan = 8
 const maxScheduleBatchSize = 100
 
-function prepare(db: Connection, sql: string): Statement {
-  return db.prepare(sql)
-}
-
 function validateObject(input: unknown, name: string): asserts input is Record<string, unknown> {
   if (!isRecord(input)) {
     throw new TypeError(`${name} must be an object`)
@@ -152,7 +148,6 @@ class SqliteStorage implements Storage {
   private readonly heartbeatStatement: Statement
   private readonly claimTransaction: Transaction<[ClaimStep[]], ClaimedJob[][]>
   private readonly terminalCleanup: TerminalCleanup
-  private readonly findSchedule: Statement
   private readonly upsertScheduleStatement: Statement
   private readonly getScheduleStatement: Statement
   private readonly removeScheduleStatement: Statement
@@ -165,9 +160,7 @@ class SqliteStorage implements Storage {
     this.db = db
     initialize(db)
 
-    this.insert = prepare(
-      db,
-      `
+    this.insert = db.prepare(`
         INSERT INTO walq_jobs (
           id, queue, name, data, status, createdAt, availableAt, priority, dedupe, groupId,
           attemptsMade, attempts
@@ -177,114 +170,79 @@ class SqliteStorage implements Storage {
           @groupId, 0, @attempts
         )
         RETURNING ${metadata}
-      `,
-    )
-    this.findDeduplicated = prepare(
-      db,
+      `)
+    this.findDeduplicated = db.prepare(
       `SELECT ${metadata} FROM walq_jobs WHERE queue = @queue AND dedupe = @dedupe`,
     )
-    this.findGroup = prepare(
-      db,
+    this.findGroup = db.prepare(
       'SELECT concurrency FROM walq_groups WHERE queue = @queue AND id = @id',
     )
-    this.insertGroup = prepare(
-      db,
+    this.insertGroup = db.prepare(
       'INSERT INTO walq_groups (queue, id, concurrency) VALUES (@queue, @id, @concurrency) ON CONFLICT (queue, id) DO NOTHING',
     )
     this.enqueueManyTransaction = db.transaction((inputs: EnqueueInput[]) =>
       inputs.map((input) => this.insertOrGet(input)),
     )
-    this.pauseQueueStatement = prepare(
-      db,
+    this.pauseQueueStatement = db.prepare(
       'INSERT INTO walq_paused_queues (queue) VALUES (@queue) ON CONFLICT (queue) DO NOTHING',
     )
-    this.resumeQueueStatement = prepare(db, 'DELETE FROM walq_paused_queues WHERE queue = @queue')
-    this.isQueuePaused = prepare(
-      db,
+    this.resumeQueueStatement = db.prepare('DELETE FROM walq_paused_queues WHERE queue = @queue')
+    this.isQueuePaused = db.prepare(
       'SELECT 1 AS paused FROM walq_paused_queues WHERE queue = @queue',
     )
-    this.recover = prepare(
-      db,
-      `
+    this.recover = db.prepare(`
         UPDATE walq_jobs SET
           status = CASE WHEN attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
           availableAt = CASE WHEN attemptsMade < attempts THEN expiresAt ELSE availableAt END,
           finishedAt = CASE WHEN attemptsMade < attempts THEN NULL ELSE @now END,
           leaseToken = NULL, expiresAt = NULL
         WHERE queue = @queue AND status = 'active' AND expiresAt <= @now
-      `,
-    )
-    this.selectUngrouped = prepare(
-      db,
-      `
+      `)
+    this.selectUngrouped = db.prepare(`
         SELECT id FROM walq_jobs INDEXED BY walq_pending
         WHERE queue = @queue AND status = 'pending' AND groupId IS NULL
           AND availableAt <= @now AND attemptsMade < attempts
         ORDER BY priority DESC, availableAt, seq LIMIT @limit
-      `,
-    )
-    this.selectGrouped = prepare(
-      db,
-      `
+      `)
+    this.selectGrouped = db.prepare(`
         SELECT id FROM walq_jobs INDEXED BY walq_pending_grouped
         WHERE queue = @queue AND groupId = @groupId AND status = 'pending'
           AND groupId IS NOT NULL AND availableAt <= @now AND attemptsMade < attempts
         ORDER BY priority DESC, availableAt, seq LIMIT 1
-      `,
-    )
-    this.hasDueGrouped = prepare(
-      db,
-      `
+      `)
+    this.hasDueGrouped = db.prepare(`
         SELECT 1 FROM walq_jobs INDEXED BY walq_pending_grouped
         WHERE queue = @queue AND status = 'pending' AND groupId IS NOT NULL
           AND availableAt <= @now AND attemptsMade < attempts LIMIT 1
-      `,
-    )
-    this.nextGroup = prepare(
-      db,
-      `
+      `)
+    this.nextGroup = db.prepare(`
         SELECT id FROM walq_groups INDEXED BY walq_groups_eligible
         WHERE queue = @queue AND pendingCount > 0 AND activeCount < concurrency AND id > @after
         ORDER BY id LIMIT 1
-      `,
-    )
-    this.nextDueGroup = prepare(
-      db,
-      `
+      `)
+    this.nextDueGroup = db.prepare(`
         SELECT groupId AS id FROM walq_jobs INDEXED BY walq_pending_grouped
         WHERE queue = @queue AND status = 'pending' AND groupId IS NOT NULL
           AND groupId > @after AND availableAt <= @now AND attemptsMade < attempts
         ORDER BY groupId LIMIT 1
-      `,
-    )
-    this.isGroupEligible = prepare(
-      db,
-      `SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
+      `)
+    this.isGroupEligible = db.prepare(`SELECT 1 FROM walq_groups INDEXED BY walq_groups_eligible
        WHERE queue = @queue AND id = @groupId
-         AND pendingCount > 0 AND activeCount < concurrency`,
-    )
-    this.groupCursor = prepare(db, 'SELECT lastGroupId FROM walq_group_cursor WHERE queue = @queue')
-    this.advanceGroupCursor = prepare(
-      db,
-      `INSERT INTO walq_group_cursor (queue, lastGroupId) VALUES (@queue, @groupId)
-       ON CONFLICT (queue) DO UPDATE SET lastGroupId = excluded.lastGroupId`,
-    )
-    this.acquire = prepare(
-      db,
-      `
+         AND pendingCount > 0 AND activeCount < concurrency`)
+    this.groupCursor = db.prepare('SELECT lastGroupId FROM walq_group_cursor WHERE queue = @queue')
+    this.advanceGroupCursor =
+      db.prepare(`INSERT INTO walq_group_cursor (queue, lastGroupId) VALUES (@queue, @groupId)
+       ON CONFLICT (queue) DO UPDATE SET lastGroupId = excluded.lastGroupId`)
+    this.acquire = db.prepare(`
         UPDATE walq_jobs SET status = 'active', attemptsMade = attemptsMade + 1,
           leaseToken = @leaseToken, expiresAt = @expiresAt
         WHERE id = @id
         RETURNING ${metadata}, leaseToken, expiresAt
-      `,
-    )
-    this.inspectStatement = prepare(
-      db,
+      `)
+    this.inspectStatement = db.prepare(
       `SELECT ${snapshotMetadata} FROM walq_jobs WHERE queue = @queue AND id = @id`,
     )
-    this.countStatement = prepare(
-      db,
-      `
+    this.countStatement = db.prepare(`
         SELECT
           COUNT(CASE WHEN status = 'pending' THEN 1 END) AS pending,
           COUNT(CASE WHEN status = 'active' THEN 1 END) AS active,
@@ -293,57 +251,35 @@ class SqliteStorage implements Storage {
           COUNT(CASE WHEN status = 'cancelled' THEN 1 END) AS cancelled
         FROM walq_jobs
         WHERE queue = @queue
-      `,
-    )
+      `)
     this.listStatements = {
-      pending: prepare(
-        db,
-        `SELECT ${snapshotMetadata} FROM walq_jobs
+      pending: db.prepare(`SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'pending'
-         ORDER BY availableAt, seq LIMIT @limit`,
-      ),
-      active: prepare(
-        db,
-        `SELECT ${snapshotMetadata} FROM walq_jobs
+         ORDER BY availableAt, seq LIMIT @limit`),
+      active: db.prepare(`SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'active'
-         ORDER BY expiresAt, id COLLATE BINARY LIMIT @limit`,
-      ),
-      completed: prepare(
-        db,
-        `SELECT ${snapshotMetadata} FROM walq_jobs
+         ORDER BY expiresAt, id COLLATE BINARY LIMIT @limit`),
+      completed: db.prepare(`SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'completed'
-         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
-      ),
-      failed: prepare(
-        db,
-        `SELECT ${snapshotMetadata} FROM walq_jobs
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`),
+      failed: db.prepare(`SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'failed'
-         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
-      ),
-      cancelled: prepare(
-        db,
-        `SELECT ${snapshotMetadata} FROM walq_jobs
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`),
+      cancelled: db.prepare(`SELECT ${snapshotMetadata} FROM walq_jobs
          WHERE queue = @queue AND status = 'cancelled'
-         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`,
-      ),
+         ORDER BY finishedAt DESC, id COLLATE BINARY DESC LIMIT @limit`),
     }
-    this.retryStatement = prepare(
-      db,
-      `
+    this.retryStatement = db.prepare(`
         UPDATE walq_jobs SET status = 'pending',
           availableAt = @now,
           attempts = CASE WHEN attemptsMade >= attempts THEN attemptsMade + 1 ELSE attempts END,
           finishedAt = NULL
         WHERE queue = @queue AND id = @id AND status = 'failed'
           AND (attemptsMade < attempts OR attemptsMade < @maxSafeInteger)
-      `,
-    )
-    this.retryOverflowStatement = prepare(
-      db,
-      `SELECT 1 AS overflow FROM walq_jobs
+      `)
+    this.retryOverflowStatement = db.prepare(`SELECT 1 AS overflow FROM walq_jobs
        WHERE queue = @queue AND id = @id AND status = 'failed'
-         AND attemptsMade >= attempts AND attemptsMade >= @maxSafeInteger`,
-    )
+         AND attemptsMade >= attempts AND attemptsMade >= @maxSafeInteger`)
     this.retryTransaction = db.transaction((validated: InspectInput, now: number) => {
       const changes = this.retryStatement.run({
         ...validated,
@@ -360,78 +296,52 @@ class SqliteStorage implements Storage {
         throw new RangeError('attempts would exceed the safe integer range')
       return false
     })
-    this.cancelStatement = prepare(
-      db,
-      `UPDATE walq_jobs SET status = 'cancelled', finishedAt = @now
-       WHERE queue = @queue AND id = @id AND status = 'pending'`,
-    )
-    this.rescheduleStatement = prepare(
-      db,
-      `UPDATE walq_jobs SET availableAt = @availableAt
-       WHERE queue = @queue AND id = @id AND status = 'pending'`,
-    )
-    this.removeStatement = prepare(
-      db,
+    this.cancelStatement = db.prepare(`UPDATE walq_jobs SET status = 'cancelled', finishedAt = @now
+       WHERE queue = @queue AND id = @id AND status = 'pending'`)
+    this.rescheduleStatement = db.prepare(`UPDATE walq_jobs SET availableAt = @availableAt
+       WHERE queue = @queue AND id = @id AND status = 'pending'`)
+    this.removeStatement = db.prepare(
       `DELETE FROM walq_jobs WHERE queue = @queue AND id = @id AND status != 'active'`,
     )
-    this.completeStatement = prepare(
-      db,
-      `
+    this.completeStatement = db.prepare(`
         UPDATE walq_jobs SET status = 'completed', finishedAt = @now, leaseToken = NULL, expiresAt = NULL
         WHERE ${liveLease}
-      `,
-    )
-    this.failStatement = prepare(
-      db,
-      `
+      `)
+    this.failStatement = db.prepare(`
         UPDATE walq_jobs SET
           status = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN 'pending' ELSE 'failed' END,
           availableAt = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN @retryAt ELSE availableAt END,
           finishedAt = CASE WHEN @retryAt IS NOT NULL AND attemptsMade < attempts THEN NULL ELSE @now END,
           error = @error, leaseToken = NULL, expiresAt = NULL
         WHERE ${liveLease}
-      `,
-    )
-    this.heartbeatStatement = prepare(
-      db,
-      `
+      `)
+    this.heartbeatStatement = db.prepare(`
         UPDATE walq_jobs SET expiresAt = max(expiresAt, @expiresAt) WHERE ${liveLease}
-      `,
-    )
+      `)
     this.claimTransaction = db.transaction((steps: ClaimStep[]): ClaimedJob[][] =>
       steps.map(({ input, expiresAt }) => this.claimStep(input, expiresAt)),
     )
     this.terminalCleanup = new TerminalCleanup(db)
-    this.findSchedule = prepare(
-      db,
-      'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND id = @id',
-    )
-    this.upsertScheduleStatement = prepare(
-      db,
-      `INSERT INTO walq_schedules (queue, id, data, every, cron, nextRunAt)
+    this.upsertScheduleStatement =
+      db.prepare(`INSERT INTO walq_schedules (queue, id, data, every, cron, nextRunAt)
        VALUES (@queue, @id, @data, @every, @cron, @nextRunAt)
        ON CONFLICT (queue, id) DO UPDATE SET
          data = excluded.data, every = excluded.every, cron = excluded.cron,
-         nextRunAt = excluded.nextRunAt`,
-    )
-    this.getScheduleStatement = prepare(
-      db,
+         nextRunAt = excluded.nextRunAt`)
+    this.getScheduleStatement = db.prepare(
       'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND id = @id',
     )
-    this.removeScheduleStatement = prepare(
-      db,
+    this.removeScheduleStatement = db.prepare(
       'DELETE FROM walq_schedules WHERE queue = @queue AND id = @id',
     )
-    this.dueSchedules = prepare(
-      db,
+    this.dueSchedules = db.prepare(
       'SELECT queue, id, data, every, cron, nextRunAt FROM walq_schedules WHERE queue = @queue AND nextRunAt <= @now ORDER BY nextRunAt, id LIMIT @limit',
     )
-    this.updateScheduleNextRunAt = prepare(
-      db,
+    this.updateScheduleNextRunAt = db.prepare(
       'UPDATE walq_schedules SET nextRunAt = @nextRunAt WHERE queue = @queue AND id = @id',
     )
     this.upsertScheduleTransaction = db.transaction((input: UpsertScheduleInput) => {
-      const current = this.findSchedule.get(input) as StoredSchedule | undefined
+      const current = this.getScheduleStatement.get(input) as StoredSchedule | undefined
       const sameRepeat =
         current !== undefined &&
         (input.every !== undefined
@@ -448,7 +358,7 @@ class SqliteStorage implements Storage {
         cron: input.cron ?? null,
         nextRunAt,
       })
-      return scheduleRow(this.findSchedule.get(input))
+      return scheduleRow(this.getScheduleStatement.get(input))
     })
     this.materializeSchedulesTransaction = db.transaction((input: MaterializeSchedulesInput) => {
       if (this.isQueuePaused.get({ queue: input.queue }) !== undefined) return 0

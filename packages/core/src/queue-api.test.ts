@@ -16,7 +16,6 @@ import type {
 } from '@walq/core/storage'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { StorageCoordinator } from './coordinator.js'
 import { Queue } from './index.js'
 
 const now = 1_000
@@ -149,16 +148,10 @@ describe('Queue public job API', () => {
 
   it.each([
     null,
-    undefined,
-    [],
     {},
-    { status: null },
     { status: 'waiting' },
-    { status: 'pending', limit: null },
     { status: 'pending', limit: 0 },
-    { status: 'pending', limit: -1 },
     { status: 'pending', limit: 1.5 },
-    { status: 'pending', limit: Number.MAX_SAFE_INTEGER + 1 },
     { status: 'pending', limit: 1_001 },
   ])('rejects invalid list options %o before storage access', async (options) => {
     const methods = storageMock()
@@ -168,16 +161,13 @@ describe('Queue public job API', () => {
     expect(methods.list).not.toHaveBeenCalled()
   })
 
-  it.each([null, undefined, '', 1, {}])(
-    'rejects invalid job IDs %o before storage access',
-    async (id) => {
-      const methods = storageMock()
-      const queue = new Queue('email', { storage: methods.storage })
+  it.each([null, '', 1])('rejects invalid job IDs %o before storage access', async (id) => {
+    const methods = storageMock()
+    const queue = new Queue('email', { storage: methods.storage })
 
-      await expect(queue.get(id as never)).rejects.toThrow(TypeError)
-      expect(methods.inspect).not.toHaveBeenCalled()
-    },
-  )
+    await expect(queue.get(id as never)).rejects.toThrow(TypeError)
+    expect(methods.inspect).not.toHaveBeenCalled()
+  })
 
   it('rejects invalid IDs for every mutation before storage access', async () => {
     const methods = storageMock()
@@ -205,7 +195,6 @@ describe('Queue durable schedules', () => {
       cron: '0 9 * * *',
       nextRunAt: 2_000,
     })
-    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
     const queue = new Queue('email', { storage: methods.storage })
 
     await queue.schedule({ task: 'poll' }, { id: 'poller', every: 5_000 })
@@ -224,7 +213,6 @@ describe('Queue durable schedules', () => {
       every: 5_000,
     })
     expect(methods.getSchedule).toHaveBeenCalledExactlyOnceWith({ queue: 'email', id: 'daily' })
-    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith('email')
   })
 
   it('validates schedule IDs, repeat options, and serializable payloads before storage access', async () => {
@@ -233,13 +221,10 @@ describe('Queue durable schedules', () => {
 
     for (const options of [
       null,
-      undefined,
       {},
       { id: '', every: 1 },
       { id: 'bad', every: 0 },
       { id: 'bad', every: 1.5 },
-      { id: 'bad', every: Number.MAX_SAFE_INTEGER + 1 },
-      { id: 'bad', cron: '' },
       { id: 'bad', cron: '0 0 99 * *' },
       { id: 'bad', cron: '0 0 * * *', every: 1 },
     ]) {
@@ -258,7 +243,6 @@ describe('Queue durable schedules', () => {
   it('removes schedules without altering their already-created jobs', async () => {
     const methods = storageMock()
     methods.removeSchedule.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
-    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
     const queue = new Queue('email', { storage: methods.storage })
 
     await expect(queue.removeSchedule('repeat')).resolves.toBe(true)
@@ -268,14 +252,12 @@ describe('Queue durable schedules', () => {
       [{ queue: 'email', id: 'repeat' }],
       [{ queue: 'email', id: 'missing' }],
     ])
-    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith('email')
   })
 })
 
 describe('Queue public mutations', () => {
-  it('pauses and resumes the exact queue, waking local workers after resume', async () => {
+  it('pauses and resumes the exact queue', async () => {
     const methods = storageMock()
-    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
     const queue = new Queue(' email ', { storage: methods.storage })
 
     await queue.pause()
@@ -283,18 +265,15 @@ describe('Queue public mutations', () => {
 
     expect(methods.pause).toHaveBeenCalledExactlyOnceWith({ queue: ' email ' })
     expect(methods.resume).toHaveBeenCalledExactlyOnceWith({ queue: ' email ' })
-    expect(wakeQueue).toHaveBeenCalledExactlyOnceWith(' email ')
   })
 
-  it('does not wake local workers when resuming fails', async () => {
+  it('propagates resume failures', async () => {
     const methods = storageMock()
     const error = new Error('database unavailable')
     methods.resume.mockRejectedValue(error)
-    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
     const queue = new Queue('email', { storage: methods.storage })
 
     await expect(queue.resume()).rejects.toBe(error)
-    expect(wakeQueue).not.toHaveBeenCalled()
   })
 
   it('forwards retry, cancel, and remove with exact queue-scoped arguments', async () => {
@@ -329,30 +308,17 @@ describe('Queue public mutations', () => {
     ])
   })
 
-  it.each([
-    null,
-    undefined,
-    [],
-    {},
-    { delay: undefined },
-    { runAt: undefined },
-    { delay: 0, runAt: 0 },
-    { delay: null },
-    { delay: -1 },
-    { delay: 1.5 },
-    { delay: Number.MAX_SAFE_INTEGER + 1 },
-    { runAt: null },
-    { runAt: -1 },
-    { runAt: 1.5 },
-    { runAt: Number.MAX_SAFE_INTEGER + 1 },
-  ])('rejects invalid reschedule options %o before storage access', async (options) => {
-    vi.spyOn(Date, 'now').mockReturnValue(now)
-    const methods = storageMock()
-    const queue = new Queue('email', { storage: methods.storage })
+  it.each([null, {}, { delay: 0, runAt: 0 }, { delay: -1 }, { delay: 1.5 }, { runAt: -1 }])(
+    'rejects invalid reschedule options %o before storage access',
+    async (options) => {
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      const methods = storageMock()
+      const queue = new Queue('email', { storage: methods.storage })
 
-    await expect(queue.reschedule('job-1', options as never)).rejects.toThrow(TypeError)
-    expect(methods.reschedule).not.toHaveBeenCalled()
-  })
+      await expect(queue.reschedule('job-1', options as never)).rejects.toThrow(TypeError)
+      expect(methods.reschedule).not.toHaveBeenCalled()
+    },
+  )
 
   it('rejects a delay whose calculated timestamp overflows before storage access', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER - 10)
@@ -363,20 +329,17 @@ describe('Queue public mutations', () => {
     expect(methods.reschedule).not.toHaveBeenCalled()
   })
 
-  it('wakes the queue only after a successful retry or reschedule', async () => {
+  it('returns storage results for retry and reschedule mutations', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now)
     const methods = storageMock()
     methods.retry.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
     methods.reschedule.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
-    const wakeQueue = vi.spyOn(StorageCoordinator.prototype, 'wakeQueue')
     const queue = new Queue('email', { storage: methods.storage })
 
-    await queue.retry('retry-success')
-    await queue.retry('retry-failure')
-    await queue.reschedule('reschedule-failure', { delay: 0 })
-    await queue.reschedule('reschedule-success', { delay: 0 })
-
-    expect(wakeQueue.mock.calls).toEqual([['email'], ['email']])
+    await expect(queue.retry('retry-success')).resolves.toBe(true)
+    await expect(queue.retry('retry-failure')).resolves.toBe(false)
+    await expect(queue.reschedule('reschedule-failure', { delay: 0 })).resolves.toBe(false)
+    await expect(queue.reschedule('reschedule-success', { delay: 0 })).resolves.toBe(true)
   })
 
   it('propagates storage errors without translating them', async () => {

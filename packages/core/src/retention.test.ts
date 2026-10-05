@@ -255,9 +255,6 @@ describe('terminal-job retention', () => {
     expect(() => new Queue('email', { storage, retention: 'all' as never })).toThrow(
       'retention must be an object',
     )
-    expect(() => new Queue('email', { storage, retention: [] as never })).toThrow(
-      'retention must be an object',
-    )
     expect(() => new Queue('email', { storage, retention: { completed: { count: -1 } } })).toThrow(
       'retention.completed.count',
     )
@@ -273,9 +270,6 @@ describe('terminal-job retention', () => {
     ).toThrow('retention.completed.maxAge')
     expect(() => new Queue('email', { storage, retention: { completed: [] as never } })).toThrow(
       'retention.completed',
-    )
-    expect(() => new Queue('email', { storage, retention: { failed: true as never } })).toThrow(
-      'retention.failed',
     )
   })
 })

@@ -50,8 +50,9 @@ describe('node:sqlite driver', () => {
 
     expect(db.isTransaction).toBe(false)
     expect((await storage.count({ queue: input.queue })).pending).toBe(0)
-    expect(db.prepare('SELECT * FROM walq_groups').all()).toEqual([])
-    await expect(storage.enqueue(input)).resolves.toMatchObject({ queue: input.queue })
+    await expect(
+      storage.enqueue({ ...input, group: { id: 'shared', concurrency: 2 } }),
+    ).resolves.toMatchObject({ queue: input.queue })
   })
 
   it('rejects caller transactions without committing or rolling them back', async () => {
